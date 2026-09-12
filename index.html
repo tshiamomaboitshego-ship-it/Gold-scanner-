@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0b0f14" />
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+  <title>Gold Scanner V1</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background:#0b0f14; color:#eef2f7; }
+    .wrap { max-width:720px; margin:auto; padding:18px 14px 40px; }
+    h1 { margin:4px 0 4px; font-size:1.55rem; }
+    .sub { color:#9aa6b2; margin-bottom:16px; }
+    .card { background:#121923; border:1px solid #233044; border-radius:16px; padding:14px; margin:12px 0; }
+    .grid { display:grid; grid-template-columns:1fr; gap:10px; }
+    .upload { border:1px dashed #3a4d66; border-radius:14px; padding:12px; }
+    .upload label { display:flex; justify-content:space-between; align-items:center; gap:10px; font-weight:700; }
+    .upload input { margin-top:10px; width:100%; }
+    .preview { margin-top:10px; width:100%; max-height:260px; object-fit:contain; border-radius:10px; display:none; background:#080b0f; }
+    button { width:100%; border:0; border-radius:14px; padding:14px; font-weight:800; font-size:1rem; cursor:pointer; }
+    #analyze { background:#f2b84b; color:#17120a; }
+    #analyze:disabled { opacity:.55; cursor:not-allowed; }
+    .status { display:inline-flex; padding:6px 10px; border-radius:999px; font-weight:800; font-size:.85rem; background:#2a3340; }
+    .result h2 { margin:4px 0 12px; font-size:1.6rem; }
+    .BUY { color:#56d98b; } .SELL { color:#ff7373; } .WAIT { color:#f2c96d; }
+    .metrics { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+    .metric { background:#0c121a; border:1px solid #243143; border-radius:12px; padding:10px; }
+    .metric b { display:block; color:#93a4b7; font-size:.78rem; margin-bottom:4px; }
+    .reason { background:#0c121a; border-radius:12px; padding:11px; margin-top:10px; }
+    .tiny { color:#8190a1; font-size:.8rem; line-height:1.35; }
+    .error { color:#ff8d8d; white-space:pre-wrap; }
+    .hidden { display:none; }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <h1>Gold Scanner V1</h1>
+    <div class="sub">Upload XAUUSD screenshots. H1 = trend, M15 = structure, M5 = entry confirmation.</div>
+
+    <section class="card">
+      <div class="grid">
+        <div class="upload"><label>H1 chart <span>1 hour</span></label><input id="h1" type="file" accept="image/*"><img id="h1p" class="preview"></div>
+        <div class="upload"><label>M15 chart <span>15 min</span></label><input id="m15" type="file" accept="image/*"><img id="m15p" class="preview"></div>
+        <div class="upload"><label>M5 chart <span>5 min</span></label><input id="m5" type="file" accept="image/*"><img id="m5p" class="preview"></div>
+      </div>
+    </section>
+
+    <button id="analyze">Analyze Gold setup</button>
+
+    <section id="loading" class="card hidden"><span class="status">Analyzing…</span><p class="tiny">Checking trend, market structure, key zones and entry confirmation.</p></section>
+    <section id="error" class="card hidden error"></section>
+
+    <section id="result" class="card result hidden">
+      <div class="status" id="pair">XAUUSD</div>
+      <h2 id="signal">WAIT</h2>
+      <div class="metrics">
+        <div class="metric"><b>Confidence score</b><span id="confidence">—</span></div>
+        <div class="metric"><b>Trend</b><span id="trend">—</span></div>
+        <div class="metric"><b>Entry zone</b><span id="entry">—</span></div>
+        <div class="metric"><b>Stop loss</b><span id="sl">—</span></div>
+        <div class="metric"><b>TP1</b><span id="tp1">—</span></div>
+        <div class="metric"><b>TP2</b><span id="tp2">—</span></div>
+        <div class="metric"><b>Risk / reward</b><span id="rr">—</span></div>
+        <div class="metric"><b>Market state</b><span id="state">—</span></div>
+      </div>
+      <div class="reason"><b>Why</b><div id="why" style="margin-top:6px"></div></div>
+      <p class="tiny">This is a chart-analysis aid, not a guarantee of profit. Verify prices and risk before trading.</p>
+    </section>
+  </main>
+
+<script>
+const ids = ["h1","m15","m5"];
+for (const id of ids) {
+  document.getElementById(id).addEventListener("change", (e) => {
+    const f = e.target.files[0], img = document.getElementById(id+"p");
+    if (!f) { img.style.display="none"; return; }
+    img.src = URL.createObjectURL(f); img.style.display="block";
+  });
+}
+function fileToDataURL(file) {
+  return new Promise((resolve,reject) => {
+    const r=new FileReader(); r.onload=()=>resolve(r.result); r.onerror=reject; r.readAsDataURL(file);
+  });
+}
+document.getElementById("analyze").addEventListener("click", async () => {
+  const files = Object.fromEntries(ids.map(id => [id, document.getElementById(id).files[0]]));
+  const err = document.getElementById("error"), res=document.getElementById("result"), loading=document.getElementById("loading");
+  err.classList.add("hidden"); res.classList.add("hidden");
+  if (!files.h1 || !files.m15 || !files.m5) {
+    err.textContent="Please upload all three screenshots: H1, M15 and M5.";
+    err.classList.remove("hidden"); return;
+  }
+  try {
+    loading.classList.remove("hidden");
+    document.getElementById("analyze").disabled=true;
+    const payload = {
+      h1: await fileToDataURL(files.h1),
+      m15: await fileToDataURL(files.m15),
+      m5: await fileToDataURL(files.m5)
+    };
+    const r = await fetch("/api/analyze", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(payload)});
+    if (!r.ok) throw new Error(await r.text());
+    const d = await r.json();
+    document.getElementById("signal").textContent=d.signal;
+    document.getElementById("signal").className=d.signal;
+    document.getElementById("confidence").textContent=d.confidence_score + "/100";
+    document.getElementById("trend").textContent=d.trend;
+    document.getElementById("entry").textContent=d.entry_zone || "No entry";
+    document.getElementById("sl").textContent=d.stop_loss || "—";
+    document.getElementById("tp1").textContent=d.tp1 || "—";
+    document.getElementById("tp2").textContent=d.tp2 || "—";
+    document.getElementById("rr").textContent=d.risk_reward || "—";
+    document.getElementById("state").textContent=d.market_state || "—";
+    document.getElementById("why").textContent=(d.reasons || []).join(" • ");
+    res.classList.remove("hidden");
+  } catch(e) {
+    err.textContent="Analysis failed:\n"+e.message;
+    err.classList.remove("hidden");
+  } finally {
+    loading.classList.add("hidden"); document.getElementById("analyze").disabled=false;
+  }
+});
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js");
+</script>
+</body>
+</html>
