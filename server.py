@@ -89,7 +89,7 @@ def analyze():
         ]
 
         response = client.models.generate_content(
-            model=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"),
+            model=os.environ.get("GEMINI_MODEL", "gemini-3.6-flash"),
             contents=contents,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
