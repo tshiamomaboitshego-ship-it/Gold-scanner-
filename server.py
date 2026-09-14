@@ -6,7 +6,7 @@ from google.genai import types
 app = Flask(__name__, static_folder=".", static_url_path="")
 
 FINAL_PROMPT = """
-You are Gold Scanner V6.6, an XAUUSD CONFIRMED-ENTRY assistant.
+You are Gold Scanner V6.6.1, an XAUUSD CONFIRMED-ENTRY assistant.
 
 Images arrive in this order: H1, M15, CURRENT M5.
 
@@ -184,6 +184,29 @@ def hard_validate_result(result):
     result["validation_note"]=" · ".join(dict.fromkeys(notes)) if notes else ""
     return result
 
+
+def ensure_visible_result(result):
+    if not isinstance(result, dict):
+        return {
+            "signal":"NO CONFIRMED ENTRY",
+            "higher_timeframe_bias":"MIXED",
+            "m5_momentum":"MIXED",
+            "m5_state":"mixed",
+            "current_price":None,
+            "reason":"Scanner received an incomplete AI response.",
+            "confirmed_entry":{"zone":None,"confirmation":None,"y_top":None,"y_bottom":None},
+            "watch1":{"label":"WATCH 1","zone":None,"trigger":None,"y_top":None,"y_bottom":None},
+            "watch2":{"label":"WATCH 2","zone":None,"trigger":None,"y_top":None,"y_bottom":None},
+            "watch3":{"label":"WATCH 3","zone":None,"trigger":None,"y_top":None,"y_bottom":None},
+            "tp1":None,"tp1_y":None,"tp2":None,"tp2_y":None,"tp3":None,"tp3_y":None,
+            "validation_note":"Incomplete AI response normalized by server"
+        }
+    if not result.get("signal"):
+        result["signal"] = "NO CONFIRMED ENTRY"
+    if "reason" not in result or not result.get("reason"):
+        result["reason"] = "No confirmed entry is available right now."
+    return result
+
 @app.get("/")
 def home():
     return send_from_directory(".", "index.html")
@@ -211,7 +234,7 @@ def scan():
             image_part(d["m5"]),
         ])
         result = hard_validate_result(result)
-        return jsonify(result)
+        return jsonify(ensure_visible_result(result))
     except Exception as e:
         text = str(e)
         # Return a compact structured error so the app can distinguish a daily quota.

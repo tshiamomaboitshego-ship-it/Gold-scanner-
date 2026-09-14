@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="theme-color" content="#07111d">
-<title>Gold Scanner V6.6</title>
+<title>Gold Scanner V6.6.1</title>
 <link rel="manifest" href="/manifest.json">
 <style>
 *{box-sizing:border-box}
@@ -37,8 +37,8 @@ input[type=file]{padding:10px;background:#07101a;border:1px dashed #36516d;borde
 </head>
 <body>
 <div class="wrap">
-  <h1>Gold Scanner V6.6</h1>
-  <div class="sub">Confirmed Entry Mode · M5 decides the entry</div>
+  <h1>Gold Scanner V6.6.1</h1>
+  <div class="sub">Confirmed Entry Mode · quota-safe scan flow</div>
 
   <div id="error" class="card warn hide"></div>
   <div id="status" class="card ok">
@@ -214,6 +214,128 @@ $('scan').onclick=async()=>{
   }
 };
 if('serviceWorker'in navigator)navigator.serviceWorker.register('/sw.js').catch(()=>{});
+
+let scanBusy = false;
+
+function setScanStatus(msg, kind='info'){
+  const el = $('scanStatus');
+  if(!el) return;
+  el.style.display = 'block';
+  el.textContent = msg;
+  el.style.background =
+    kind==='error' ? '#3f1515' :
+    kind==='success' ? '#123524' :
+    kind==='warn' ? '#3a2f10' : '#111827';
+}
+
+function clearScanStatus(){
+  const el = $('scanStatus');
+  if(el){ el.style.display='none'; el.textContent=''; }
+}
+
+function setScanButtonBusy(busy){
+  const btn = $('scanBtn');
+  if(!btn) return;
+  btn.disabled = busy;
+  btn.style.opacity = busy ? '.65' : '1';
+  btn.style.pointerEvents = busy ? 'none' : 'auto';
+  btn.textContent = busy ? 'Checking…' : '⚡ Check Confirmed Entry';
+}
+
+async function safeJson(res){
+  const txt = await res.text();
+  try { return JSON.parse(txt); }
+  catch(e){ throw new Error('Server returned an unreadable response. No extra scan was sent.'); }
+}
+
+$('scanBtn').addEventListener('click', async ()=>{
+  if(scanBusy) return; // hard one-tap lock
+  scanBusy = true;
+  setScanButtonBusy(true);
+  clearScanStatus();
+
+  try{
+    // Require all 3 screenshots before any network request.
+    const h1 = localStorage.getItem('v66_h1');
+    const m15 = localStorage.getItem('v66_m15');
+    const m5 = window.currentM5Data || localStorage.getItem('v66_m5_current');
+
+    if(!h1 || !m15 || !m5){
+      setScanStatus('Add fresh H1, M15 and M5 screenshots first. No AI scan was used.', 'warn');
+      return;
+    }
+
+    // Same-M5 cache check BEFORE network request.
+    const m5hash = await hashText(m5);
+    const cacheKey = 'v661_result_' + m5hash;
+    const cached = localStorage.getItem(cacheKey);
+    if(cached){
+      const d = JSON.parse(cached);
+      render(d);
+      setScanStatus('Loaded the saved result for this exact M5 screenshot. No new AI scan used.', 'success');
+      return;
+    }
+
+    setScanStatus('Checking the current M5 confirmation… one AI request maximum.', 'info');
+
+    const res = await fetch('/api/scan', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({h1, m15, m5})
+    });
+
+    const d = await safeJson(res);
+
+    if(!res.ok){
+      const msg = d && (d.error || d.message) ? (d.error || d.message) : ('Scan failed ('+res.status+').');
+      throw new Error(msg);
+    }
+
+    // Cache BEFORE rendering so UI/drawing errors cannot waste the successful result.
+    localStorage.setItem(cacheKey, JSON.stringify(d));
+
+    try{
+      render(d);
+    }catch(renderErr){
+      console.error(renderErr);
+      // Always show core textual result even if overlay rendering breaks.
+      $('result').classList.remove('hide');
+      $('signal').textContent = d.signal || 'NO CONFIRMED ENTRY';
+      $('reason').textContent = d.reason || 'Result received, but visual overlay could not be drawn.';
+    }
+
+    setScanStatus(
+      (d.signal || 'NO CONFIRMED ENTRY') + ' — result saved. Rechecking this exact M5 will use the saved result.',
+      'success'
+    );
+
+  }catch(err){
+    console.error(err);
+    const msg = String(err && err.message ? err.message : err);
+    if(msg.includes('429') || msg.toLowerCase().includes('quota')){
+      setScanStatus('Gemini quota/rate limit reached. No automatic retry was made.', 'error');
+    }else{
+      setScanStatus('SCAN ERROR: ' + msg, 'error');
+    }
+  }finally{
+    scanBusy = false;
+    setScanButtonBusy(false);
+  }
+});
+
+
+
+// Fallback: keep the current M5 preview data locally when available.
+setInterval(()=>{
+  try{
+    const img = document.querySelector('#m5Preview img, #m5Img, img[data-role="m5"]');
+    if(img && img.src && img.src.startsWith('data:image/')){
+      window.currentM5Data = img.src;
+      localStorage.setItem('v66_m5_current', img.src);
+    }
+  }catch(e){}
+},1500);
+
 </script>
 </body>
 </html>

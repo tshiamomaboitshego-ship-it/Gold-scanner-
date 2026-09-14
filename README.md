@@ -1,35 +1,25 @@
-# Gold Scanner V6.6 — Confirmed Entry Mode
+# Gold Scanner V6.6.1 — Quota-safe confirmed entry fix
 
-Main change:
-Potential future areas are no longer called entries.
+This fixes the V6.6 issue where a scan could finish loading without showing a result.
 
-The scanner now returns:
-- ENTRY READY BUY
-- ENTRY READY SELL
-- NO CONFIRMED ENTRY
-- REFRESH H1/M15
+Main protections:
+- hard one-tap lock: repeated taps cannot send another request while a scan is running
+- same M5 screenshot is checked against local cache BEFORE any AI request
+- a successful AI result is saved BEFORE UI/overlay rendering
+- if the overlay fails, the text result still appears
+- every scan ends in a visible state:
+  - ENTRY READY BUY
+  - ENTRY READY SELL
+  - NO CONFIRMED ENTRY
+  - REFRESH H1/M15
+  - or a clear SCAN ERROR
+- no automatic retries after quota/rate-limit errors
+- missing H1/M15/M5 is caught locally and uses zero AI requests
+- service-worker cache version bumped so the phone receives the fixed frontend
 
-H1/M15 provide context. M5 controls the actual entry.
+Deploy:
+1. Replace `server.py`, `index.html`, and `sw.js` in GitHub.
+2. Redeploy latest commit on Render.
+3. On the phone, reload the page. If the old UI remains, close the installed PWA/tab and reopen it once.
 
-If no current M5 confirmation exists:
-- scanner says NO CONFIRMED ENTRY
-- possible future areas are labeled WATCH, not ENTRY
-- TP levels are hidden because there is no actionable trade yet
-
-If M5 confirms:
-- ONE precise CONFIRMED ENTRY is shown
-- TP1/TP2/TP3 are shown only if valid
-- hard server validation blocks opposite-M5 READY signals and invalid targets
-
-Still:
-- up to 3 WATCH areas
-- one Gemini request per fresh M5
-- same M5 screenshot cache
-- H1/M15 freshness checks
-
-Replace in GitHub/Render:
-server.py
-index.html
-sw.js
-
-Then redeploy.
+Use one fresh M5 screenshot for the first test.
