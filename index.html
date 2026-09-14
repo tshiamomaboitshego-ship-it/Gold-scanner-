@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="theme-color" content="#07111d">
-<title>Gold Scanner V6.5</title>
+<title>Gold Scanner V6.6</title>
 <link rel="manifest" href="/manifest.json">
 <style>
 *{box-sizing:border-box}
@@ -37,8 +37,8 @@ input[type=file]{padding:10px;background:#07101a;border:1px dashed #36516d;borde
 </head>
 <body>
 <div class="wrap">
-  <h1>Gold Scanner V6.5</h1>
-  <div class="sub">Momentum-aware map · hard validation</div>
+  <h1>Gold Scanner V6.6</h1>
+  <div class="sub">Confirmed Entry Mode · M5 decides the entry</div>
 
   <div id="error" class="card warn hide"></div>
   <div id="status" class="card ok">
@@ -59,7 +59,7 @@ input[type=file]{padding:10px;background:#07101a;border:1px dashed #36516d;borde
     <h2>2 · Fresh M5</h2>
     <div class="small">One scan looks for several good entry paths, so missing Entry 1 does not automatically mean another scan.</div>
     <input id="m5" type="file" accept="image/*">
-    <button id="scan">⚡ Map Entry Zones</button>
+    <button id="scan">⚡ Check Confirmed Entry</button>
 
     <div id="chart" class="chartWrap hide">
       <img id="preview" alt="M5 chart">
@@ -119,13 +119,46 @@ function drawTP(n,price,y){
   const yy=clamp(y);l.style.top=(yy*100)+'%';lab.style.top=(yy*100)+'%';lab.textContent='TP'+n+' · '+price;l.classList.remove('hide');lab.classList.remove('hide')
 }
 function render(d){
-  $('signal').textContent=d.signal||'WAIT';$('signal').className='sig '+sigClass(d.signal);
-  $('trend').textContent=d.trend||'—';$('type').textContent='Entry map';
-  for(let n=1;n<=3;n++){const e=d['entry'+n];$('zone'+n).textContent=e&&e.zone?e.zone:'—';$('st'+n).textContent=e&&e.status?' · '+e.status:'';$('meta'+n).textContent=e?['Type: '+(e.type||'—'),'Confirm: '+(e.confirmation||'—'),'Action: '+(e.action||'—')].join(' · '):'';}
-  const a=[];if(d.tp1!=null)a.push('TP1: '+d.tp1);if(d.tp2!=null)a.push('TP2: '+d.tp2);if(d.tp3!=null)a.push('TP3: '+d.tp3);$('tps').textContent=a.length?a.join(' · '):'—';
-  $('trigger').textContent='See each entry confirmation';$('reason').textContent=d.reason||'—';$('action').textContent='Watch the marked entry zones';$('result').classList.remove('hide');
-  drawEntry(1,d.entry1);drawEntry(2,d.entry2);drawEntry(3,d.entry3);drawTP(1,d.tp1,d.tp1_y);drawTP(2,d.tp2,d.tp2_y);drawTP(3,d.tp3,d.tp3_y);
-  if((d.signal||'').includes('REFRESH')){['v62_h1','v62_m15','v62_ht','v62_mt'].forEach(k=>localStorage.removeItem(k));refreshAge()}
+ const s=d.signal||'NO CONFIRMED ENTRY';
+ $('signal').textContent=s;
+ $('signal').className='sig '+(s.includes('BUY')?'buy':s.includes('SELL')?'sell':s.includes('REFRESH')?'refresh':'wait');
+ $('htfBias').textContent=d.higher_timeframe_bias||'—';
+ $('htfReason').textContent='';
+ $('m5Momentum').textContent=d.m5_momentum||'—';
+ $('m5State').textContent=d.m5_state||'';
+ $('trend').textContent=d.higher_timeframe_bias||'—';
+ $('reason').textContent=d.reason||'—';
+ const vn=$('validationNote'); if(d.validation_note){vn.textContent='Validation: '+d.validation_note;vn.classList.remove('hide')}else vn.classList.add('hide');
+
+ const ce=d.confirmed_entry||{};
+ if(s.startsWith('ENTRY READY') && ce.zone){
+   $('confirmedCard').classList.remove('hide'); $('confirmedZone').textContent=ce.zone;
+   $('confirmedWhy').textContent='M5 confirmation: '+(ce.confirmation||'confirmed');
+ } else $('confirmedCard').classList.add('hide');
+
+ function watch(n,w){
+   const card=$('entry'+n+'Card');
+   if(!w||!w.zone){card.classList.add('hide');drawEntry(n,null);return}
+   card.classList.remove('hide');
+   $('entry'+n+'Zone').textContent=w.zone;
+   const st=$('entry'+n+'Status');st.textContent='WATCH';st.className='status watch';
+   $('entry'+n+'Meta').textContent='Trigger: '+(w.trigger||'Wait for M5 confirmation');
+   drawEntry(n,{zone:w.zone,y_top:w.y_top,y_bottom:w.y_bottom});
+   const lab=$('e'+n+'L'); if(!lab.classList.contains('hide')) lab.textContent='WATCH '+n+' · '+w.zone;
+ }
+ watch(1,d.watch1);watch(2,d.watch2);watch(3,d.watch3);
+
+ const a=[];if(d.tp1!=null)a.push('TP1: '+d.tp1);if(d.tp2!=null)a.push('TP2: '+d.tp2);if(d.tp3!=null)a.push('TP3: '+d.tp3);
+ $('tps').textContent=a.length?a.join(' · '):'Only shown with confirmed entry';
+ $('result').classList.remove('hide');
+
+ // Draw the confirmed entry prominently using Entry 1 visual slot only when READY.
+ if(s.startsWith('ENTRY READY') && ce.zone && ce.y_top!=null && ce.y_bottom!=null){
+   drawEntry(1,{zone:ce.zone,y_top:ce.y_top,y_bottom:ce.y_bottom});
+   $('e1L').textContent='ENTRY READY · '+ce.zone;
+ }
+ drawTP(1,d.tp1,d.tp1_y);drawTP(2,d.tp2,d.tp2_y);drawTP(3,d.tp3,d.tp3_y);
+ if(s.includes('REFRESH')){['v66_h1','v66_m15','v66_ht','v66_mt'].forEach(k=>localStorage.removeItem(k));refreshAge()}
 }
 async function hashText(s){
   const b=new TextEncoder().encode(s),h=await crypto.subtle.digest('SHA-256',b);
@@ -160,7 +193,7 @@ $('scan').onclick=async()=>{
     try{render(JSON.parse(cached));showError('Same M5 image detected — showing saved result. No Gemini request used.');return}catch(e){}
   }
 
-  $('scan').disabled=true;$('scan').textContent='Mapping entries...';
+  $('scan').disabled=true;$('scan').textContent='Checking confirmation...';
   try{
     const r=await fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({h1,m15,m5})});
     const d=await r.json();
@@ -177,7 +210,7 @@ $('scan').onclick=async()=>{
     else if(e.message==='TEMP_QUOTA')showError('Gemini is temporarily rate-limited. Wait a little, then try again.');
     else showError('Scan failed. Please try again.');
   }finally{
-    $('scan').disabled=false;$('scan').textContent='⚡ Map Entry Zones';
+    $('scan').disabled=false;$('scan').textContent='⚡ Check Confirmed Entry';
   }
 };
 if('serviceWorker'in navigator)navigator.serviceWorker.register('/sw.js').catch(()=>{});

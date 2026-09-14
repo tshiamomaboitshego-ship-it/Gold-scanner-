@@ -6,114 +6,87 @@ from google.genai import types
 app = Flask(__name__, static_folder=".", static_url_path="")
 
 FINAL_PROMPT = """
-You are Gold Scanner V6.5, an XAUUSD ENTRY-MAP assistant.
+You are Gold Scanner V6.6, an XAUUSD CONFIRMED-ENTRY assistant.
 
-Images are supplied in this order:
-1) H1
-2) M15
-3) CURRENT M5
+Images arrive in this order: H1, M15, CURRENT M5.
 
-Your job:
-- Determine higher-timeframe bias from H1 + M15.
-- Determine CURRENT M5 momentum separately.
-- Map up to THREE GOOD ENTRY OPPORTUNITIES on the current M5 chart.
-- Give TP1/TP2/TP3 only when they make sense.
-- Keep explanations short and focused on entry timing.
+PRIMARY GOAL:
+Do NOT present possible future price areas as actual entries.
+Your most important question is:
+"Is there a sufficiently confirmed M5 entry RIGHT NOW?"
 
-CORE LOGIC:
-1. H1 + M15 = higher-timeframe bias.
-2. M5 = current momentum + entry timing.
-3. NEVER confuse bullish M5 pullback with bullish higher-timeframe bias.
-4. If M5 is moving strongly against the higher-timeframe bias, do NOT mark an entry READY.
-5. In that case say the M5 is a pullback/counter-move and wait for confirmation.
-6. Only mark READY when M5 confirms the higher-timeframe direction.
-7. If M5 structure strongly invalidates the higher-timeframe setup, return REFRESH H1/M15.
-8. Do not blindly force BUY or SELL because H1/M15 say so.
+TIMEFRAME ROLES:
+- H1 + M15 establish higher-timeframe bias/context.
+- M5 controls actual entry timing.
+- A higher-timeframe bias alone is NEVER enough to create ENTRY READY.
 
-ENTRY RULES:
-- Return up to 3 distinct opportunities.
-- entry1 = best/preferred.
-- entry2 = second valid.
-- entry3 = alternative/continuation if useful.
-- Do NOT invent zones just to fill 3.
-- Good types include pullback/retest, deeper pullback, breakout-retest, continuation, rejection.
-- Each entry must include zone, type, status, confirmation, action, y_top, y_bottom.
-- Status must be WATCH, WAIT CONFIRMATION, READY, MISSED, or null.
-- If M5 is still moving strongly opposite to the intended trade, status cannot be READY.
-- If entry is already passed and no longer usable, mark MISSED.
-- Never give time-based instructions. Use price/action triggers only.
+OUTPUT STATES:
+1) ENTRY READY BUY
+2) ENTRY READY SELL
+3) NO CONFIRMED ENTRY
+4) REFRESH H1/M15
 
-TP VALIDATION RULES:
-- TP1/TP2/TP3 must be structure-based.
-- For BUY: TP1 must be ABOVE every active entry it belongs to; TP2 > TP1; TP3 > TP2.
-- For SELL: TP1 must be BELOW every active entry it belongs to; TP2 < TP1; TP3 < TP2.
-- NEVER allow TP1 to overlap, sit inside, or sit on the wrong side of an active entry zone.
-- If an entry has no sensible room to TP1, DO NOT return that entry.
-- Do not invent entries or TPs just to fill all 3 slots.
-- No stop loss. User manages SL and risk.
+CONFIRMED ENTRY REQUIREMENTS:
+- The trade direction must make sense with H1/M15 context.
+- Current M5 must show actual confirmation, not merely approach a possible zone.
+- Confirmation can include a clear rejection + close, break/retest + hold,
+  momentum shift with structure confirmation, or another visibly strong M5 trigger.
+- Do not mark READY while M5 is strongly moving against the intended direction.
+- Do not predict that confirmation will happen.
+- If confirmation is absent or ambiguous, return NO CONFIRMED ENTRY.
+- Be selective. Fewer signals are preferred to weak signals.
+- Never claim certainty, guaranteed profit, or a win probability.
 
-VISUAL RULES:
-- y values normalized 0.0 to 1.0 from TOP of current M5 screenshot.
-- Entry y_top/y_bottom should tightly hug the actual price zone.
-- Avoid oversized visual bands.
-- TP uses single y coordinate.
-- Coordinates are approximate.
-- If unreliable, use null.
+WATCH AREAS:
+- You may return up to 3 watch areas for what could become a setup later.
+- Call them WATCH 1 / WATCH 2 / WATCH 3, NEVER ENTRY 1/2/3.
+- Watch areas are informational only and must not be presented as places to enter automatically.
+- Give a short trigger describing what M5 must do there.
+- Do not invent watch areas to fill all slots.
 
-TEXT LIMITS:
-- higher_timeframe_reason max 8 words
-- m5_reason max 8 words
-- overall reason max 10 words
-- each confirmation max 10 words
-- each action max 10 words
+WHEN ENTRY IS READY:
+- Return ONE precise confirmed_entry zone only.
+- It must be based on current M5 confirmation.
+- Return a short confirmation reason.
+- Return TP1/TP2/TP3 only when structurally valid.
+- No stop loss; user manages SL/risk.
+
+TP RULES:
+- BUY: TP1 above confirmed entry; TP2 > TP1; TP3 > TP2.
+- SELL: TP1 below confirmed entry; TP2 < TP1; TP3 < TP2.
+- Never overlap TP1 with confirmed entry.
+- Use null when a target is not justified.
+
+VISUALS:
+- All y values are normalized 0.0–1.0 from image top.
+- confirmed_entry y_top/y_bottom must tightly match the M5 price area.
+- Watch areas should also be tight.
+- Coordinates are approximate; use null if unreliable.
+
+TEXT:
+- Keep every explanation short.
+- Focus on what must happen for an actual entry.
 
 Return JSON only:
 {
-  "signal":"BUY|SELL|WAIT|REFRESH H1/M15",
+  "signal":"ENTRY READY BUY|ENTRY READY SELL|NO CONFIRMED ENTRY|REFRESH H1/M15",
   "higher_timeframe_bias":"BUY|SELL|MIXED",
   "m5_momentum":"BULLISH|BEARISH|MIXED",
   "m5_state":"aligned|bullish pullback|bearish pullback|counter-trend|mixed",
-  "trend":"Up|Down|Mixed",
   "current_price":null,
-  "higher_timeframe_reason":"short",
-  "m5_reason":"short",
-  "reason":"very short",
-  "entry1":{
-    "label":"ENTRY 1",
+  "reason":"short",
+  "confirmed_entry":{
     "zone":null,
-    "type":"pullback|deep pullback|break-retest|continuation|rejection|other",
-    "status":"WATCH|WAIT CONFIRMATION|READY|MISSED|null",
     "confirmation":null,
-    "action":null,
     "y_top":null,
     "y_bottom":null
   },
-  "entry2":{
-    "label":"ENTRY 2",
-    "zone":null,
-    "type":"pullback|deep pullback|break-retest|continuation|rejection|other",
-    "status":"WATCH|WAIT CONFIRMATION|READY|MISSED|null",
-    "confirmation":null,
-    "action":null,
-    "y_top":null,
-    "y_bottom":null
-  },
-  "entry3":{
-    "label":"ENTRY 3",
-    "zone":null,
-    "type":"pullback|deep pullback|break-retest|continuation|rejection|other",
-    "status":"WATCH|WAIT CONFIRMATION|READY|MISSED|null",
-    "confirmation":null,
-    "action":null,
-    "y_top":null,
-    "y_bottom":null
-  },
-  "tp1":null,
-  "tp1_y":null,
-  "tp2":null,
-  "tp2_y":null,
-  "tp3":null,
-  "tp3_y":null
+  "watch1":{"label":"WATCH 1","zone":null,"trigger":null,"y_top":null,"y_bottom":null},
+  "watch2":{"label":"WATCH 2","zone":null,"trigger":null,"y_top":null,"y_bottom":null},
+  "watch3":{"label":"WATCH 3","zone":null,"trigger":null,"y_top":null,"y_bottom":null},
+  "tp1":null,"tp1_y":null,
+  "tp2":null,"tp2_y":null,
+  "tp3":null,"tp3_y":null
 }
 """
 
@@ -137,143 +110,78 @@ def run_model(contents):
 
 def _num(v):
     try:
-        if v is None or isinstance(v, bool):
-            return None
+        if v is None or isinstance(v, bool): return None
         return float(v)
     except (TypeError, ValueError):
         return None
 
 def _zone_bounds(zone):
-    """Extract two numeric bounds from strings such as '4308 - 4315'."""
-    if zone is None:
-        return None
-    if isinstance(zone, (int, float)):
-        x = float(zone)
-        return (x, x)
     import re
+    if zone is None: return None
     nums = re.findall(r"-?\d+(?:\.\d+)?", str(zone).replace(",", ""))
-    if not nums:
-        return None
+    if not nums: return None
     vals = [float(x) for x in nums[:2]]
-    if len(vals) == 1:
-        return (vals[0], vals[0])
-    return (min(vals), max(vals))
-
-def _empty_entry(label):
-    return {
-        "label": label,
-        "zone": None,
-        "type": None,
-        "status": None,
-        "confirmation": None,
-        "action": None,
-        "y_top": None,
-        "y_bottom": None,
-    }
+    return (vals[0], vals[0]) if len(vals)==1 else (min(vals), max(vals))
 
 def hard_validate_result(result):
-    """
-    Server-side guardrails. These checks run AFTER Gemini responds, so bad
-    entry/TP combinations are removed even if the model ignores the prompt.
-    """
-    if not isinstance(result, dict):
-        return result
+    if not isinstance(result, dict): return result
+    notes=[]
+    signal=str(result.get("signal") or "").upper()
+    m5=str(result.get("m5_momentum") or "").upper()
+    ce=result.get("confirmed_entry")
+    if not isinstance(ce, dict):
+        ce={"zone":None,"confirmation":None,"y_top":None,"y_bottom":None}
+        result["confirmed_entry"]=ce
 
-    notes = []
-    signal = str(result.get("signal") or "").upper()
-    m5 = str(result.get("m5_momentum") or "").upper()
+    ready_buy = signal=="ENTRY READY BUY"
+    ready_sell = signal=="ENTRY READY SELL"
 
-    # 1) Enforce TP ordering.
-    tp1 = _num(result.get("tp1"))
-    tp2 = _num(result.get("tp2"))
-    tp3 = _num(result.get("tp3"))
+    # Hard timing gate: opposite M5 momentum can never be READY.
+    if (ready_sell and m5=="BULLISH") or (ready_buy and m5=="BEARISH"):
+        result["signal"]="NO CONFIRMED ENTRY"
+        ce.update({"zone":None,"confirmation":None,"y_top":None,"y_bottom":None})
+        notes.append("entry blocked because M5 is not aligned")
+        ready_buy=ready_sell=False
 
-    if signal == "BUY":
-        if tp1 is not None and tp2 is not None and tp2 <= tp1:
-            result["tp2"] = result["tp2_y"] = None
-            result["tp3"] = result["tp3_y"] = None
-            tp2 = tp3 = None
-            notes.append("invalid TP2/TP3 removed")
-        if tp2 is not None and tp3 is not None and tp3 <= tp2:
-            result["tp3"] = result["tp3_y"] = None
-            tp3 = None
-            notes.append("invalid TP3 removed")
-    elif signal == "SELL":
-        if tp1 is not None and tp2 is not None and tp2 >= tp1:
-            result["tp2"] = result["tp2_y"] = None
-            result["tp3"] = result["tp3_y"] = None
-            tp2 = tp3 = None
-            notes.append("invalid TP2/TP3 removed")
-        if tp2 is not None and tp3 is not None and tp3 >= tp2:
-            result["tp3"] = result["tp3_y"] = None
-            tp3 = None
-            notes.append("invalid TP3 removed")
+    bounds=_zone_bounds(ce.get("zone"))
+    if (ready_buy or ready_sell) and bounds is None:
+        result["signal"]="NO CONFIRMED ENTRY"
+        ce.update({"zone":None,"confirmation":None,"y_top":None,"y_bottom":None})
+        notes.append("entry removed because no precise confirmed zone")
+        ready_buy=ready_sell=False
 
-    # 2) Validate each entry against TP1.
-    # A small minimum room avoids a target effectively sitting inside the entry.
-    current = _num(result.get("current_price")) or 0.0
-    min_room = max(0.5, abs(current) * 0.0001) if current else 0.5
+    tp1=_num(result.get("tp1")); tp2=_num(result.get("tp2")); tp3=_num(result.get("tp3"))
 
-    valid_entries = []
-    removed = 0
-
-    for i in range(1, 4):
-        e = result.get(f"entry{i}")
-        if not isinstance(e, dict) or not e.get("zone"):
-            continue
-
-        bounds = _zone_bounds(e.get("zone"))
-        if bounds is None:
-            # If the zone cannot be parsed safely, keep it but do not call it READY.
-            if str(e.get("status") or "").upper() == "READY":
-                e["status"] = "WAIT CONFIRMATION"
-            valid_entries.append(e)
-            continue
-
-        low, high = bounds
-        bad = False
-
-        if tp1 is not None:
-            if signal == "BUY":
-                # TP1 must sit meaningfully above the TOP of the buy entry zone.
-                bad = tp1 <= (high + min_room)
-            elif signal == "SELL":
-                # TP1 must sit meaningfully below the BOTTOM of the sell entry zone.
-                bad = tp1 >= (low - min_room)
-
-        if bad:
-            removed += 1
-            continue
-
-        # 3) M5 timing gate: HTF bias cannot make an entry READY by itself.
-        status = str(e.get("status") or "").upper()
-        if status == "READY":
-            if (signal == "SELL" and m5 == "BULLISH") or (signal == "BUY" and m5 == "BEARISH"):
-                e["status"] = "WAIT CONFIRMATION"
-                e["action"] = "Wait for M5 to turn with bias"
-                notes.append("READY downgraded until M5 aligns")
-
-        valid_entries.append(e)
-
-    if removed:
-        notes.append(f"{removed} invalid entry zone{'s' if removed != 1 else ''} removed")
-
-    # 4) Compact remaining entries so there are no confusing gaps.
-    for i in range(1, 4):
-        if i <= len(valid_entries):
-            e = valid_entries[i - 1]
-            e["label"] = f"ENTRY {i}"
-            result[f"entry{i}"] = e
+    # If no confirmed entry, TPs are not actionable and are hidden.
+    if not (ready_buy or ready_sell):
+        for n in (1,2,3):
+            result[f"tp{n}"]=None
+            result[f"tp{n}_y"]=None
+    else:
+        low,high=bounds
+        if ready_buy and (tp1 is None or tp1 <= high):
+            result["tp1"]=result["tp1_y"]=None
+            result["tp2"]=result["tp2_y"]=None
+            result["tp3"]=result["tp3_y"]=None
+            notes.append("invalid BUY targets removed")
+        elif ready_sell and (tp1 is None or tp1 >= low):
+            result["tp1"]=result["tp1_y"]=None
+            result["tp2"]=result["tp2_y"]=None
+            result["tp3"]=result["tp3_y"]=None
+            notes.append("invalid SELL targets removed")
         else:
-            result[f"entry{i}"] = _empty_entry(f"ENTRY {i}")
+            if ready_buy:
+                if tp2 is not None and tp2 <= tp1:
+                    result["tp2"]=result["tp2_y"]=result["tp3"]=result["tp3_y"]=None
+                elif tp3 is not None and tp2 is not None and tp3 <= tp2:
+                    result["tp3"]=result["tp3_y"]=None
+            if ready_sell:
+                if tp2 is not None and tp2 >= tp1:
+                    result["tp2"]=result["tp2_y"]=result["tp3"]=result["tp3_y"]=None
+                elif tp3 is not None and tp2 is not None and tp3 >= tp2:
+                    result["tp3"]=result["tp3_y"]=None
 
-    # If all entries disappear, do not present a false actionable BUY/SELL.
-    if not valid_entries and signal in ("BUY", "SELL"):
-        result["signal"] = "WAIT"
-        result["reason"] = "No validated entry currently"
-        notes.append("signal changed to WAIT")
-
-    result["validation_note"] = " · ".join(dict.fromkeys(notes)) if notes else ""
+    result["validation_note"]=" · ".join(dict.fromkeys(notes)) if notes else ""
     return result
 
 @app.get("/")
