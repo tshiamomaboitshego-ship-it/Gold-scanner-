@@ -1,41 +1,29 @@
-# Gold Scanner V1
+# Gold Scanner V6
 
-Phone-first XAUUSD screenshot scanner.
+V6 is focused on entry timing.
 
-## What it does
-Upload three screenshots of the same Gold market context:
-- H1 = main direction
-- M15 = structure/setup
-- M5 = entry confirmation
+## Main changes
+- One entry zone only.
+- Red zone is drawn directly over the uploaded M5 screenshot.
+- Final states:
+  - WAIT FOR ZONE
+  - WAIT FOR CONFIRMATION
+  - ENTRY READY BUY
+  - ENTRY READY SELL
+  - WAIT
+  - REFRESH H1/M15
+- No TP or SL is generated.
+- H1/M15 freshness protection remains.
+- M5 rescans are price/confirmation triggered, not timer triggered.
 
-The app returns BUY / SELL / WAIT plus:
-- confidence score (chart interpretation only)
-- trend
-- market state
-- entry zone
-- stop loss
-- TP1 / TP2
-- risk/reward
-- reasons
+## Update
+Replace these files in GitHub:
+- server.py
+- index.html
+- sw.js
+- manifest.json
+- icon.svg
 
-## Why it needs hosting
-Your phone is the only device you need to USE it, but the AI image analysis runs on a cloud backend.
-Do not put an API key inside the browser code or APK.
+Then redeploy the latest commit on Render.
 
-## Run/deploy
-Required environment variable:
-OPENAI_API_KEY=...
-
-Optional:
-OPENAI_MODEL=gpt-5
-
-Install:
-pip install -r requirements.txt
-
-Run:
-python server.py
-
-Then open the hosted URL on Android. In Chrome, use "Add to Home screen" / "Install app" if offered.
-
-## APK later
-This PWA is the fastest safe V1. Once the scanner is tested, the same hosted app can be wrapped in an Android shell (for example Capacitor) and exported as an APK.
+The visual band is approximate because Gemini estimates its vertical position from the screenshot.
