@@ -17,7 +17,11 @@ Goal:
 - If structure is unclear, say WAIT.
 - If the current M5 looks materially different from previously expected direction, say REFRESH H1/M15.
 
-Do NOT provide TP or SL. The trader will manage those.
+Provide up to THREE sensible take-profit zones: TP1, TP2, TP3.
+Do NOT provide a stop loss; the trader manages SL.
+TP zones must follow visible support/resistance/structure, not arbitrary distances.
+Also estimate each TP zone's vertical position on THIS M5 screenshot using normalized 0.0-1.0 y coordinates.
+If a TP cannot be justified or located reliably, return null for that TP and its y coordinate.
 
 Return ONE zone only.
 Also estimate the vertical location of the zone on THIS screenshot so the frontend can draw a red/green band.
@@ -39,6 +43,12 @@ JSON only:
   "zone_y_top":null,
   "zone_y_bottom":null,
   "setup_type":"pullback|break-retest|rejection|structure shift|other",
+  "tp1":null,
+  "tp1_y":null,
+  "tp2":null,
+  "tp2_y":null,
+  "tp3":null,
+  "tp3_y":null,
   "trigger":"short M5 confirmation needed",
   "reason":"very short reason",
   "action":"very short next action"
@@ -55,7 +65,11 @@ Use:
 - M5 for exact timing.
 
 Your job is ENTRY TIMING.
-Do not provide TP or SL.
+Provide up to THREE sensible take-profit zones: TP1, TP2, TP3.
+Do NOT provide a stop loss; the trader manages SL.
+TPs must be based on visible H1/M15/M5 structure and ordered from nearest to furthest target.
+Estimate each TP's vertical position on the CURRENT M5 screenshot as 0.0-1.0 from image top.
+If a TP is not justified or cannot be located reliably, return null.
 Do not force the old H1/M15 bias if current M5 clearly contradicts it.
 If the higher-timeframe context may be stale or invalid, return REFRESH H1/M15.
 
@@ -91,6 +105,12 @@ JSON only:
   "zone_y_top":null,
   "zone_y_bottom":null,
   "setup_type":"pullback|break-retest|rejection|structure shift|other",
+  "tp1":null,
+  "tp1_y":null,
+  "tp2":null,
+  "tp2_y":null,
+  "tp3":null,
+  "tp3_y":null,
   "trigger":"short M5 confirmation needed",
   "reason":"very short reason",
   "action":"very short next action"

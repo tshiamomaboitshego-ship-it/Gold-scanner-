@@ -1,29 +1,12 @@
-# Gold Scanner V6
+# Gold Scanner V6.1 — Entry + TP Zones
 
-V6 is focused on entry timing.
-
-## Main changes
-- One entry zone only.
-- Red zone is drawn directly over the uploaded M5 screenshot.
-- Final states:
-  - WAIT FOR ZONE
-  - WAIT FOR CONFIRMATION
-  - ENTRY READY BUY
-  - ENTRY READY SELL
-  - WAIT
-  - REFRESH H1/M15
-- No TP or SL is generated.
+Changes:
+- Keeps the visual entry-zone band on the uploaded M5 screenshot.
+- Adds TP1, TP2 and TP3 based on visible market structure.
+- Draws TP lines directly on the chart when Gemini can locate them.
+- Keeps entry timing states: WAIT FOR ZONE, WAIT FOR CONFIRMATION, ENTRY READY BUY/SELL, WAIT, REFRESH H1/M15.
 - H1/M15 freshness protection remains.
-- M5 rescans are price/confirmation triggered, not timer triggered.
+- Stop loss is left to the trader.
+- Gemini 429/free-quota errors are now shown as a short friendly message instead of the full technical error.
 
-## Update
-Replace these files in GitHub:
-- server.py
-- index.html
-- sw.js
-- manifest.json
-- icon.svg
-
-Then redeploy the latest commit on Render.
-
-The visual band is approximate because Gemini estimates its vertical position from the screenshot.
+Replace server.py, index.html and sw.js in GitHub, then redeploy Render.

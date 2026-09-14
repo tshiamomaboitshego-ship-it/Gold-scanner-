@@ -35,6 +35,8 @@ input[type=file]{padding:10px;background:#07101a;border:1px dashed #36516d;borde
 .chartWrap img{display:block;width:100%;height:auto}
 .zoneOverlay{position:absolute;left:0;right:0;background:rgba(255,60,70,.20);border-top:2px solid #ff4f59;border-bottom:2px solid #ff4f59;pointer-events:none}
 .zoneLabel{position:absolute;right:8px;background:#c52f39;color:#fff;font-weight:900;padding:7px 10px;border-radius:9px;font-size:13px;pointer-events:none}
+.tpLine{position:absolute;left:0;right:0;height:0;border-top:2px dashed #32dc88;pointer-events:none}
+.tpLabel{position:absolute;right:8px;transform:translateY(-100%);background:#087b4a;color:#fff;font-weight:900;padding:5px 9px;border-radius:8px;font-size:12px;pointer-events:none}
 .entryReady{box-shadow:0 0 0 2px rgba(255,80,90,.22),0 0 28px rgba(255,80,90,.18)}
 .note{font-size:13px;color:#8fa1b6;margin-top:8px}
 @media(max-width:520px){.grid{grid-template-columns:1fr}.sig{font-size:31px}}
@@ -57,6 +59,9 @@ input[type=file]{padding:10px;background:#07101a;border:1px dashed #36516d;borde
       <img id="m5Preview" alt="M5 chart">
       <div id="fastBand" class="zoneOverlay hide"></div>
       <div id="fastLabel" class="zoneLabel hide">ENTRY ZONE</div>
+      <div id="fastTp1" class="tpLine hide"></div><div id="fastTp1L" class="tpLabel hide"></div>
+      <div id="fastTp2" class="tpLine hide"></div><div id="fastTp2L" class="tpLabel hide"></div>
+      <div id="fastTp3" class="tpLine hide"></div><div id="fastTp3L" class="tpLabel hide"></div>
     </div>
     <div class="note">The red zone is approximate and based on the uploaded screenshot.</div>
   </div>
@@ -68,6 +73,7 @@ input[type=file]{padding:10px;background:#07101a;border:1px dashed #36516d;borde
       <div class="box">Setup<b id="fastType">—</b></div>
     </div>
     <div class="bigbox zonebox">ENTRY ZONE<b id="fastZone">—</b></div>
+    <div class="bigbox">TAKE PROFIT ZONES<b id="fastTP">—</b></div>
     <div class="bigbox">M5 trigger<b id="fastTrigger">—</b></div>
     <div class="bigbox">Reason<b id="fastReason">—</b></div>
     <div class="bigbox action">What to do<b id="fastAction">—</b></div>
@@ -94,6 +100,9 @@ input[type=file]{padding:10px;background:#07101a;border:1px dashed #36516d;borde
       <img id="finalPreview" alt="Current M5 chart">
       <div id="finalBand" class="zoneOverlay hide"></div>
       <div id="finalLabel" class="zoneLabel hide">ENTRY ZONE</div>
+      <div id="finalTp1" class="tpLine hide"></div><div id="finalTp1L" class="tpLabel hide"></div>
+      <div id="finalTp2" class="tpLine hide"></div><div id="finalTp2L" class="tpLabel hide"></div>
+      <div id="finalTp3" class="tpLine hide"></div><div id="finalTp3L" class="tpLabel hide"></div>
     </div>
 
     <div class="grid">
@@ -101,10 +110,11 @@ input[type=file]{padding:10px;background:#07101a;border:1px dashed #36516d;borde
       <div class="box">Setup<b id="finalType">—</b></div>
     </div>
     <div class="bigbox zonebox">FINAL ENTRY ZONE<b id="finalZone">—</b></div>
+    <div class="bigbox">TAKE PROFIT ZONES<b id="finalTP">—</b></div>
     <div class="bigbox">Wait for M5<b id="finalTrigger">—</b></div>
     <div class="bigbox">Reason<b id="finalReason">—</b></div>
     <div class="bigbox action">What to do<b id="finalAction">—</b></div>
-    <div class="note">No TP/SL is generated in V6. You manage those yourself.</div>
+    <div class="note">Entry and TP zones are marked. You manage your own stop loss and risk.</div>
   </div>
 </div>
 
@@ -147,6 +157,40 @@ function drawBand(band,label,top,bottom,zone,signal){
   label.style.top=Math.max(1,(t*100)-7)+'%';
   label.textContent=(signal||'').includes('ENTRY READY')?'ENTRY READY · '+(zone||''): 'ENTRY ZONE · '+(zone||'');
   band.classList.remove('hide'); label.classList.remove('hide');
+}
+
+
+function drawTP(prefix,n,price,y){
+  const line=$(prefix+'Tp'+n), lab=$(prefix+'Tp'+n+'L');
+  if(price===null||price===undefined||y===null||y===undefined){
+    line.classList.add('hide');lab.classList.add('hide');return;
+  }
+  const yy=clamp(y);
+  line.style.top=(yy*100)+'%';
+  lab.style.top=(yy*100)+'%';
+  lab.textContent='TP'+n+' · '+price;
+  line.classList.remove('hide');lab.classList.remove('hide');
+}
+function drawTPs(prefix,d){
+  drawTP(prefix,1,d.tp1,d.tp1_y);
+  drawTP(prefix,2,d.tp2,d.tp2_y);
+  drawTP(prefix,3,d.tp3,d.tp3_y);
+}
+function tpText(d){
+  const a=[];
+  if(d.tp1!=null)a.push('TP1: '+d.tp1);
+  if(d.tp2!=null)a.push('TP2: '+d.tp2);
+  if(d.tp3!=null)a.push('TP3: '+d.tp3);
+  return a.length?a.join(' · '):'—';
+}
+function friendlyError(e){
+  const x=String(e||'');
+  if(x.includes('429')||x.includes('RESOURCE_EXHAUSTED')||x.toLowerCase().includes('quota')){
+    const m=x.match(/retry in ([0-9.]+)s/i);
+    return m ? 'Gemini free limit reached. Try again in about '+Math.ceil(Number(m[1]))+' seconds.'
+             : 'Gemini free limit reached. Wait about a minute and try again.';
+  }
+  return x.length>180 ? 'Scan failed. Please try again.' : x;
 }
 
 function ageMin(key){
@@ -205,19 +249,19 @@ $('scan').onclick=async()=>{
     $('fastSignal').className='sig '+sigClass(d.signal);
     $('fastTrend').textContent=d.trend||'—';
     $('fastType').textContent=d.setup_type||'—';
-    $('fastZone').textContent=d.entry_zone||'—';
+    $('fastZone').textContent=d.entry_zone||'—';$('fastTP').textContent=tpText(d);
     $('fastTrigger').textContent=d.trigger||'—';
     $('fastReason').textContent=d.reason||'—';
     $('fastAction').textContent=d.action||'—';
     $('fastResult').classList.remove('hide');
 
-    drawBand($('fastBand'),$('fastLabel'),d.zone_y_top,d.zone_y_bottom,d.entry_zone,d.signal);
+    drawBand($('fastBand'),$('fastLabel'),d.zone_y_top,d.zone_y_bottom,d.entry_zone,d.signal);drawTPs('fast',d);
 
     const needsConfirm=(d.signal||'').includes('ENTRY READY') ||
                        (d.signal||'').includes('WAIT FOR CONFIRMATION') ||
                        (d.signal||'').includes('REFRESH');
     $('confirmCard').classList.toggle('hide',!needsConfirm);
-  }catch(e){ showError(e.message); }
+  }catch(e){ showError(friendlyError(e.message)); }
 };
 
 $('confirmBtn').onclick=async()=>{
@@ -251,14 +295,14 @@ $('confirmBtn').onclick=async()=>{
     $('finalSignal').className='sig '+sigClass(d.signal);
     $('finalTrend').textContent=d.trend||'—';
     $('finalType').textContent=d.setup_type||'—';
-    $('finalZone').textContent=d.entry_zone||'—';
+    $('finalZone').textContent=d.entry_zone||'—';$('finalTP').textContent=tpText(d);
     $('finalTrigger').textContent=d.trigger||'—';
     $('finalReason').textContent=d.reason||'—';
     $('finalAction').textContent=d.action||'—';
     $('finalResult').classList.remove('hide');
     $('finalPreview').src=CURRENT_M5;
 
-    drawBand($('finalBand'),$('finalLabel'),d.zone_y_top,d.zone_y_bottom,d.entry_zone,d.signal);
+    drawBand($('finalBand'),$('finalLabel'),d.zone_y_top,d.zone_y_bottom,d.entry_zone,d.signal);drawTPs('final',d);
     $('finalChart').classList.toggle('entryReady',(d.signal||'').includes('ENTRY READY'));
 
     if((d.signal||'').includes('REFRESH')){
@@ -267,7 +311,7 @@ $('confirmBtn').onclick=async()=>{
     }
 
     $('finalResult').scrollIntoView({behavior:'smooth'});
-  }catch(e){ showError(e.message); }
+  }catch(e){ showError(friendlyError(e.message)); }
 };
 
 if('serviceWorker' in navigator){ navigator.serviceWorker.register('/sw.js').catch(()=>{}); }
