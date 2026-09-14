@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="theme-color" content="#07111d">
-<title>Gold Scanner V6.2</title>
+<title>Gold Scanner V6.3</title>
 <link rel="manifest" href="/manifest.json">
 <style>
 *{box-sizing:border-box}
@@ -27,7 +27,7 @@ input[type=file]{padding:10px;background:#07101a;border:1px dashed #36516d;borde
 .chartWrap{position:relative;border-radius:18px;overflow:hidden;border:1px solid #2a3c52;background:#02060a;margin-top:12px}
 .chartWrap img{display:block;width:100%;height:auto}
 .zoneOverlay{position:absolute;left:0;right:0;background:rgba(255,60,70,.20);border-top:2px solid #ff4f59;border-bottom:2px solid #ff4f59;pointer-events:none}
-.zoneLabel{position:absolute;right:8px;background:#c52f39;color:#fff;font-weight:900;padding:7px 10px;border-radius:9px;font-size:13px;pointer-events:none}
+.entry2{background:rgba(255,176,32,.18)!important;border-color:#f2a928!important}.entry3{background:rgba(90,143,255,.18)!important;border-color:#5890ff!important}.zoneLabel{position:absolute;right:8px;background:#c52f39;color:#fff;font-weight:900;padding:7px 10px;border-radius:9px;font-size:13px;pointer-events:none}
 .tpLine{position:absolute;left:0;right:0;height:0;border-top:2px dashed #32dc88;pointer-events:none}
 .tpLabel{position:absolute;right:8px;transform:translateY(-100%);background:#087b4a;color:#fff;font-weight:900;padding:5px 9px;border-radius:8px;font-size:12px;pointer-events:none}
 .note{font-size:13px;color:#8fa1b6;margin-top:8px}
@@ -37,12 +37,12 @@ input[type=file]{padding:10px;background:#07101a;border:1px dashed #36516d;borde
 </head>
 <body>
 <div class="wrap">
-  <h1>Gold Scanner V6.2</h1>
-  <div class="sub">Quota Saver · Entry + TP zone marking</div>
+  <h1>Gold Scanner V6.3</h1>
+  <div class="sub">Multi-entry map · 3 Entry Zones + TP marking</div>
 
   <div id="error" class="card warn hide"></div>
   <div id="status" class="card ok">
-    <b>Quota Saver:</b> one Gemini request per new M5 screenshot.
+    <b>Quota Saver:</b> one Gemini request can map up to 3 entry opportunities.
     <div id="localCount" class="pill"></div>
   </div>
 
@@ -57,13 +57,13 @@ input[type=file]{padding:10px;background:#07101a;border:1px dashed #36516d;borde
 
   <div class="card">
     <h2>2 · Fresh M5</h2>
-    <div class="small">Each NEW M5 screenshot uses one AI request. Re-scanning the exact same image uses the saved result instead.</div>
+    <div class="small">One scan looks for several good entry paths, so missing Entry 1 does not automatically mean another scan.</div>
     <input id="m5" type="file" accept="image/*">
-    <button id="scan">⚡ Scan Full Setup</button>
+    <button id="scan">⚡ Map Entry Zones</button>
 
     <div id="chart" class="chartWrap hide">
       <img id="preview" alt="M5 chart">
-      <div id="band" class="zoneOverlay hide"></div><div id="bandLabel" class="zoneLabel hide"></div>
+      <div id="e1" class="zoneOverlay hide"></div><div id="e1L" class="zoneLabel hide"></div><div id="e2" class="zoneOverlay hide"></div><div id="e2L" class="zoneLabel hide"></div><div id="e3" class="zoneOverlay hide"></div><div id="e3L" class="zoneLabel hide"></div>
       <div id="tp1" class="tpLine hide"></div><div id="tp1L" class="tpLabel hide"></div>
       <div id="tp2" class="tpLine hide"></div><div id="tp2L" class="tpLabel hide"></div>
       <div id="tp3" class="tpLine hide"></div><div id="tp3L" class="tpLabel hide"></div>
@@ -77,7 +77,7 @@ input[type=file]{padding:10px;background:#07101a;border:1px dashed #36516d;borde
       <div class="box">Trend<b id="trend">—</b></div>
       <div class="box">Setup<b id="type">—</b></div>
     </div>
-    <div class="bigbox zonebox">ENTRY ZONE<b id="zone">—</b></div>
+    <div class="bigbox zonebox">ENTRY 1<b id="zone1">—</b><span id="st1"></span><div id="meta1" class="small"></div></div><div class="bigbox">ENTRY 2<b id="zone2">—</b><span id="st2"></span><div id="meta2" class="small"></div></div><div class="bigbox">ENTRY 3<b id="zone3">—</b><span id="st3"></span><div id="meta3" class="small"></div></div>
     <div class="bigbox">TAKE PROFIT ZONES<b id="tps">—</b></div>
     <div class="bigbox">M5 trigger<b id="trigger">—</b></div>
     <div class="bigbox">Reason<b id="reason">—</b></div>
@@ -103,12 +103,15 @@ function updateCount(){const n=+(localStorage.getItem(countKey())||0);$('localCo
 function incCount(){localStorage.setItem(countKey(),+(localStorage.getItem(countKey())||0)+1);updateCount()}
 function sigClass(s){s=(s||'').toUpperCase();if(s.includes('ENTRY READY BUY'))return'buy';if(s.includes('ENTRY READY SELL'))return'sell';if(s.includes('REFRESH'))return'refresh';return'wait'}
 function clamp(v){return Math.max(0,Math.min(1,Number(v)))}
-function drawBand(d){
-  if(d.zone_y_top==null||d.zone_y_bottom==null){$('band').classList.add('hide');$('bandLabel').classList.add('hide');return}
-  let t=clamp(d.zone_y_top),b=clamp(d.zone_y_bottom);if(b<t){const x=t;t=b;b=x}
-  $('band').style.top=(t*100)+'%';$('band').style.height=(Math.max(.025,b-t)*100)+'%';
-  $('bandLabel').style.top=Math.max(1,t*100-7)+'%';$('bandLabel').textContent='ENTRY ZONE · '+(d.entry_zone||'');
-  $('band').classList.remove('hide');$('bandLabel').classList.remove('hide');
+function drawEntry(n,e){
+  const band=$('e'+n),lab=$('e'+n+'L');
+  if(!e||!e.zone||e.y_top==null||e.y_bottom==null){band.classList.add('hide');lab.classList.add('hide');return}
+  let t=clamp(e.y_top),b=clamp(e.y_bottom);if(b<t){const x=t;t=b;b=x}
+  band.style.top=(t*100)+'%';band.style.height=(Math.max(.025,b-t)*100)+'%';
+  if(n===2)band.classList.add('entry2'); if(n===3)band.classList.add('entry3');
+  lab.style.top=Math.max(1,t*100-7)+'%';lab.textContent='ENTRY '+n+' · '+e.zone;
+  lab.style.background=n===1?'#c52f39':(n===2?'#a96d00':'#315eaf');
+  band.classList.remove('hide');lab.classList.remove('hide');
 }
 function drawTP(n,price,y){
   const l=$('tp'+n),lab=$('tp'+n+'L');
@@ -117,10 +120,11 @@ function drawTP(n,price,y){
 }
 function render(d){
   $('signal').textContent=d.signal||'WAIT';$('signal').className='sig '+sigClass(d.signal);
-  $('trend').textContent=d.trend||'—';$('type').textContent=d.setup_type||'—';$('zone').textContent=d.entry_zone||'—';
+  $('trend').textContent=d.trend||'—';$('type').textContent='Entry map';
+  for(let n=1;n<=3;n++){const e=d['entry'+n];$('zone'+n).textContent=e&&e.zone?e.zone:'—';$('st'+n).textContent=e&&e.status?' · '+e.status:'';$('meta'+n).textContent=e?['Type: '+(e.type||'—'),'Confirm: '+(e.confirmation||'—'),'Action: '+(e.action||'—')].join(' · '):'';}
   const a=[];if(d.tp1!=null)a.push('TP1: '+d.tp1);if(d.tp2!=null)a.push('TP2: '+d.tp2);if(d.tp3!=null)a.push('TP3: '+d.tp3);$('tps').textContent=a.length?a.join(' · '):'—';
-  $('trigger').textContent=d.trigger||'—';$('reason').textContent=d.reason||'—';$('action').textContent=d.action||'—';$('result').classList.remove('hide');
-  drawBand(d);drawTP(1,d.tp1,d.tp1_y);drawTP(2,d.tp2,d.tp2_y);drawTP(3,d.tp3,d.tp3_y);
+  $('trigger').textContent='See each entry confirmation';$('reason').textContent=d.reason||'—';$('action').textContent='Watch the marked entry zones';$('result').classList.remove('hide');
+  drawEntry(1,d.entry1);drawEntry(2,d.entry2);drawEntry(3,d.entry3);drawTP(1,d.tp1,d.tp1_y);drawTP(2,d.tp2,d.tp2_y);drawTP(3,d.tp3,d.tp3_y);
   if((d.signal||'').includes('REFRESH')){['v62_h1','v62_m15','v62_ht','v62_mt'].forEach(k=>localStorage.removeItem(k));refreshAge()}
 }
 async function hashText(s){
@@ -156,7 +160,7 @@ $('scan').onclick=async()=>{
     try{render(JSON.parse(cached));showError('Same M5 image detected — showing saved result. No Gemini request used.');return}catch(e){}
   }
 
-  $('scan').disabled=true;$('scan').textContent='Scanning...';
+  $('scan').disabled=true;$('scan').textContent='Mapping entries...';
   try{
     const r=await fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({h1,m15,m5})});
     const d=await r.json();
@@ -173,7 +177,7 @@ $('scan').onclick=async()=>{
     else if(e.message==='TEMP_QUOTA')showError('Gemini is temporarily rate-limited. Wait a little, then try again.');
     else showError('Scan failed. Please try again.');
   }finally{
-    $('scan').disabled=false;$('scan').textContent='⚡ Scan Full Setup';
+    $('scan').disabled=false;$('scan').textContent='⚡ Map Entry Zones';
   }
 };
 if('serviceWorker'in navigator)navigator.serviceWorker.register('/sw.js').catch(()=>{});
