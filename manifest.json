@@ -1,9 +1,15 @@
 {
-  "name":"Gold Scanner V6",
-  "short_name":"Gold V6",
-  "start_url":"/",
-  "display":"standalone",
-  "background_color":"#05090f",
-  "theme_color":"#07111d",
-  "icons":[{"src":"/icon.svg","sizes":"any","type":"image/svg+xml"}]
+  "name": "Gold Scanner V6.7",
+  "short_name": "Gold Scanner",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#05090f",
+  "theme_color": "#07111d",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
 }
