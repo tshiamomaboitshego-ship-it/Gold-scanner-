@@ -6,7 +6,7 @@ from google.genai import types
 app = Flask(__name__, static_folder=".", static_url_path="")
 
 FINAL_PROMPT = """
-You are Gold Scanner V6.4, an XAUUSD ENTRY-MAP assistant.
+You are Gold Scanner V6.5, an XAUUSD ENTRY-MAP assistant.
 
 Images are supplied in this order:
 1) H1
@@ -45,11 +45,11 @@ ENTRY RULES:
 
 TP VALIDATION RULES:
 - TP1/TP2/TP3 must be structure-based.
-- For BUY: TP1 > entry area, TP2 > TP1, TP3 > TP2.
-- For SELL: TP1 < entry area, TP2 < TP1, TP3 < TP2.
-- NEVER allow TP1 to overlap or sit inside any active entry zone.
-- If a TP overlaps an entry area or gives almost no room, set that TP to null.
-- Do not invent TPs just to fill all 3.
+- For BUY: TP1 must be ABOVE every active entry it belongs to; TP2 > TP1; TP3 > TP2.
+- For SELL: TP1 must be BELOW every active entry it belongs to; TP2 < TP1; TP3 < TP2.
+- NEVER allow TP1 to overlap, sit inside, or sit on the wrong side of an active entry zone.
+- If an entry has no sensible room to TP1, DO NOT return that entry.
+- Do not invent entries or TPs just to fill all 3 slots.
 - No stop loss. User manages SL and risk.
 
 VISUAL RULES:
@@ -134,6 +134,148 @@ def run_model(contents):
     )
     return json.loads(response.text)
 
+
+def _num(v):
+    try:
+        if v is None or isinstance(v, bool):
+            return None
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+def _zone_bounds(zone):
+    """Extract two numeric bounds from strings such as '4308 - 4315'."""
+    if zone is None:
+        return None
+    if isinstance(zone, (int, float)):
+        x = float(zone)
+        return (x, x)
+    import re
+    nums = re.findall(r"-?\d+(?:\.\d+)?", str(zone).replace(",", ""))
+    if not nums:
+        return None
+    vals = [float(x) for x in nums[:2]]
+    if len(vals) == 1:
+        return (vals[0], vals[0])
+    return (min(vals), max(vals))
+
+def _empty_entry(label):
+    return {
+        "label": label,
+        "zone": None,
+        "type": None,
+        "status": None,
+        "confirmation": None,
+        "action": None,
+        "y_top": None,
+        "y_bottom": None,
+    }
+
+def hard_validate_result(result):
+    """
+    Server-side guardrails. These checks run AFTER Gemini responds, so bad
+    entry/TP combinations are removed even if the model ignores the prompt.
+    """
+    if not isinstance(result, dict):
+        return result
+
+    notes = []
+    signal = str(result.get("signal") or "").upper()
+    m5 = str(result.get("m5_momentum") or "").upper()
+
+    # 1) Enforce TP ordering.
+    tp1 = _num(result.get("tp1"))
+    tp2 = _num(result.get("tp2"))
+    tp3 = _num(result.get("tp3"))
+
+    if signal == "BUY":
+        if tp1 is not None and tp2 is not None and tp2 <= tp1:
+            result["tp2"] = result["tp2_y"] = None
+            result["tp3"] = result["tp3_y"] = None
+            tp2 = tp3 = None
+            notes.append("invalid TP2/TP3 removed")
+        if tp2 is not None and tp3 is not None and tp3 <= tp2:
+            result["tp3"] = result["tp3_y"] = None
+            tp3 = None
+            notes.append("invalid TP3 removed")
+    elif signal == "SELL":
+        if tp1 is not None and tp2 is not None and tp2 >= tp1:
+            result["tp2"] = result["tp2_y"] = None
+            result["tp3"] = result["tp3_y"] = None
+            tp2 = tp3 = None
+            notes.append("invalid TP2/TP3 removed")
+        if tp2 is not None and tp3 is not None and tp3 >= tp2:
+            result["tp3"] = result["tp3_y"] = None
+            tp3 = None
+            notes.append("invalid TP3 removed")
+
+    # 2) Validate each entry against TP1.
+    # A small minimum room avoids a target effectively sitting inside the entry.
+    current = _num(result.get("current_price")) or 0.0
+    min_room = max(0.5, abs(current) * 0.0001) if current else 0.5
+
+    valid_entries = []
+    removed = 0
+
+    for i in range(1, 4):
+        e = result.get(f"entry{i}")
+        if not isinstance(e, dict) or not e.get("zone"):
+            continue
+
+        bounds = _zone_bounds(e.get("zone"))
+        if bounds is None:
+            # If the zone cannot be parsed safely, keep it but do not call it READY.
+            if str(e.get("status") or "").upper() == "READY":
+                e["status"] = "WAIT CONFIRMATION"
+            valid_entries.append(e)
+            continue
+
+        low, high = bounds
+        bad = False
+
+        if tp1 is not None:
+            if signal == "BUY":
+                # TP1 must sit meaningfully above the TOP of the buy entry zone.
+                bad = tp1 <= (high + min_room)
+            elif signal == "SELL":
+                # TP1 must sit meaningfully below the BOTTOM of the sell entry zone.
+                bad = tp1 >= (low - min_room)
+
+        if bad:
+            removed += 1
+            continue
+
+        # 3) M5 timing gate: HTF bias cannot make an entry READY by itself.
+        status = str(e.get("status") or "").upper()
+        if status == "READY":
+            if (signal == "SELL" and m5 == "BULLISH") or (signal == "BUY" and m5 == "BEARISH"):
+                e["status"] = "WAIT CONFIRMATION"
+                e["action"] = "Wait for M5 to turn with bias"
+                notes.append("READY downgraded until M5 aligns")
+
+        valid_entries.append(e)
+
+    if removed:
+        notes.append(f"{removed} invalid entry zone{'s' if removed != 1 else ''} removed")
+
+    # 4) Compact remaining entries so there are no confusing gaps.
+    for i in range(1, 4):
+        if i <= len(valid_entries):
+            e = valid_entries[i - 1]
+            e["label"] = f"ENTRY {i}"
+            result[f"entry{i}"] = e
+        else:
+            result[f"entry{i}"] = _empty_entry(f"ENTRY {i}")
+
+    # If all entries disappear, do not present a false actionable BUY/SELL.
+    if not valid_entries and signal in ("BUY", "SELL"):
+        result["signal"] = "WAIT"
+        result["reason"] = "No validated entry currently"
+        notes.append("signal changed to WAIT")
+
+    result["validation_note"] = " · ".join(dict.fromkeys(notes)) if notes else ""
+    return result
+
 @app.get("/")
 def home():
     return send_from_directory(".", "index.html")
@@ -160,6 +302,7 @@ def scan():
             image_part(d["m15"]),
             image_part(d["m5"]),
         ])
+        result = hard_validate_result(result)
         return jsonify(result)
     except Exception as e:
         text = str(e)
