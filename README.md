@@ -1,12 +1,23 @@
-# Gold Scanner V6.1 — Entry + TP Zones
+# Gold Scanner V6.2 — Quota Saver
 
-Changes:
-- Keeps the visual entry-zone band on the uploaded M5 screenshot.
-- Adds TP1, TP2 and TP3 based on visible market structure.
-- Draws TP lines directly on the chart when Gemini can locate them.
-- Keeps entry timing states: WAIT FOR ZONE, WAIT FOR CONFIRMATION, ENTRY READY BUY/SELL, WAIT, REFRESH H1/M15.
-- H1/M15 freshness protection remains.
-- Stop loss is left to the trader.
-- Gemini 429/free-quota errors are now shown as a short friendly message instead of the full technical error.
+Main change: ONE Gemini request per new M5 scan.
 
-Replace server.py, index.html and sw.js in GitHub, then redeploy Render.
+How it works:
+1. Upload H1 and M15 once. They are saved on the device.
+2. Upload a fresh M5.
+3. Tap Scan Full Setup.
+4. One Gemini request returns direction, entry timing, entry-zone overlay and TP1/TP2/TP3.
+5. If you accidentally scan the exact same M5 screenshot again, V6.2 shows the cached result and uses ZERO new Gemini requests.
+
+Other changes:
+- Correctly distinguishes a daily free quota from a temporary rate limit.
+- Keeps H1/M15 staleness protection (M15 30 min, H1 60 min).
+- Shows approximate local AI-scan count for the current device/day.
+- Keeps entry-zone and TP visual marks.
+- Stop loss remains user-managed.
+
+Update GitHub:
+- server.py
+- index.html
+- sw.js
+Then redeploy Render.

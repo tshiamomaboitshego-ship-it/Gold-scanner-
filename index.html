@@ -4,317 +4,179 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="theme-color" content="#07111d">
-<title>Gold Scanner V6</title>
+<title>Gold Scanner V6.2</title>
 <link rel="manifest" href="/manifest.json">
 <style>
 *{box-sizing:border-box}
 body{margin:0;background:#05090f;color:#eef4ff;font-family:system-ui,-apple-system,Segoe UI,sans-serif}
 .wrap{max-width:760px;margin:auto;padding:15px}
-h1{margin:6px 0 0;font-size:31px}
-.sub{color:#91a2b8;margin:2px 0 18px}
+h1{margin:6px 0 0;font-size:31px}.sub{color:#91a2b8;margin:2px 0 18px}
 .card{background:#0c1622;border:1px solid #25374d;border-radius:22px;padding:16px;margin:14px 0}
-button,input{width:100%}
-button{border:0;border-radius:16px;padding:17px;font-size:18px;font-weight:850;margin-top:10px;background:#1677ff;color:white}
-button.green{background:#18c77a;color:#04120c}
-button.dark{background:#152235}
+button,input{width:100%}button{border:0;border-radius:16px;padding:17px;font-size:18px;font-weight:850;margin-top:10px;background:#1677ff;color:white}
+button.dark{background:#152235}button:disabled{opacity:.55}
 label{display:block;margin:10px 0 4px;color:#a9b8ca;font-weight:700}
 input[type=file]{padding:10px;background:#07101a;border:1px dashed #36516d;border-radius:14px;color:#cbd7e6}
-.sig{font-size:35px;line-height:1.05;font-weight:950;margin:6px 0 16px}
+.sig{font-size:34px;line-height:1.05;font-weight:950;margin:6px 0 16px}
 .buy{color:#42e493}.sell{color:#ff656e}.wait{color:#ffd166}.refresh{color:#8cc8ff}
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-.box{background:#07101a;border:1px solid #23364b;border-radius:16px;padding:13px;min-height:75px}
-.box b{display:block;font-size:20px;margin-top:5px}
-.bigbox{background:#07101a;border:1px solid #334961;border-radius:17px;padding:15px;margin:10px 0}
-.zonebox{border-color:#a83842;background:#2a1117}
-.zonebox b{font-size:27px}
-.action{background:#10243a}
-.warn{background:#302410;border-color:#745a14}
-.small{color:#91a2b8}
-.hide{display:none!important}
+.box,.bigbox{background:#07101a;border:1px solid #23364b;border-radius:16px;padding:13px}
+.box{min-height:75px}.box b,.bigbox b{display:block;font-size:20px;margin-top:5px}
+.bigbox{margin:10px 0}.zonebox{border-color:#a83842;background:#2a1117}.zonebox b{font-size:27px}
+.action{background:#10243a}.warn{background:#302410;border-color:#745a14}.ok{background:#0d2c22;border-color:#24614b}
+.small{color:#91a2b8}.hide{display:none!important}
 .chartWrap{position:relative;border-radius:18px;overflow:hidden;border:1px solid #2a3c52;background:#02060a;margin-top:12px}
 .chartWrap img{display:block;width:100%;height:auto}
 .zoneOverlay{position:absolute;left:0;right:0;background:rgba(255,60,70,.20);border-top:2px solid #ff4f59;border-bottom:2px solid #ff4f59;pointer-events:none}
 .zoneLabel{position:absolute;right:8px;background:#c52f39;color:#fff;font-weight:900;padding:7px 10px;border-radius:9px;font-size:13px;pointer-events:none}
 .tpLine{position:absolute;left:0;right:0;height:0;border-top:2px dashed #32dc88;pointer-events:none}
 .tpLabel{position:absolute;right:8px;transform:translateY(-100%);background:#087b4a;color:#fff;font-weight:900;padding:5px 9px;border-radius:8px;font-size:12px;pointer-events:none}
-.entryReady{box-shadow:0 0 0 2px rgba(255,80,90,.22),0 0 28px rgba(255,80,90,.18)}
 .note{font-size:13px;color:#8fa1b6;margin-top:8px}
-@media(max-width:520px){.grid{grid-template-columns:1fr}.sig{font-size:31px}}
+.pill{display:inline-block;border:1px solid #36516d;border-radius:999px;padding:6px 10px;margin-top:8px;color:#b9c7d8;font-size:13px}
+@media(max-width:520px){.grid{grid-template-columns:1fr}.sig{font-size:30px}}
 </style>
 </head>
 <body>
 <div class="wrap">
-  <h1>Gold Scanner V6</h1>
-  <div class="sub">Entry timing + visual zone marking</div>
+  <h1>Gold Scanner V6.2</h1>
+  <div class="sub">Quota Saver · Entry + TP zone marking</div>
 
-  <div id="err" class="card warn hide"></div>
+  <div id="error" class="card warn hide"></div>
+  <div id="status" class="card ok">
+    <b>Quota Saver:</b> one Gemini request per new M5 screenshot.
+    <div id="localCount" class="pill"></div>
+  </div>
 
   <div class="card">
-    <h2>1 · Scan fresh M5</h2>
-    <div class="small">Upload the current M5 chart. The scanner finds one entry zone and marks it on the image.</div>
-    <input id="m5" type="file" accept="image/*">
-    <button id="scan">⚡ Scan M5</button>
-
-    <div id="m5Chart" class="chartWrap hide">
-      <img id="m5Preview" alt="M5 chart">
-      <div id="fastBand" class="zoneOverlay hide"></div>
-      <div id="fastLabel" class="zoneLabel hide">ENTRY ZONE</div>
-      <div id="fastTp1" class="tpLine hide"></div><div id="fastTp1L" class="tpLabel hide"></div>
-      <div id="fastTp2" class="tpLine hide"></div><div id="fastTp2L" class="tpLabel hide"></div>
-      <div id="fastTp3" class="tpLine hide"></div><div id="fastTp3L" class="tpLabel hide"></div>
-    </div>
-    <div class="note">The red zone is approximate and based on the uploaded screenshot.</div>
-  </div>
-
-  <div id="fastResult" class="card hide">
-    <div id="fastSignal" class="sig"></div>
-    <div class="grid">
-      <div class="box">Trend<b id="fastTrend">—</b></div>
-      <div class="box">Setup<b id="fastType">—</b></div>
-    </div>
-    <div class="bigbox zonebox">ENTRY ZONE<b id="fastZone">—</b></div>
-    <div class="bigbox">TAKE PROFIT ZONES<b id="fastTP">—</b></div>
-    <div class="bigbox">M5 trigger<b id="fastTrigger">—</b></div>
-    <div class="bigbox">Reason<b id="fastReason">—</b></div>
-    <div class="bigbox action">What to do<b id="fastAction">—</b></div>
-  </div>
-
-  <div id="confirmCard" class="card hide">
-    <h2>2 · Final confirmation</h2>
+    <h2>1 · Higher-timeframe context</h2>
     <div id="ageText" class="bigbox">No saved H1/M15 yet.</div>
-    <div id="staleWarn" class="bigbox warn hide">Refresh H1 + M15 before confirming.</div>
-
-    <label>H1 screenshot</label>
-    <input id="h1" type="file" accept="image/*">
-    <label>M15 screenshot</label>
-    <input id="m15" type="file" accept="image/*">
-
-    <button class="green" id="confirmBtn">Confirm Entry Setup</button>
-    <button class="dark" id="clearBtn">Clear saved H1/M15</button>
+    <div id="staleWarn" class="bigbox warn hide">Saved charts are stale. Upload fresh H1 + M15.</div>
+    <label>H1 screenshot</label><input id="h1" type="file" accept="image/*">
+    <label>M15 screenshot</label><input id="m15" type="file" accept="image/*">
+    <button class="dark" id="clear">Clear saved H1/M15</button>
   </div>
 
-  <div id="finalResult" class="card hide">
-    <div id="finalSignal" class="sig"></div>
+  <div class="card">
+    <h2>2 · Fresh M5</h2>
+    <div class="small">Each NEW M5 screenshot uses one AI request. Re-scanning the exact same image uses the saved result instead.</div>
+    <input id="m5" type="file" accept="image/*">
+    <button id="scan">⚡ Scan Full Setup</button>
 
-    <div id="finalChart" class="chartWrap">
-      <img id="finalPreview" alt="Current M5 chart">
-      <div id="finalBand" class="zoneOverlay hide"></div>
-      <div id="finalLabel" class="zoneLabel hide">ENTRY ZONE</div>
-      <div id="finalTp1" class="tpLine hide"></div><div id="finalTp1L" class="tpLabel hide"></div>
-      <div id="finalTp2" class="tpLine hide"></div><div id="finalTp2L" class="tpLabel hide"></div>
-      <div id="finalTp3" class="tpLine hide"></div><div id="finalTp3L" class="tpLabel hide"></div>
+    <div id="chart" class="chartWrap hide">
+      <img id="preview" alt="M5 chart">
+      <div id="band" class="zoneOverlay hide"></div><div id="bandLabel" class="zoneLabel hide"></div>
+      <div id="tp1" class="tpLine hide"></div><div id="tp1L" class="tpLabel hide"></div>
+      <div id="tp2" class="tpLine hide"></div><div id="tp2L" class="tpLabel hide"></div>
+      <div id="tp3" class="tpLine hide"></div><div id="tp3L" class="tpLabel hide"></div>
     </div>
+    <div class="note">Visual marks are approximate. Wait for M5 confirmation before entering.</div>
+  </div>
 
+  <div id="result" class="card hide">
+    <div id="signal" class="sig"></div>
     <div class="grid">
-      <div class="box">Trend<b id="finalTrend">—</b></div>
-      <div class="box">Setup<b id="finalType">—</b></div>
+      <div class="box">Trend<b id="trend">—</b></div>
+      <div class="box">Setup<b id="type">—</b></div>
     </div>
-    <div class="bigbox zonebox">FINAL ENTRY ZONE<b id="finalZone">—</b></div>
-    <div class="bigbox">TAKE PROFIT ZONES<b id="finalTP">—</b></div>
-    <div class="bigbox">Wait for M5<b id="finalTrigger">—</b></div>
-    <div class="bigbox">Reason<b id="finalReason">—</b></div>
-    <div class="bigbox action">What to do<b id="finalAction">—</b></div>
-    <div class="note">Entry and TP zones are marked. You manage your own stop loss and risk.</div>
+    <div class="bigbox zonebox">ENTRY ZONE<b id="zone">—</b></div>
+    <div class="bigbox">TAKE PROFIT ZONES<b id="tps">—</b></div>
+    <div class="bigbox">M5 trigger<b id="trigger">—</b></div>
+    <div class="bigbox">Reason<b id="reason">—</b></div>
+    <div class="bigbox action">What to do<b id="action">—</b></div>
+    <div class="note">You manage your own stop loss, position size and risk.</div>
   </div>
 </div>
 
 <script>
 const $=id=>document.getElementById(id);
-let CURRENT_M5=null;
-
-const toDataURL=file=>new Promise((resolve,reject)=>{
-  const r=new FileReader();
-  r.onload=()=>resolve(r.result);
-  r.onerror=reject;
-  r.readAsDataURL(file);
-});
-
-function showError(msg){
-  $('err').textContent=msg;
-  $('err').classList.remove('hide');
-}
-function clearError(){ $('err').classList.add('hide'); }
-
-function sigClass(s){
-  s=(s||'').toUpperCase();
-  if(s.includes('ENTRY READY BUY')) return 'buy';
-  if(s.includes('ENTRY READY SELL')) return 'sell';
-  if(s.includes('REFRESH')) return 'refresh';
-  return 'wait';
-}
-
-function clamp(v){ return Math.max(0,Math.min(1,Number(v))); }
-
-function drawBand(band,label,top,bottom,zone,signal){
-  if(top===null || bottom===null || top===undefined || bottom===undefined){
-    band.classList.add('hide'); label.classList.add('hide'); return;
-  }
-  let t=clamp(top), b=clamp(bottom);
-  if(b<t){ let x=t;t=b;b=x; }
-  const height=Math.max(0.025,b-t);
-  band.style.top=(t*100)+'%';
-  band.style.height=(height*100)+'%';
-  label.style.top=Math.max(1,(t*100)-7)+'%';
-  label.textContent=(signal||'').includes('ENTRY READY')?'ENTRY READY · '+(zone||''): 'ENTRY ZONE · '+(zone||'');
-  band.classList.remove('hide'); label.classList.remove('hide');
-}
-
-
-function drawTP(prefix,n,price,y){
-  const line=$(prefix+'Tp'+n), lab=$(prefix+'Tp'+n+'L');
-  if(price===null||price===undefined||y===null||y===undefined){
-    line.classList.add('hide');lab.classList.add('hide');return;
-  }
-  const yy=clamp(y);
-  line.style.top=(yy*100)+'%';
-  lab.style.top=(yy*100)+'%';
-  lab.textContent='TP'+n+' · '+price;
-  line.classList.remove('hide');lab.classList.remove('hide');
-}
-function drawTPs(prefix,d){
-  drawTP(prefix,1,d.tp1,d.tp1_y);
-  drawTP(prefix,2,d.tp2,d.tp2_y);
-  drawTP(prefix,3,d.tp3,d.tp3_y);
-}
-function tpText(d){
-  const a=[];
-  if(d.tp1!=null)a.push('TP1: '+d.tp1);
-  if(d.tp2!=null)a.push('TP2: '+d.tp2);
-  if(d.tp3!=null)a.push('TP3: '+d.tp3);
-  return a.length?a.join(' · '):'—';
-}
-function friendlyError(e){
-  const x=String(e||'');
-  if(x.includes('429')||x.includes('RESOURCE_EXHAUSTED')||x.toLowerCase().includes('quota')){
-    const m=x.match(/retry in ([0-9.]+)s/i);
-    return m ? 'Gemini free limit reached. Try again in about '+Math.ceil(Number(m[1]))+' seconds.'
-             : 'Gemini free limit reached. Wait about a minute and try again.';
-  }
-  return x.length>180 ? 'Scan failed. Please try again.' : x;
-}
-
-function ageMin(key){
-  const t=Number(localStorage.getItem(key)||0);
-  return t?Math.floor((Date.now()-t)/60000):null;
-}
+const toDataURL=file=>new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result);r.onerror=rej;r.readAsDataURL(file)});
+function showError(x){$('error').textContent=x;$('error').classList.remove('hide')}
+function clearError(){$('error').classList.add('hide')}
+function ageMin(k){const t=+localStorage.getItem(k);return t?Math.floor((Date.now()-t)/60000):null}
 function refreshAge(){
-  const h=localStorage.getItem('v6_h1');
-  const m=localStorage.getItem('v6_m15');
-  const ha=ageMin('v6_h1_time');
-  const ma=ageMin('v6_m15_time');
-  if(h&&m){
-    $('ageText').textContent=`Saved H1: ${ha??'?'} min old · M15: ${ma??'?'} min old`;
-    const stale=ha===null||ma===null||ha>=60||ma>=30;
-    $('staleWarn').classList.toggle('hide',!stale);
-  }else{
-    $('ageText').textContent='No saved H1/M15 yet.';
-    $('staleWarn').classList.add('hide');
-  }
+  const h=localStorage.getItem('v62_h1'),m=localStorage.getItem('v62_m15'),ha=ageMin('v62_ht'),ma=ageMin('v62_mt');
+  if(h&&m){$('ageText').textContent=`Saved H1: ${ha??'?'} min old · M15: ${ma??'?'} min old`;const stale=ha===null||ma===null||ha>=60||ma>=30;$('staleWarn').classList.toggle('hide',!stale)}
+  else{$('ageText').textContent='No saved H1/M15 yet.';$('staleWarn').classList.add('hide')}
 }
-refreshAge();
+function todayKey(){const d=new Date();return d.getFullYear()+'-'+(d.getMonth()+1)+'-'+d.getDate()}
+function countKey(){return 'v62_count_'+todayKey()}
+function updateCount(){const n=+(localStorage.getItem(countKey())||0);$('localCount').textContent='AI scans used on this device today: '+n}
+function incCount(){localStorage.setItem(countKey(),+(localStorage.getItem(countKey())||0)+1);updateCount()}
+function sigClass(s){s=(s||'').toUpperCase();if(s.includes('ENTRY READY BUY'))return'buy';if(s.includes('ENTRY READY SELL'))return'sell';if(s.includes('REFRESH'))return'refresh';return'wait'}
+function clamp(v){return Math.max(0,Math.min(1,Number(v)))}
+function drawBand(d){
+  if(d.zone_y_top==null||d.zone_y_bottom==null){$('band').classList.add('hide');$('bandLabel').classList.add('hide');return}
+  let t=clamp(d.zone_y_top),b=clamp(d.zone_y_bottom);if(b<t){const x=t;t=b;b=x}
+  $('band').style.top=(t*100)+'%';$('band').style.height=(Math.max(.025,b-t)*100)+'%';
+  $('bandLabel').style.top=Math.max(1,t*100-7)+'%';$('bandLabel').textContent='ENTRY ZONE · '+(d.entry_zone||'');
+  $('band').classList.remove('hide');$('bandLabel').classList.remove('hide');
+}
+function drawTP(n,price,y){
+  const l=$('tp'+n),lab=$('tp'+n+'L');
+  if(price==null||y==null){l.classList.add('hide');lab.classList.add('hide');return}
+  const yy=clamp(y);l.style.top=(yy*100)+'%';lab.style.top=(yy*100)+'%';lab.textContent='TP'+n+' · '+price;l.classList.remove('hide');lab.classList.remove('hide')
+}
+function render(d){
+  $('signal').textContent=d.signal||'WAIT';$('signal').className='sig '+sigClass(d.signal);
+  $('trend').textContent=d.trend||'—';$('type').textContent=d.setup_type||'—';$('zone').textContent=d.entry_zone||'—';
+  const a=[];if(d.tp1!=null)a.push('TP1: '+d.tp1);if(d.tp2!=null)a.push('TP2: '+d.tp2);if(d.tp3!=null)a.push('TP3: '+d.tp3);$('tps').textContent=a.length?a.join(' · '):'—';
+  $('trigger').textContent=d.trigger||'—';$('reason').textContent=d.reason||'—';$('action').textContent=d.action||'—';$('result').classList.remove('hide');
+  drawBand(d);drawTP(1,d.tp1,d.tp1_y);drawTP(2,d.tp2,d.tp2_y);drawTP(3,d.tp3,d.tp3_y);
+  if((d.signal||'').includes('REFRESH')){['v62_h1','v62_m15','v62_ht','v62_mt'].forEach(k=>localStorage.removeItem(k));refreshAge()}
+}
+async function hashText(s){
+  const b=new TextEncoder().encode(s),h=await crypto.subtle.digest('SHA-256',b);
+  return [...new Uint8Array(h)].map(x=>x.toString(16).padStart(2,'0')).join('');
+}
+refreshAge();updateCount();
 
-$('clearBtn').onclick=()=>{
-  ['v6_h1','v6_m15','v6_h1_time','v6_m15_time'].forEach(k=>localStorage.removeItem(k));
-  refreshAge();
-};
+$('clear').onclick=()=>{['v62_h1','v62_m15','v62_ht','v62_mt'].forEach(k=>localStorage.removeItem(k));refreshAge()};
 
-$('m5').onchange=async()=>{
-  const f=$('m5').files[0];
-  if(!f)return;
-  CURRENT_M5=await toDataURL(f);
-  $('m5Preview').src=CURRENT_M5;
-  $('finalPreview').src=CURRENT_M5;
-  $('m5Chart').classList.remove('hide');
-};
+$('m5').onchange=async()=>{const f=$('m5').files[0];if(!f)return;const m=await toDataURL(f);$('preview').src=m;$('chart').classList.remove('hide')};
 
 $('scan').onclick=async()=>{
   clearError();
-  const f=$('m5').files[0];
-  if(!f) return showError('Choose a fresh M5 screenshot first.');
-  CURRENT_M5=await toDataURL(f);
-  $('m5Preview').src=CURRENT_M5;
-  $('finalPreview').src=CURRENT_M5;
-  $('m5Chart').classList.remove('hide');
+  const mf=$('m5').files[0];if(!mf)return showError('Choose a fresh M5 screenshot first.');
+  const hf=$('h1').files[0],m15f=$('m15').files[0];
 
+  let h1=hf?await toDataURL(hf):localStorage.getItem('v62_h1');
+  let m15=m15f?await toDataURL(m15f):localStorage.getItem('v62_m15');
+  const m5=await toDataURL(mf);
+
+  if(!h1||!m15)return showError('Upload H1 and M15 once before scanning.');
+  const ha=ageMin('v62_ht'),ma=ageMin('v62_mt');
+  if(!hf&&!m15f&&(ha===null||ma===null||ha>=60||ma>=30))return showError('Saved H1/M15 are stale. Upload fresh H1 + M15.');
+
+  if(hf){localStorage.setItem('v62_h1',h1);localStorage.setItem('v62_ht',Date.now())}
+  if(m15f){localStorage.setItem('v62_m15',m15);localStorage.setItem('v62_mt',Date.now())}
+  refreshAge();$('preview').src=m5;$('chart').classList.remove('hide');
+
+  const key='v62_cache_'+await hashText(m5);
+  const cached=localStorage.getItem(key);
+  if(cached){
+    try{render(JSON.parse(cached));showError('Same M5 image detected — showing saved result. No Gemini request used.');return}catch(e){}
+  }
+
+  $('scan').disabled=true;$('scan').textContent='Scanning...';
   try{
-    const r=await fetch('/api/fast-scan',{
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({m5:CURRENT_M5})
-    });
+    const r=await fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({h1,m15,m5})});
     const d=await r.json();
-    if(d.error) throw new Error(d.error);
-
-    $('fastSignal').textContent=d.signal||'WAIT';
-    $('fastSignal').className='sig '+sigClass(d.signal);
-    $('fastTrend').textContent=d.trend||'—';
-    $('fastType').textContent=d.setup_type||'—';
-    $('fastZone').textContent=d.entry_zone||'—';$('fastTP').textContent=tpText(d);
-    $('fastTrigger').textContent=d.trigger||'—';
-    $('fastReason').textContent=d.reason||'—';
-    $('fastAction').textContent=d.action||'—';
-    $('fastResult').classList.remove('hide');
-
-    drawBand($('fastBand'),$('fastLabel'),d.zone_y_top,d.zone_y_bottom,d.entry_zone,d.signal);drawTPs('fast',d);
-
-    const needsConfirm=(d.signal||'').includes('ENTRY READY') ||
-                       (d.signal||'').includes('WAIT FOR CONFIRMATION') ||
-                       (d.signal||'').includes('REFRESH');
-    $('confirmCard').classList.toggle('hide',!needsConfirm);
-  }catch(e){ showError(friendlyError(e.message)); }
-};
-
-$('confirmBtn').onclick=async()=>{
-  clearError();
-  if(!CURRENT_M5) return showError('Scan a fresh M5 first.');
-
-  const hf=$('h1').files[0], mf=$('m15').files[0];
-  let h=hf?await toDataURL(hf):localStorage.getItem('v6_h1');
-  let m=mf?await toDataURL(mf):localStorage.getItem('v6_m15');
-
-  if(!h||!m) return showError('Add H1 and M15 once for final confirmation.');
-
-  const ha=ageMin('v6_h1_time'), ma=ageMin('v6_m15_time');
-  if(!hf&&!mf&&(ha===null||ma===null||ha>=60||ma>=30))
-    return showError('Saved H1/M15 are stale. Add fresh H1 + M15.');
-
-  if(hf){localStorage.setItem('v6_h1',h);localStorage.setItem('v6_h1_time',Date.now());}
-  if(mf){localStorage.setItem('v6_m15',m);localStorage.setItem('v6_m15_time',Date.now());}
-  refreshAge();
-
-  try{
-    const r=await fetch('/api/confirm',{
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({h1:h,m15:m,m5:CURRENT_M5})
-    });
-    const d=await r.json();
-    if(d.error) throw new Error(d.error);
-
-    $('finalSignal').textContent=d.signal||'WAIT';
-    $('finalSignal').className='sig '+sigClass(d.signal);
-    $('finalTrend').textContent=d.trend||'—';
-    $('finalType').textContent=d.setup_type||'—';
-    $('finalZone').textContent=d.entry_zone||'—';$('finalTP').textContent=tpText(d);
-    $('finalTrigger').textContent=d.trigger||'—';
-    $('finalReason').textContent=d.reason||'—';
-    $('finalAction').textContent=d.action||'—';
-    $('finalResult').classList.remove('hide');
-    $('finalPreview').src=CURRENT_M5;
-
-    drawBand($('finalBand'),$('finalLabel'),d.zone_y_top,d.zone_y_bottom,d.entry_zone,d.signal);drawTPs('final',d);
-    $('finalChart').classList.toggle('entryReady',(d.signal||'').includes('ENTRY READY'));
-
-    if((d.signal||'').includes('REFRESH')){
-      ['v6_h1','v6_m15','v6_h1_time','v6_m15_time'].forEach(k=>localStorage.removeItem(k));
-      refreshAge();
+    if(!r.ok||d.error){
+      if(d.daily_quota)throw new Error('DAILY_QUOTA');
+      if(d.error==='quota')throw new Error('TEMP_QUOTA');
+      throw new Error('FAILED');
     }
-
-    $('finalResult').scrollIntoView({behavior:'smooth'});
-  }catch(e){ showError(friendlyError(e.message)); }
+    incCount();
+    localStorage.setItem(key,JSON.stringify(d));
+    render(d);
+  }catch(e){
+    if(e.message==='DAILY_QUOTA')showError('Gemini daily free quota reached. Try again after the daily quota resets.');
+    else if(e.message==='TEMP_QUOTA')showError('Gemini is temporarily rate-limited. Wait a little, then try again.');
+    else showError('Scan failed. Please try again.');
+  }finally{
+    $('scan').disabled=false;$('scan').textContent='⚡ Scan Full Setup';
+  }
 };
-
-if('serviceWorker' in navigator){ navigator.serviceWorker.register('/sw.js').catch(()=>{}); }
+if('serviceWorker'in navigator)navigator.serviceWorker.register('/sw.js').catch(()=>{});
 </script>
 </body>
 </html>

@@ -5,73 +5,19 @@ from google.genai import types
 
 app = Flask(__name__, static_folder=".", static_url_path="")
 
-FAST_PROMPT = """
-You are an XAUUSD M5 ENTRY-TIMING scanner.
+FINAL_PROMPT = """
+You are Gold Scanner V6.2, an XAUUSD ENTRY-TIMING assistant.
 
-Goal:
-- Help the trader time entries, not predict blindly.
-- Find ONE useful pullback/entry zone.
-- If price is not at the zone yet, say WAIT FOR ZONE.
-- If price is in the zone but confirmation is missing, say WAIT FOR CONFIRMATION.
-- If price is in the zone and a clean M5 trigger exists, say ENTRY READY BUY or ENTRY READY SELL.
-- If structure is unclear, say WAIT.
-- If the current M5 looks materially different from previously expected direction, say REFRESH H1/M15.
+Images are supplied in this order:
+1) H1
+2) M15
+3) CURRENT M5
 
-Provide up to THREE sensible take-profit zones: TP1, TP2, TP3.
-Do NOT provide a stop loss; the trader manages SL.
-TP zones must follow visible support/resistance/structure, not arbitrary distances.
-Also estimate each TP zone's vertical position on THIS M5 screenshot using normalized 0.0-1.0 y coordinates.
-If a TP cannot be justified or located reliably, return null for that TP and its y coordinate.
-
-Return ONE zone only.
-Also estimate the vertical location of the zone on THIS screenshot so the frontend can draw a red/green band.
-zone_y_top and zone_y_bottom must be numbers from 0.0 to 1.0 measured from the TOP of the image.
-Example: 0.30 means 30% down from the image top.
-If you cannot locate the zone reliably, use null for both.
-
-Keep reason under 9 words.
-Keep trigger under 12 words.
-Keep action under 15 words.
-No timer-based instructions. Rescan based on price reaching the zone or confirmation appearing.
-
-JSON only:
-{
-  "signal":"WAIT FOR ZONE|WAIT FOR CONFIRMATION|ENTRY READY BUY|ENTRY READY SELL|WAIT|REFRESH H1/M15",
-  "trend":"Up|Down|Mixed",
-  "current_price":null,
-  "entry_zone":"price range or null",
-  "zone_y_top":null,
-  "zone_y_bottom":null,
-  "setup_type":"pullback|break-retest|rejection|structure shift|other",
-  "tp1":null,
-  "tp1_y":null,
-  "tp2":null,
-  "tp2_y":null,
-  "tp3":null,
-  "tp3_y":null,
-  "trigger":"short M5 confirmation needed",
-  "reason":"very short reason",
-  "action":"very short next action"
-}
-"""
-
-CONFIRM_PROMPT = """
-You are the FINAL XAUUSD ENTRY-TIMING scanner.
-
-You are given H1, M15, then a CURRENT M5 screenshot.
-Use:
-- H1 mainly for broad direction.
-- M15 for structure and the best pullback/entry area.
-- M5 for exact timing.
-
-Your job is ENTRY TIMING.
-Provide up to THREE sensible take-profit zones: TP1, TP2, TP3.
-Do NOT provide a stop loss; the trader manages SL.
-TPs must be based on visible H1/M15/M5 structure and ordered from nearest to furthest target.
-Estimate each TP's vertical position on the CURRENT M5 screenshot as 0.0-1.0 from image top.
-If a TP is not justified or cannot be located reliably, return null.
-Do not force the old H1/M15 bias if current M5 clearly contradicts it.
-If the higher-timeframe context may be stale or invalid, return REFRESH H1/M15.
+Purpose:
+- H1 = broad direction
+- M15 = structure and pullback area
+- M5 = exact timing
+- Use ONE AI request to produce the entire result.
 
 Allowed signals:
 - WAIT FOR ZONE
@@ -81,22 +27,34 @@ Allowed signals:
 - WAIT
 - REFRESH H1/M15
 
-Rules:
-1. ONE entry zone only.
-2. If price is outside the zone -> WAIT FOR ZONE.
-3. If price is inside the zone but trigger is not confirmed -> WAIT FOR CONFIRMATION.
-4. ENTRY READY only when price is in/very near the zone AND M5 shows a clean confirmation.
-5. Never tell the trader to enter just because price touched the zone.
-6. No TP/SL fields.
-7. No fixed-minute rescan instructions.
-8. Keep reason under 9 words.
-9. Keep trigger under 12 words.
-10. Keep action under 15 words.
-11. Estimate where the zone lies vertically on the CURRENT M5 screenshot:
-   zone_y_top and zone_y_bottom are 0.0-1.0 from image top.
-   If uncertain, return null.
+Entry rules:
+1. Find ONE entry/pullback zone.
+2. If price has not reached it -> WAIT FOR ZONE.
+3. If price is in the zone but trigger is missing -> WAIT FOR CONFIRMATION.
+4. ENTRY READY only when M5 shows a clean confirmation in/very near the zone.
+5. Never enter merely because price touched a zone.
+6. If current M5 clearly invalidates the saved H1/M15 context -> REFRESH H1/M15.
+7. No timer-based rescan instructions.
 
-JSON only:
+Take-profit rules:
+- Provide up to THREE sensible TP targets based on visible structure.
+- Order TP1 nearest, TP3 furthest.
+- If a TP is not justified, return null.
+- Do NOT provide a stop loss. The user manages SL and risk.
+
+Visual overlay rules:
+- Estimate the vertical position of the entry zone on the CURRENT M5 screenshot.
+- zone_y_top / zone_y_bottom are normalized 0.0-1.0 from the top of the M5 image.
+- Estimate each TP vertical y position on CURRENT M5 as 0.0-1.0.
+- If not reliable, use null.
+- These coordinates are approximate.
+
+Text:
+- reason max 8 words
+- trigger max 12 words
+- action max 15 words
+
+Return JSON only:
 {
   "signal":"WAIT FOR ZONE|WAIT FOR CONFIRMATION|ENTRY READY BUY|ENTRY READY SELL|WAIT|REFRESH H1/M15",
   "trend":"Up|Down|Mixed",
@@ -150,26 +108,27 @@ def sw():
 def icon():
     return send_from_directory(".", "icon.svg")
 
-@app.post("/api/fast-scan")
-def fast_scan():
+@app.post("/api/scan")
+def scan():
     d = request.get_json(force=True)
     try:
-        return jsonify(run_model([FAST_PROMPT, image_part(d["m5"])]))
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.post("/api/confirm")
-def confirm():
-    d = request.get_json(force=True)
-    try:
-        return jsonify(run_model([
-            CONFIRM_PROMPT,
+        result = run_model([
+            FINAL_PROMPT,
             image_part(d["h1"]),
             image_part(d["m15"]),
             image_part(d["m5"]),
-        ]))
+        ])
+        return jsonify(result)
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        text = str(e)
+        # Return a compact structured error so the app can distinguish a daily quota.
+        is_daily = "GenerateRequestsPerDayPerProjectPerModel-FreeTier" in text or "PerDay" in text
+        is_quota = "429" in text or "RESOURCE_EXHAUSTED" in text or "quota" in text.lower()
+        return jsonify({
+            "error": "quota" if is_quota else "scan_failed",
+            "daily_quota": bool(is_daily),
+            "detail": text[:1000]
+        }), 429 if is_quota else 500
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
