@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="theme-color" content="#07111d">
-<title>Gold Scanner V6.3</title>
+<title>Gold Scanner V6.4</title>
 <link rel="manifest" href="/manifest.json">
 <style>
 *{box-sizing:border-box}
@@ -29,7 +29,7 @@ input[type=file]{padding:10px;background:#07101a;border:1px dashed #36516d;borde
 .zoneOverlay{position:absolute;left:0;right:0;background:rgba(255,60,70,.20);border-top:2px solid #ff4f59;border-bottom:2px solid #ff4f59;pointer-events:none}
 .entry2{background:rgba(255,176,32,.18)!important;border-color:#f2a928!important}.entry3{background:rgba(90,143,255,.18)!important;border-color:#5890ff!important}.zoneLabel{position:absolute;right:8px;background:#c52f39;color:#fff;font-weight:900;padding:7px 10px;border-radius:9px;font-size:13px;pointer-events:none}
 .tpLine{position:absolute;left:0;right:0;height:0;border-top:2px dashed #32dc88;pointer-events:none}
-.tpLabel{position:absolute;right:8px;transform:translateY(-100%);background:#087b4a;color:#fff;font-weight:900;padding:5px 9px;border-radius:8px;font-size:12px;pointer-events:none}
+.tpLabel{position:absolute;right:10px;transform:translateY(-100%);background:#087b4a;color:#fff;font-weight:850;padding:3px 6px;border-radius:6px;font-size:10px;pointer-events:none}
 .note{font-size:13px;color:#8fa1b6;margin-top:8px}
 .pill{display:inline-block;border:1px solid #36516d;border-radius:999px;padding:6px 10px;margin-top:8px;color:#b9c7d8;font-size:13px}
 @media(max-width:520px){.grid{grid-template-columns:1fr}.sig{font-size:30px}}
@@ -37,8 +37,8 @@ input[type=file]{padding:10px;background:#07101a;border:1px dashed #36516d;borde
 </head>
 <body>
 <div class="wrap">
-  <h1>Gold Scanner V6.3</h1>
-  <div class="sub">Multi-entry map · 3 Entry Zones + TP marking</div>
+  <h1>Gold Scanner V6.4</h1>
+  <div class="sub">Momentum-aware multi-entry map</div>
 
   <div id="error" class="card warn hide"></div>
   <div id="status" class="card ok">
@@ -107,7 +107,7 @@ function drawEntry(n,e){
   const band=$('e'+n),lab=$('e'+n+'L');
   if(!e||!e.zone||e.y_top==null||e.y_bottom==null){band.classList.add('hide');lab.classList.add('hide');return}
   let t=clamp(e.y_top),b=clamp(e.y_bottom);if(b<t){const x=t;t=b;b=x}
-  band.style.top=(t*100)+'%';band.style.height=(Math.max(.025,b-t)*100)+'%';
+  band.style.top=(t*100)+'%';band.style.height=(Math.max(.006,Math.min(.018,b-t))*100)+'%';
   if(n===2)band.classList.add('entry2'); if(n===3)band.classList.add('entry3');
   lab.style.top=Math.max(1,t*100-7)+'%';lab.textContent='ENTRY '+n+' · '+e.zone;
   lab.style.background=n===1?'#c52f39':(n===2?'#a96d00':'#315eaf');

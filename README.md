@@ -1,7 +1,18 @@
-# Gold Scanner V6.3 — Multi-Entry Map
+# Gold Scanner V6.4 — Momentum Fix
 
-One AI scan can map up to 3 separate entry opportunities.
+Fixes:
+- Separates H1/M15 bias from current M5 momentum.
+- Can show SELL bias while M5 is in a bullish pullback.
+- Will not mark an entry READY while M5 is strongly moving against the intended direction.
+- Uses WAIT CONFIRMATION until M5 aligns again.
+- Rejects TP targets that overlap active entry zones.
+- Tightens entry bands and shrinks labels so candles stay visible.
+- Still maps up to 3 entry opportunities in one Gemini request.
+- Exact same M5 screenshot still uses cached result with zero new request.
 
-Includes ENTRY 1/2/3, WATCH/WAIT CONFIRMATION/READY/MISSED statuses, confirmation for each, visual marks for each valid entry, TP1/TP2/TP3, one Gemini request per fresh M5, cached identical M5 results, H1/M15 freshness checks, and user-managed SL/risk.
+Replace in GitHub/Render:
+- server.py
+- index.html
+- sw.js
 
-Replace server.py, index.html and sw.js in GitHub, then redeploy Render.
+Then redeploy Render.
