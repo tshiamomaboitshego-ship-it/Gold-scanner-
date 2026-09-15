@@ -1,4 +1,8 @@
-# Gold Scanner V9.1 — M5 UI Fix
-Fixes the missing M5 upload/scan card in V9. Trading logic remains M5-only.
-Deploy: server.py, index.html, sw.js, manifest.json.
-Confirm the page title says Gold Scanner V9.1.
+# Gold Scanner V9.2 — M5 Backend Fix
+
+V9.2 fixes the remaining backend code that was still requiring H1 + M15 + M5.
+
+The complete scan path is now M5-only:
+M5 screenshot → one Gemini request → BUY SETUP / SELL SETUP / NO TRADE → fresh entry zone + invalidation + TP1/TP2/TP3.
+
+No H1 or M15 image is required or sent to Gemini.

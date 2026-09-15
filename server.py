@@ -113,7 +113,6 @@ def normalize_result(result):
     if sig not in {"BUY SETUP","SELL SETUP","NO TRADE"}: sig="NO TRADE"
     result["signal"]=sig
     result.setdefault("higher_timeframe_bias","MIXED")
-    result.setdefault("m15_setup","")
     result.setdefault("m5_state","")
     result.setdefault("reason","No fresh entry setup found.")
 
@@ -187,13 +186,11 @@ def icon():
 def scan():
     try:
         d = request.get_json(force=True)
-        if not all(d.get(k) for k in ("h1", "m15", "m5")):
-            return jsonify({"error":"missing_images","detail":"H1, M15 and M5 are required."}), 400
+        if not d.get("m5"):
+            return jsonify({"error":"missing_image","detail":"M5 screenshot is required."}), 400
 
         result = run_model([
             FINAL_PROMPT,
-            image_part(d["h1"]),
-            image_part(d["m15"]),
             image_part(d["m5"]),
         ])
         return jsonify(normalize_result(result))
