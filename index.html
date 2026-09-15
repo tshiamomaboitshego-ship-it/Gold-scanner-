@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="theme-color" content="#07111d">
-<title>Gold Scanner V6.7</title>
+<title>Gold Scanner V8</title>
 <link rel="manifest" href="/manifest.json">
 <style>
 *{box-sizing:border-box}
@@ -40,8 +40,8 @@ input[type=file]{padding:10px;background:#07101a;border:1px dashed #36516d;borde
 </head>
 <body>
 <div class="wrap">
-  <h1>Gold Scanner V6.7</h1>
-  <div class="sub">Clean Confirmed Entry Mode · one tap = one request maximum</div>
+  <h1>Gold Scanner V8</h1>
+  <div class="sub">One-Scan Entry Finder · H1 + M15 + M5 → one best zone</div>
 
   <div id="error" class="card warn hide"></div>
   <div id="status" class="card ok">
@@ -60,9 +60,9 @@ input[type=file]{padding:10px;background:#07101a;border:1px dashed #36516d;borde
 
   <div class="card">
     <h2>2 · Current M5</h2>
-    <div class="small">The scanner only calls an entry READY when M5 confirmation exists now. Otherwise it shows NO CONFIRMED ENTRY and optional WATCH areas.</div>
+    <div class="small">One scan selects the best entry zone. You do not need to rescan when price reaches it.</div>
     <input id="m5" type="file" accept="image/*">
-    <button id="scan">⚡ Check Confirmed Entry</button>
+    <button id="scan">⚡ Find Entry Zone</button>
 
     <div id="chart" class="chartWrap hide">
       <img id="preview" alt="M5 chart">
@@ -73,37 +73,24 @@ input[type=file]{padding:10px;background:#07101a;border:1px dashed #36516d;borde
       <div id="tp2" class="tpLine hide"></div><div id="tp2L" class="tpLabel hide"></div>
       <div id="tp3" class="tpLine hide"></div><div id="tp3L" class="tpLabel hide"></div>
     </div>
-    <div class="note">WATCH areas are not automatic entries. ENTRY READY requires current M5 confirmation.</div>
+    <div class="note">Use the selected zone with its instruction. Ignore the setup if its invalidation happens.</div>
   </div>
 
   <div id="result" class="card hide">
-    <div id="signal" class="sig"></div>
-
-    <div class="grid">
-      <div class="box">HTF bias<b id="bias">—</b></div>
-      <div class="box">M5 momentum<b id="momentum">—</b></div>
-    </div>
-
-    <div id="readyCard" class="bigbox readybox hide">
-      CONFIRMED ENTRY
-      <b id="readyZone">—</b>
-      <div id="readyWhy" class="small"></div>
-    </div>
-
-    <div id="watch1Card" class="bigbox watchbox hide">WATCH 1<b id="watch1Zone">—</b><div id="watch1Trigger" class="small"></div></div>
-    <div id="watch2Card" class="bigbox watchbox hide">WATCH 2<b id="watch2Zone">—</b><div id="watch2Trigger" class="small"></div></div>
-    <div id="watch3Card" class="bigbox watchbox hide">WATCH 3<b id="watch3Zone">—</b><div id="watch3Trigger" class="small"></div></div>
-
-    <div class="bigbox">TAKE PROFIT<b id="tps">Only shown with confirmed entry</b></div>
-    <div class="bigbox">Reason<b id="reason">—</b></div>
-    <div id="validation" class="note hide"></div>
-    <div class="note">You manage your own stop loss, position size and risk.</div>
-  </div>
+<div id="signal" class="sig"></div>
+<div class="grid"><div class="box">HTF bias<b id="bias">—</b></div><div class="box">M5 state<b id="momentum">—</b></div></div>
+<div id="readyCard" class="bigbox readybox hide">BEST ENTRY ZONE<b id="readyZone">—</b><div id="readyWhy" class="small"></div></div>
+<div class="bigbox">ENTRY INSTRUCTION<b id="instruction">—</b></div>
+<div class="bigbox warn">IGNORE SETUP IF<b id="invalidation">—</b></div>
+<div class="bigbox">TAKE PROFIT<b id="tps">—</b></div>
+<div class="bigbox">Reason<b id="reason">—</b></div>
+<div class="note">Entry zones are analysis areas, not guarantees. You manage stop loss, size and risk.</div>
+</div>
 </div>
 
 <script>
 const $=id=>document.getElementById(id);
-const K={h1:'v67_h1',m15:'v67_m15',ht:'v67_ht',mt:'v67_mt'};
+const K={h1:'v8_h1',m15:'v8_m15',ht:'v8_ht',mt:'v8_mt'};
 let scanBusy=false;
 
 const toDataURL=file=>new Promise((res,rej)=>{
@@ -128,7 +115,7 @@ function refreshAge(){
   }
 }
 function todayKey(){const d=new Date();return d.getFullYear()+'-'+(d.getMonth()+1)+'-'+d.getDate()}
-function countKey(){return 'v67_count_'+todayKey()}
+function countKey(){return 'v8_count_'+todayKey()}
 function updateCount(){const n=+(localStorage.getItem(countKey())||0);$('localCount').textContent='Successful AI scans saved today: '+n}
 function incCount(){localStorage.setItem(countKey(),+(localStorage.getItem(countKey())||0)+1);updateCount()}
 function clamp(v){return Math.max(0,Math.min(1,Number(v)))}
@@ -157,52 +144,25 @@ function drawTP(n,price,y){
 }
 
 function render(d){
-  hideVisuals();
-  $('signal').textContent=d.signal||'NO CONFIRMED ENTRY';
-  $('signal').className='sig '+sigClass(d.signal);
-  $('bias').textContent=d.higher_timeframe_bias||'MIXED';
-  $('momentum').textContent=d.m5_momentum||'MIXED';
-  $('reason').textContent=d.reason||'No confirmed entry is available right now.';
-
-  const ready=(d.signal||'').startsWith('ENTRY READY');
-  const ce=d.confirmed_entry||{};
-  if(ready && ce.zone){
-    $('readyCard').classList.remove('hide');
-    $('readyZone').textContent=ce.zone;
-    $('readyWhy').textContent='M5 confirmation: '+(ce.confirmation||'confirmed');
-    drawZone(1,ce,'ENTRY READY',true);
-  }else{
-    $('readyCard').classList.add('hide');
-  }
-
-  for(let n=1;n<=3;n++){
-    const w=d['watch'+n]||{};
-    const card=$('watch'+n+'Card');
-    if(w.zone){
-      card.classList.remove('hide');
-      $('watch'+n+'Zone').textContent=w.zone;
-      $('watch'+n+'Trigger').textContent='Need: '+(w.trigger||'fresh M5 confirmation');
-      if(!ready || n>1) drawZone(ready?n+1:n,w,'WATCH '+n,false);
-    }else card.classList.add('hide');
-  }
-
-  const a=[];if(d.tp1!=null)a.push('TP1: '+d.tp1);if(d.tp2!=null)a.push('TP2: '+d.tp2);if(d.tp3!=null)a.push('TP3: '+d.tp3);
-  $('tps').textContent=a.length?a.join(' · '):'Only shown with confirmed entry';
-  drawTP(1,d.tp1,d.tp1_y);drawTP(2,d.tp2,d.tp2_y);drawTP(3,d.tp3,d.tp3_y);
-
-  if(d.validation_note){
-    $('validation').textContent='Validation: '+d.validation_note;
-    $('validation').classList.remove('hide');
-  }else $('validation').classList.add('hide');
-
-  $('result').classList.remove('hide');
-
-  if((d.signal||'').includes('REFRESH')){
-    [K.h1,K.m15,K.ht,K.mt].forEach(k=>localStorage.removeItem(k));
-    refreshAge();
-  }
+ hideVisuals();
+ const s=d.signal||'NO TRADE';
+ $('signal').textContent=s;$('signal').className='sig '+sigClass(s);
+ $('bias').textContent=d.higher_timeframe_bias||'MIXED';$('momentum').textContent=d.m5_state||'—';$('reason').textContent=d.reason||'—';
+ const e=d.entry||{};
+ if((s==='BUY SETUP'||s==='SELL SETUP')&&e.zone){
+   $('readyCard').classList.remove('hide');$('readyZone').textContent=e.zone;
+   $('readyWhy').textContent=(e.type?e.type+' · ':'')+(d.m15_setup||'');
+   $('instruction').textContent=e.instruction||'Use the selected entry zone.';
+   $('invalidation').textContent=e.invalidation||'Setup structure is invalidated.';
+   drawZone(1,e,'ENTRY ZONE',true);
+ }else{
+   $('readyCard').classList.add('hide');$('instruction').textContent='No entry selected.';$('invalidation').textContent='—';
+ }
+ const a=[];if(d.tp1!=null)a.push('TP1: '+d.tp1);if(d.tp2!=null)a.push('TP2: '+d.tp2);if(d.tp3!=null)a.push('TP3: '+d.tp3);
+ $('tps').textContent=a.length?a.join(' · '):'No targets';
+ drawTP(1,d.tp1,d.tp1_y);drawTP(2,d.tp2,d.tp2_y);drawTP(3,d.tp3,d.tp3_y);
+ $('result').classList.remove('hide');
 }
-
 async function hashText(s){
   const b=new TextEncoder().encode(s),h=await crypto.subtle.digest('SHA-256',b);
   return [...new Uint8Array(h)].map(x=>x.toString(16).padStart(2,'0')).join('');
@@ -230,7 +190,7 @@ $('scan').onclick=async()=>{
 
   const btn=$('scan');
   btn.disabled=true;
-  btn.textContent='Checking…';
+  btn.textContent='Finding entry…';
 
   try{
     const mf=$('m5').files[0];
@@ -256,7 +216,7 @@ $('scan').onclick=async()=>{
     $('preview').src=m5;$('chart').classList.remove('hide');
 
     // CACHE CHECK HAPPENS BEFORE FETCH.
-    const key='v67_cache_'+await hashText(m5);
+    const key='v8_cache_'+await hashText(m5);
     const cached=localStorage.getItem(key);
     if(cached){
       render(JSON.parse(cached));
@@ -306,7 +266,7 @@ $('scan').onclick=async()=>{
   }finally{
     scanBusy=false;
     btn.disabled=false;
-    btn.textContent='⚡ Check Confirmed Entry';
+    btn.textContent='⚡ Find Entry Zone';
   }
 };
 
