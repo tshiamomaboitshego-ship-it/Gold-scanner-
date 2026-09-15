@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="theme-color" content="#07111d">
-<title>Gold Scanner V8.2</title>
+<title>Gold Scanner V8.3</title>
 <link rel="manifest" href="/manifest.json">
 <style>
 *{box-sizing:border-box}
@@ -40,8 +40,8 @@ input[type=file]{padding:10px;background:#07101a;border:1px dashed #36516d;borde
 </head>
 <body>
 <div class="wrap">
-  <h1>Gold Scanner V8.2</h1>
-  <div class="sub">Fresh Entry Finder · verified images before every scan</div>
+  <h1>Gold Scanner V8.3</h1>
+  <div class="sub">Fresh Entry Finder · screenshots stay in temporary memory</div>
 
   <div id="error" class="card warn hide"></div>
   <div id="status" class="card ok">
@@ -90,7 +90,7 @@ input[type=file]{padding:10px;background:#07101a;border:1px dashed #36516d;borde
 
 <script>
 const $=id=>document.getElementById(id);
-const K={h1:'v82_h1',m15:'v82_m15',ht:'v82_ht',mt:'v82_mt'};
+const K={h1:'v83_h1',m15:'v83_m15',ht:'v83_ht',mt:'v83_mt'};
 let scanBusy=false;
 let loaded={h1:null,m15:null,m5:null};
 
@@ -133,8 +133,6 @@ async function loadSelectedImage(id){
     const data=await toDataURL(f);
     loaded[id]=data;
     readyLabel(id,true,`${id.toUpperCase()} ready · ${(f.size/1024).toFixed(0)} KB`);
-    if(id==='h1'){localStorage.setItem(K.h1,data);localStorage.setItem(K.ht,Date.now())}
-    if(id==='m15'){localStorage.setItem(K.m15,data);localStorage.setItem(K.mt,Date.now())}
     if(id==='m5'){$('preview').src=data;$('chart').classList.remove('hide')}
     refreshAge(); clearError(); updateScanReady();
   }catch(e){
@@ -147,22 +145,14 @@ async function loadSelectedImage(id){
 
 function showError(x){$('error').textContent=x;$('error').classList.remove('hide')}
 function clearError(){$('error').classList.add('hide');$('error').textContent=''}
-function ageMin(k){const t=+localStorage.getItem(k);return t?Math.floor((Date.now()-t)/60000):null}
 function refreshAge(){
-  const h=localStorage.getItem(K.h1),m=localStorage.getItem(K.m15),ha=ageMin(K.ht),ma=ageMin(K.mt);
-  if(h&&m){
-    $('ageText').textContent=`Saved H1: ${ha??'?'} min old · M15: ${ma??'?'} min old`;
-    const stale=ha===null||ma===null||ha>=60||ma>=30;
-    $('staleWarn').classList.toggle('hide',!stale);
-  }else{
-    $('ageText').textContent='No saved H1/M15 yet.';
-    $('staleWarn').classList.add('hide');
-  }
+  $('ageText').textContent=(loaded.h1&&loaded.m15)?'H1 + M15 loaded for this session.':'Upload fresh H1 + M15.';
+  $('staleWarn').classList.add('hide');
 }
 function todayKey(){const d=new Date();return d.getFullYear()+'-'+(d.getMonth()+1)+'-'+d.getDate()}
-function countKey(){return 'v82_count_'+todayKey()}
+function countKey(){return 'v83_count_'+todayKey()}
 function updateCount(){const n=+(localStorage.getItem(countKey())||0);$('localCount').textContent='Successful AI scans saved today: '+n}
-function incCount(){localStorage.setItem(countKey(),+(localStorage.getItem(countKey())||0)+1);updateCount()}
+function incCount(){try{localStorage.setItem(countKey(),+(localStorage.getItem(countKey())||0)+1)}catch(e){} updateCount()}
 function clamp(v){return Math.max(0,Math.min(1,Number(v)))}
 function sigClass(s){s=(s||'').toUpperCase();if(s.includes('BUY'))return'buy';if(s.includes('SELL'))return'sell';if(s.includes('REFRESH'))return'refresh';return'wait'}
 
@@ -213,10 +203,17 @@ async function hashText(s){
   return [...new Uint8Array(h)].map(x=>x.toString(16).padStart(2,'0')).join('');
 }
 
+try{
+  const old=[];
+  for(let i=0;i<localStorage.length;i++){
+    const k=localStorage.key(i)||'';
+    if((k.includes('_h1')||k.includes('_m15')||k.includes('_m5_current')) && /^v(6|7|8)/.test(k)) old.push(k);
+  }
+  old.forEach(k=>localStorage.removeItem(k));
+}catch(e){}
 refreshAge();updateCount();updateScanReady();
 
 $('clear').onclick=()=>{
-  [K.h1,K.m15,K.ht,K.mt].forEach(k=>localStorage.removeItem(k));
   loaded.h1=null; loaded.m15=null;
   $('h1').value=''; $('m15').value='';
   $('h1Ready').textContent='⚪ Not loaded'; $('m15Ready').textContent='⚪ Not loaded';
@@ -242,7 +239,7 @@ $('scan').onclick=async()=>{
     // Use ONLY the already-read, verified image data. No FileReader work occurs after tap.
     const h1=loaded.h1, m15=loaded.m15, m5=loaded.m5;
 
-    const key='v82_cache_'+await hashText(m5);
+    const key='v83_cache_'+await hashText(m5);
     const cached=localStorage.getItem(key);
     if(cached){
       render(JSON.parse(cached));
@@ -265,7 +262,7 @@ $('scan').onclick=async()=>{
       throw new Error('SERVER:'+((d.detail||('HTTP '+r.status)).slice(0,260)));
     }
 
-    localStorage.setItem(key,JSON.stringify(d)); // cache before rendering
+    try{ localStorage.setItem(key,JSON.stringify(d)); }catch(storageErr){ console.warn('Result cache unavailable',storageErr); } // JSON only, never screenshots
     incCount();
     render(d);
 
