@@ -6,30 +6,61 @@ from google.genai import types
 app = Flask(__name__, static_folder=".", static_url_path="")
 
 FINAL_PROMPT = """
-You are Gold Scanner V12, an XAUUSD M5 TWO-SIDED PULLBACK ZONE MAPPER.
-Analyze ONE current XAUUSD M5 screenshot only. Never use or infer higher timeframes.
+You are Gold Scanner V13, a focused XAUUSD M5 PULLBACK FINDER.
+Analyze ONLY the ONE current XAUUSD M5 screenshot supplied. Do not infer H1/M15 or unseen future candles.
+Your job is NOT to predict direction and NOT to issue BUY NOW / SELL NOW signals.
+Your only job is to inspect the visible M5 structure and map the best CURRENT pullback areas the user can watch.
 
-Do NOT choose trade direction. Map BOTH sides when visibly valid:
-BUY PULLBACK = best fresh nearby support/demand/retest zone below or around current price.
-SELL PULLBACK = best fresh nearby resistance/supply/retest zone above or around current price.
+Read the newest/right-edge candles first, then work left only as far as needed to understand the recent move.
+Estimate current price from the visible chart label/scale when readable.
 
-Focus on newest/right-edge candles and current price.
-BUY evidence: recent support, demand, swing low, broken resistance retest, bullish impulse origin.
-SELL evidence: recent resistance, supply, swing high, broken support retest, bearish impulse origin.
-Prefer recent, nearby, fresh zones. Reject clearly used, invalidated, exhausted, or distant zones.
-Do not invent a zone merely to provide both sides. A side may be null.
-Do not output TP/target/take-profit levels or a trade signal. User decides direction.
-Classify M5 state BULLISH, BEARISH, or UNCLEAR for context only.
-y_top/y_bottom are normalized 0.0-1.0 from screenshot top.
+For a BUY pullback zone, look for the strongest fresh nearby area at/below current price supported by visible evidence such as:
+- recently defended support / higher-low area,
+- origin/base of a strong bullish impulse,
+- resistance that was clearly broken and could be retested as support,
+- fresh demand/reaction area that has not already been repeatedly consumed.
+
+For a SELL pullback zone, look for the strongest fresh nearby area at/above current price supported by visible evidence such as:
+- recently defended resistance / lower-high area,
+- origin/base of a strong bearish impulse,
+- support that was clearly broken and could be retested as resistance,
+- fresh supply/reaction area that has not already been repeatedly consumed.
+
+Freshness rules:
+- Prefer zones created by the most recent meaningful impulse/break/retest structure.
+- Prefer nearby zones over old distant zones when evidence quality is similar.
+- Reject zones clearly broken through and accepted beyond, repeatedly tested/consumed, or already reacted from and moved away.
+- A wick touching a zone does NOT mean an automatic entry.
+- Never invent a weak opposite-side zone just to fill both sides; either side may be null.
+- Keep zones reasonably tight around the actual visible structure, not huge ranges.
+
+For each valid zone give a short basis and what the user should visually wait for: rejection plus follow-through/structure response. Do NOT give take-profit levels, position size, or an automatic trade signal.
+Classify M5 state BULLISH, BEARISH, or UNCLEAR only as context; it must not force which zone is returned.
+
+y_top/y_bottom are normalized 0.0-1.0 from screenshot top and should bracket the visible zone when possible.
 
 Return JSON only:
 {
- "current_price":null,
- "m5_state":"BULLISH|BEARISH|UNCLEAR",
- "m5_description":"short current/right-edge description",
- "buy_pullback":{"zone":null,"freshness":"FRESH|NONE","reason":"short reason","invalidation":null,"y_top":null,"y_bottom":null},
- "sell_pullback":{"zone":null,"freshness":"FRESH|NONE","reason":"short reason","invalidation":null,"y_top":null,"y_bottom":null},
- "note":"These are potential reaction/pullback areas, not automatic entries."
+ "current_price": null,
+ "m5_state": "BULLISH|BEARISH|UNCLEAR",
+ "m5_description": "short description of newest visible M5 structure",
+ "buy_pullback": {
+   "zone": null,
+   "freshness": "FRESH|NONE",
+   "reason": "why this visible area qualifies",
+   "confirmation": "what bullish reaction to wait for; not an automatic entry",
+   "y_top": null,
+   "y_bottom": null
+ },
+ "sell_pullback": {
+   "zone": null,
+   "freshness": "FRESH|NONE",
+   "reason": "why this visible area qualifies",
+   "confirmation": "what bearish reaction to wait for; not an automatic entry",
+   "y_top": null,
+   "y_bottom": null
+ },
+ "note": "Zone touch = attention, not entry. Wait for a reaction and decide for yourself."
 }
 """
 
@@ -38,13 +69,16 @@ def image_part(data_url):
     mime = header.split(";", 1)[0].replace("data:", "")
     return types.Part.from_bytes(data=base64.b64decode(body), mime_type=mime)
 
-def _is_high_demand_error(exc):
+def _is_fallback_error(exc):
     text = str(exc).lower()
     return (
         "503" in text
         or "unavailable" in text
         or "high demand" in text
         or "service unavailable" in text
+        or "429" in text
+        or "resource_exhausted" in text
+        or "quota" in text
     )
 
 def run_model(contents):
@@ -52,9 +86,8 @@ def run_model(contents):
     primary = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
     fallback = os.environ.get("GEMINI_FALLBACK_MODEL", "gemini-3.5-flash")
 
-    # One primary attempt. If (and only if) Gemini says the model is temporarily
-    # unavailable/high-demand, make ONE attempt on a different model.
-    # We deliberately do not retry 429/quota errors.
+    # One primary attempt. On 503/high-demand OR a per-model 429 quota error,
+    # make ONE attempt on a different configured model. Never loop beyond that.
     models = [primary]
     if fallback and fallback != primary:
         models.append(fallback)
@@ -77,8 +110,8 @@ def run_model(contents):
             return result
         except Exception as exc:
             last_error = exc
-            # Never spend another request on quota/rate-limit/auth/bad-request errors.
-            if i == 0 and len(models) > 1 and _is_high_demand_error(exc):
+            # One controlled fallback only.
+            if i == 0 and len(models) > 1 and _is_fallback_error(exc):
                 continue
             raise
 
@@ -119,14 +152,14 @@ def normalize_result(result):
     result["m5_state"]=state if state in {"BULLISH","BEARISH","UNCLEAR"} else "UNCLEAR"
     result.setdefault("current_price",None)
     result.setdefault("m5_description","")
-    result.setdefault("note","These are potential reaction/pullback areas, not automatic entries.")
+    result.setdefault("note","Zone touch = attention, not entry. Wait for a reaction and decide for yourself.")
     for side in ("buy_pullback","sell_pullback"):
         z=result.get(side)
         if not isinstance(z,dict): z={}
         if str(z.get("freshness") or "NONE").upper()!="FRESH" or not z.get("zone"):
-            z={"zone":None,"freshness":"NONE","reason":z.get("reason","No clear fresh zone found."),"invalidation":None,"y_top":None,"y_bottom":None}
+            z={"zone":None,"freshness":"NONE","reason":z.get("reason","No clear fresh zone found."),"confirmation":"","y_top":None,"y_bottom":None}
         else:
-            z["freshness"]="FRESH"; z.setdefault("reason",""); z.setdefault("invalidation",None); z.setdefault("y_top",None); z.setdefault("y_bottom",None)
+            z["freshness"]="FRESH"; z.setdefault("reason",""); z.setdefault("confirmation",""); z.setdefault("y_top",None); z.setdefault("y_bottom",None)
         result[side]=z
     return result
 
