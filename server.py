@@ -96,6 +96,7 @@ def normalize_result(result):
         result[side]=z
     return result
 
+@app.get("/")
 def home():
     return send_from_directory(".", "index.html")
 
