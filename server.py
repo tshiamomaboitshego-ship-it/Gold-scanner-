@@ -38,17 +38,51 @@ def image_part(data_url):
     mime = header.split(";", 1)[0].replace("data:", "")
     return types.Part.from_bytes(data=base64.b64decode(body), mime_type=mime)
 
+def _is_high_demand_error(exc):
+    text = str(exc).lower()
+    return (
+        "503" in text
+        or "unavailable" in text
+        or "high demand" in text
+        or "service unavailable" in text
+    )
+
 def run_model(contents):
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-    response = client.models.generate_content(
-        model=os.environ.get("GEMINI_MODEL", "gemini-3.6-flash"),
-        contents=contents,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            temperature=0.05,
-        ),
-    )
-    return json.loads(response.text)
+    primary = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
+    fallback = os.environ.get("GEMINI_FALLBACK_MODEL", "gemini-3.5-flash")
+
+    # One primary attempt. If (and only if) Gemini says the model is temporarily
+    # unavailable/high-demand, make ONE attempt on a different model.
+    # We deliberately do not retry 429/quota errors.
+    models = [primary]
+    if fallback and fallback != primary:
+        models.append(fallback)
+
+    last_error = None
+    for i, model in enumerate(models):
+        try:
+            response = client.models.generate_content(
+                model=model,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=0.05,
+                ),
+            )
+            result = json.loads(response.text)
+            if isinstance(result, dict):
+                result["model_used"] = model
+                result["fallback_used"] = (i > 0)
+            return result
+        except Exception as exc:
+            last_error = exc
+            # Never spend another request on quota/rate-limit/auth/bad-request errors.
+            if i == 0 and len(models) > 1 and _is_high_demand_error(exc):
+                continue
+            raise
+
+    raise last_error
 
 def _num(v):
     try:
