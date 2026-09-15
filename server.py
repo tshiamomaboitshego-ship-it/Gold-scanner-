@@ -6,58 +6,41 @@ from google.genai import types
 app = Flask(__name__, static_folder=".", static_url_path="")
 
 FINAL_PROMPT = """
-You are Gold Scanner V9, an XAUUSD M5-ONLY ENTRY SCANNER.
+You are Gold Scanner V11, an XAUUSD M5 TREND-FOLLOWING PULLBACK ENTRY SCANNER.
+Analyze ONE current M5 screenshot only. Never infer higher timeframes.
 
-You receive ONE screenshot: the CURRENT XAUUSD M5 chart.
-Do not infer or use H1, M15, H4, daily, or any higher-timeframe bias.
-Focus on the current price and the most recent M5 structure on the RIGHT side of the screenshot.
+STRICT STRATEGY:
+- Clearly BULLISH M5 => BUY PULLBACK only.
+- Clearly BEARISH M5 => SELL PULLBACK only.
+- UNCLEAR/choppy/ranging => NO TRADE.
+Never call a countertrend reversal just because price reaches support/resistance.
 
-GOAL:
-Identify ONE fresh, still-usable M5 entry opportunity from this single scan.
+Determine direction mainly from the newest candles on the RIGHT edge and recent local structure.
+Bullish evidence: higher highs/higher lows, bullish displacement, broken resistance retesting/holding as support.
+Bearish evidence: lower highs/lower lows, bearish displacement, broken support retesting/holding as resistance.
+Old left-side structure must not override the active right-edge move.
 
-Choose exactly one:
-- BUY SETUP
-- SELL SETUP
-- NO TRADE
+Find ONE fresh pullback WITH the current direction:
+- Bullish: nearby support/retest/demand below or around current price for a BUY pullback.
+- Bearish: nearby resistance/retest/supply above or around current price for a SELL pullback.
+Prefer recent break/retest, swing structure, impulse origin and local S/R.
+Reject zones already used and moved away from. Do not chase extended price. If no fresh sensible pullback exists, NO TRADE.
+No second scan is required.
 
-RULES:
-1. Read the current price from the far-right price marker/current candle.
-2. Give ONE tight entry zone near current price or at the next nearby M5 pullback/retest.
-3. Do not return a historical entry that already triggered and moved away.
-4. If price already used the candidate zone and materially progressed toward its target, reject it.
-5. Do not force BUY or SELL. Use NO TRADE if M5 is messy, extended, or there is no fresh entry.
-6. Use only visible M5 price action: recent swing highs/lows, support/resistance, break/retest, rejection, momentum and local structure.
-7. Do not require another scan or another timeframe.
-8. Return a clear invalidation PRICE LEVEL when visible, not vague wording.
-9. Never claim certainty, guaranteed profit, or a win rate.
-
-TARGETS:
-BUY: TP1 > entry zone, TP2 > TP1, TP3 > TP2.
-SELL: TP1 < entry zone, TP2 < TP1, TP3 < TP2.
-Do not place TP1 inside the entry zone.
-
-VISUALS:
-entry y_top/y_bottom and TP y values are normalized 0.0-1.0 from the top of the M5 screenshot.
-Keep the entry band tight.
+BUY targets must all be above the entry zone in ascending order.
+SELL targets must all be below the entry zone in descending order.
+Give one clear invalidation price beyond the pullback structure.
+y coordinates are normalized 0.0-1.0 from screenshot top.
 
 Return JSON only:
 {
  "signal":"BUY SETUP|SELL SETUP|NO TRADE",
- "m5_state":"short current M5 description",
+ "m5_direction":"BULLISH|BEARISH|UNCLEAR",
+ "m5_state":"short current/right-edge M5 description",
  "current_price":null,
- "entry":{
-   "zone":null,
-   "type":null,
-   "freshness":"FRESH|USED/MISSED|NONE",
-   "instruction":null,
-   "invalidation":null,
-   "y_top":null,
-   "y_bottom":null
- },
- "tp1":null,"tp1_y":null,
- "tp2":null,"tp2_y":null,
- "tp3":null,"tp3_y":null,
- "reason":"short"
+ "entry":{"zone":null,"type":"BUY PULLBACK|SELL PULLBACK|NONE","freshness":"FRESH|USED/MISSED|NONE","instruction":null,"invalidation":null,"y_top":null,"y_bottom":null},
+ "tp1":null,"tp1_y":null,"tp2":null,"tp2_y":null,"tp3":null,"tp3_y":null,
+ "reason":"short reason"
 }
 """
 
@@ -112,6 +95,9 @@ def normalize_result(result):
     sig=str(result.get("signal") or "NO TRADE").upper()
     if sig not in {"BUY SETUP","SELL SETUP","NO TRADE"}: sig="NO TRADE"
     result["signal"]=sig
+    direction=str(result.get("m5_direction") or "UNCLEAR").upper()
+    if direction not in {"BULLISH","BEARISH","UNCLEAR"}: direction="UNCLEAR"
+    result["m5_direction"]=direction
     result.setdefault("higher_timeframe_bias","MIXED")
     result.setdefault("m5_state","")
     result.setdefault("reason","No fresh entry setup found.")
@@ -128,7 +114,13 @@ def normalize_result(result):
             result[f"tp{n}"]=None; result[f"tp{n}_y"]=None
         return result
 
-    if sig=="NO TRADE": return no_trade(result.get("reason") or "No fresh entry setup found.")
+    if direction=="UNCLEAR":
+        return no_trade("M5 direction is unclear; no trend-following pullback.")
+    if direction=="BULLISH" and sig!="BUY SETUP":
+        return no_trade("Bullish M5: no valid fresh BUY pullback identified.")
+    if direction=="BEARISH" and sig!="SELL SETUP":
+        return no_trade("Bearish M5: no valid fresh SELL pullback identified.")
+    if sig=="NO TRADE": return no_trade(result.get("reason") or "No fresh pullback setup found.")
     if str(e.get("freshness") or "").upper() in {"USED","MISSED","USED/MISSED"}:
         return no_trade("Best historical setup is already used/missed; no fresh entry selected.")
 

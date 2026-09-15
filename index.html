@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="theme-color" content="#07111d">
-<title>Gold Scanner V9.2</title>
+<title>Gold Scanner V11</title>
 <link rel="manifest" href="/manifest.json">
 <style>
 *{box-sizing:border-box}
@@ -40,8 +40,8 @@ input[type=file]{padding:10px;background:#07101a;border:1px dashed #36516d;borde
 </head>
 <body>
 <div class="wrap">
-  <h1>Gold Scanner V9.2</h1>
-  <div class="sub">M5 Entry Scanner · one screenshot → one fresh setup</div>
+  <h1>Gold Scanner V11</h1>
+  <div class="sub">M5 Pullback Scanner · follow the current move</div>
 
   <div id="error" class="card warn hide"></div>
   <div id="status" class="card ok">
@@ -67,13 +67,13 @@ input[type=file]{padding:10px;background:#07101a;border:1px dashed #36516d;borde
     </div>
 
     <button id="scan" disabled>Load M5 first</button>
-    <div class="note">Only fresh M5 zones are shown. Used/missed setups are rejected.</div>
+    <div class="note">Bullish M5 → BUY pullbacks only · Bearish M5 → SELL pullbacks only · Unclear → NO TRADE</div>
   </div>
 
   <div id="result" class="card hide">
 <div id="signal" class="sig"></div>
 <div class="box">M5 state<b id="momentum">—</b></div>
-<div id="readyCard" class="bigbox readybox hide">BEST ENTRY ZONE<b id="readyZone">—</b><div id="readyWhy" class="small"></div></div>
+<div id="readyCard" class="bigbox readybox hide">PULLBACK ENTRY ZONE<b id="readyZone">—</b><div id="readyWhy" class="small"></div></div>
 <div class="bigbox">ENTRY STATUS<b id="freshness">—</b></div><div class="bigbox">ENTRY INSTRUCTION<b id="instruction">—</b></div>
 <div class="bigbox warn">IGNORE SETUP IF<b id="invalidation">—</b></div>
 <div class="bigbox">TAKE PROFIT<b id="tps">—</b></div>
@@ -115,7 +115,7 @@ function readyLabel(id,state,msg){
 function updateScanReady(){
   const ready=!!loaded.m5;
   $('scan').disabled=scanBusy || !ready;
-  if(!scanBusy) $('scan').textContent=ready?'⚡ Scan M5 Entry':'Load M5 first';
+  if(!scanBusy) $('scan').textContent=ready?'⚡ Find M5 Pullback':'Load M5 first';
 }
 async function loadSelectedImage(id){
   const f=$(id).files[0];
