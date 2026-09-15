@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="theme-color" content="#07111d">
-<title>Gold Scanner V8.1</title>
+<title>Gold Scanner V8.2</title>
 <link rel="manifest" href="/manifest.json">
 <style>
 *{box-sizing:border-box}
@@ -40,8 +40,8 @@ input[type=file]{padding:10px;background:#07101a;border:1px dashed #36516d;borde
 </head>
 <body>
 <div class="wrap">
-  <h1>Gold Scanner V8.1</h1>
-  <div class="sub">One-Scan Fresh Entry Finder · rejects used/missed zones</div>
+  <h1>Gold Scanner V8.2</h1>
+  <div class="sub">Fresh Entry Finder · verified images before every scan</div>
 
   <div id="error" class="card warn hide"></div>
   <div id="status" class="card ok">
@@ -53,16 +53,16 @@ input[type=file]{padding:10px;background:#07101a;border:1px dashed #36516d;borde
     <h2>1 · Higher-timeframe context</h2>
     <div id="ageText" class="bigbox">No saved H1/M15 yet.</div>
     <div id="staleWarn" class="bigbox warn hide">Saved charts are stale. Upload fresh H1 + M15.</div>
-    <label>H1 screenshot</label><input id="h1" type="file" accept="image/*">
-    <label>M15 screenshot</label><input id="m15" type="file" accept="image/*">
+    <label>H1 screenshot</label><input id="h1" type="file" accept="image/*"><div id="h1Ready" class="note">⚪ Not loaded</div>
+    <label>M15 screenshot</label><input id="m15" type="file" accept="image/*"><div id="m15Ready" class="note">⚪ Not loaded</div>
     <button class="dark" id="clear">Clear saved H1/M15</button>
   </div>
 
   <div class="card">
     <h2>2 · Current M5</h2>
     <div class="small">One scan selects one fresh entry zone. Historical/used zones are rejected.</div>
-    <input id="m5" type="file" accept="image/*">
-    <button id="scan">⚡ Find Entry Zone</button>
+    <input id="m5" type="file" accept="image/*"><div id="m5Ready" class="note">⚪ Not loaded</div>
+    <button id="scan" disabled>⚡ Find Entry Zone</button>
 
     <div id="chart" class="chartWrap hide">
       <img id="preview" alt="M5 chart">
@@ -90,15 +90,60 @@ input[type=file]{padding:10px;background:#07101a;border:1px dashed #36516d;borde
 
 <script>
 const $=id=>document.getElementById(id);
-const K={h1:'v81_h1',m15:'v81_m15',ht:'v81_ht',mt:'v81_mt'};
+const K={h1:'v82_h1',m15:'v82_m15',ht:'v82_ht',mt:'v82_mt'};
 let scanBusy=false;
+let loaded={h1:null,m15:null,m5:null};
 
-const toDataURL=file=>new Promise((res,rej)=>{
+const toDataURL=file=>new Promise((resolve,reject)=>{
+  if(!file){ reject(new Error('No image selected')); return; }
+  if(!file.type || !file.type.startsWith('image/')){
+    reject(new Error('Selected file is not a supported image')); return;
+  }
   const r=new FileReader();
-  r.onload=()=>res(r.result);
-  r.onerror=()=>rej(new Error('Could not read image'));
+  r.onload=()=>{
+    const value=r.result;
+    if(typeof value!=='string' || !value.startsWith('data:image/')){
+      reject(new Error('Image could not be decoded')); return;
+    }
+    resolve(value);
+  };
+  r.onerror=()=>reject(new Error('Phone/browser could not read this image'));
+  r.onabort=()=>reject(new Error('Image loading was cancelled'));
   r.readAsDataURL(file);
 });
+
+function readyLabel(id,state,msg){
+  const el=$(id+'Ready');
+  if(!el)return;
+  el.textContent=(state?'✅ ':'❌ ')+msg;
+  el.style.color=state?'#42e493':'#ff7b83';
+}
+function updateScanReady(){
+  const ready=!!(loaded.h1 && loaded.m15 && loaded.m5);
+  $('scan').disabled=scanBusy || !ready;
+  if(!scanBusy) $('scan').textContent=ready?'⚡ Find Entry Zone':'Load H1 + M15 + M5 first';
+}
+async function loadSelectedImage(id){
+  const f=$(id).files[0];
+  loaded[id]=null;
+  updateScanReady();
+  if(!f){ readyLabel(id,false,'No image selected'); return; }
+  try{
+    readyLabel(id,false,'Checking image…');
+    const data=await toDataURL(f);
+    loaded[id]=data;
+    readyLabel(id,true,`${id.toUpperCase()} ready · ${(f.size/1024).toFixed(0)} KB`);
+    if(id==='h1'){localStorage.setItem(K.h1,data);localStorage.setItem(K.ht,Date.now())}
+    if(id==='m15'){localStorage.setItem(K.m15,data);localStorage.setItem(K.mt,Date.now())}
+    if(id==='m5'){$('preview').src=data;$('chart').classList.remove('hide')}
+    refreshAge(); clearError(); updateScanReady();
+  }catch(e){
+    loaded[id]=null;
+    readyLabel(id,false,e.message||'Could not read image');
+    showError(`${id.toUpperCase()} image problem: ${e.message||'Could not read image'}. No AI request used.`);
+    updateScanReady();
+  }
+}
 
 function showError(x){$('error').textContent=x;$('error').classList.remove('hide')}
 function clearError(){$('error').classList.add('hide');$('error').textContent=''}
@@ -115,7 +160,7 @@ function refreshAge(){
   }
 }
 function todayKey(){const d=new Date();return d.getFullYear()+'-'+(d.getMonth()+1)+'-'+d.getDate()}
-function countKey(){return 'v81_count_'+todayKey()}
+function countKey(){return 'v82_count_'+todayKey()}
 function updateCount(){const n=+(localStorage.getItem(countKey())||0);$('localCount').textContent='Successful AI scans saved today: '+n}
 function incCount(){localStorage.setItem(countKey(),+(localStorage.getItem(countKey())||0)+1);updateCount()}
 function clamp(v){return Math.max(0,Math.min(1,Number(v)))}
@@ -168,55 +213,36 @@ async function hashText(s){
   return [...new Uint8Array(h)].map(x=>x.toString(16).padStart(2,'0')).join('');
 }
 
-refreshAge();updateCount();
+refreshAge();updateCount();updateScanReady();
 
 $('clear').onclick=()=>{
   [K.h1,K.m15,K.ht,K.mt].forEach(k=>localStorage.removeItem(k));
-  refreshAge();clearError();
+  loaded.h1=null; loaded.m15=null;
+  $('h1').value=''; $('m15').value='';
+  $('h1Ready').textContent='⚪ Not loaded'; $('m15Ready').textContent='⚪ Not loaded';
+  refreshAge(); clearError(); updateScanReady();
 };
 
-$('m5').onchange=async()=>{
-  const f=$('m5').files[0];
-  if(!f)return;
-  const m=await toDataURL(f);
-  $('preview').src=m;
-  $('chart').classList.remove('hide');
-};
+$('h1').onchange=()=>loadSelectedImage('h1');
+$('m15').onchange=()=>loadSelectedImage('m15');
+$('m5').onchange=()=>loadSelectedImage('m5');
 
 $('scan').onclick=async()=>{
-  if(scanBusy)return; // HARD LOCK: second tap cannot start another request.
-  scanBusy=true;
-  clearError();
+  if(scanBusy)return;
+  if(!(loaded.h1&&loaded.m15&&loaded.m5)){
+    showError('All three images must show ✅ ready before scanning. No AI request used.');
+    updateScanReady();
+    return;
+  }
 
-  const btn=$('scan');
-  btn.disabled=true;
-  btn.textContent='Finding entry…';
+  scanBusy=true; clearError(); updateScanReady();
+  const btn=$('scan'); btn.disabled=true; btn.textContent='Finding entry…';
 
   try{
-    const mf=$('m5').files[0];
-    if(!mf)throw new Error('LOCAL:Choose a fresh M5 screenshot first.');
+    // Use ONLY the already-read, verified image data. No FileReader work occurs after tap.
+    const h1=loaded.h1, m15=loaded.m15, m5=loaded.m5;
 
-    const hf=$('h1').files[0];
-    const m15f=$('m15').files[0];
-
-    let h1=hf?await toDataURL(hf):localStorage.getItem(K.h1);
-    let m15=m15f?await toDataURL(m15f):localStorage.getItem(K.m15);
-    const m5=await toDataURL(mf);
-
-    if(!h1||!m15)throw new Error('LOCAL:Upload H1 and M15 once before scanning.');
-
-    const ha=ageMin(K.ht),ma=ageMin(K.mt);
-    if(!hf&&!m15f&&(ha===null||ma===null||ha>=60||ma>=30))
-      throw new Error('LOCAL:Saved H1/M15 are stale. Upload fresh H1 + M15.');
-
-    if(hf){localStorage.setItem(K.h1,h1);localStorage.setItem(K.ht,Date.now())}
-    if(m15f){localStorage.setItem(K.m15,m15);localStorage.setItem(K.mt,Date.now())}
-    refreshAge();
-
-    $('preview').src=m5;$('chart').classList.remove('hide');
-
-    // CACHE CHECK HAPPENS BEFORE FETCH.
-    const key='v81_cache_'+await hashText(m5);
+    const key='v82_cache_'+await hashText(m5);
     const cached=localStorage.getItem(key);
     if(cached){
       render(JSON.parse(cached));
@@ -224,7 +250,7 @@ $('scan').onclick=async()=>{
       return;
     }
 
-    // EXACTLY ONE fetch call exists in this entire file.
+    // Exactly one network request.
     const r=await fetch('/api/scan',{
       method:'POST',
       headers:{'Content-Type':'application/json'},
@@ -233,40 +259,24 @@ $('scan').onclick=async()=>{
 
     let d;
     try{d=await r.json()}catch(e){throw new Error('SERVER:Unreadable server response.');}
-
     if(!r.ok||d.error){
       if(d.daily_quota)throw new Error('DAILY_QUOTA');
       if(d.error==='quota')throw new Error('TEMP_QUOTA');
-      const detail=(d.detail||'').slice(0,220);
-      throw new Error('SERVER:'+(detail||('HTTP '+r.status)));
+      throw new Error('SERVER:'+((d.detail||('HTTP '+r.status)).slice(0,260)));
     }
 
-    // SAVE FIRST, RENDER SECOND: UI failure cannot lose a successful scan.
-    localStorage.setItem(key,JSON.stringify(d));
+    localStorage.setItem(key,JSON.stringify(d)); // cache before rendering
     incCount();
-
-    try{
-      render(d);
-    }catch(uiErr){
-      console.error(uiErr);
-      $('result').classList.remove('hide');
-      $('signal').textContent=d.signal||'NO CONFIRMED ENTRY';
-      $('signal').className='sig '+sigClass(d.signal);
-      $('reason').textContent=d.reason||'Result received; chart overlay failed.';
-      showError('Result was saved, but one visual overlay failed. Re-scan this same M5 to load the saved result with zero Gemini requests.');
-    }
+    render(d);
 
   }catch(e){
     const msg=String(e.message||e);
-    if(msg.startsWith('LOCAL:'))showError(msg.slice(6)+' No AI request used.');
-    else if(msg==='DAILY_QUOTA')showError('Gemini DAILY free quota reached. No automatic retry was made.');
+    if(msg==='DAILY_QUOTA')showError('Gemini DAILY free quota reached. No automatic retry was made.');
     else if(msg==='TEMP_QUOTA')showError('Gemini quota/rate limit reached. No automatic retry was made.');
     else if(msg.startsWith('SERVER:'))showError('Server/Gemini error: '+msg.slice(7)+' No automatic retry was made.');
     else showError('Scan error: '+msg+' No automatic retry was made.');
   }finally{
-    scanBusy=false;
-    btn.disabled=false;
-    btn.textContent='⚡ Find Entry Zone';
+    scanBusy=false; updateScanReady();
   }
 };
 

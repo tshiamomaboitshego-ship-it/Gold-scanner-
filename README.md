@@ -1,22 +1,22 @@
-# Gold Scanner V8.1 — Fresh Entry Fix
+# Gold Scanner V8.2 — Image Ready Fix
 
-Fixes the V8 problem where a technically valid historical zone could be returned after the move had already used it.
+V8.2 keeps V8.1's fresh-entry trading logic unchanged and fixes the phone image-loading problem.
 
-New logic:
-- reads current price from the right edge of M5
-- rejects zones already entered/crossed and reacted from
-- rejects historical setups if current price has already reached/passed TP1
-- does not return a zone simply because it would have worked earlier
-- searches for one fresh nearby entry instead
-- returns NO TRADE if the move is already gone and no fresh high-quality entry remains
-- still one scan only; no watch/rescan loop
+Before Scan is enabled:
+- H1 must show ✅ H1 ready
+- M15 must show ✅ M15 ready
+- M5 must show ✅ M5 ready
 
-Quota protections remain:
-- one scan handler
-- one API request per fresh uncached M5
+Images are fully read and verified immediately when selected. The Scan button stays disabled until all three are in memory. No FileReader operation happens after pressing Scan, removing the failure that previously produced "Could not read image".
+
+Quota protection:
+- image errors happen before Gemini and use zero requests
+- exactly one frontend `/api/scan` fetch
+- exactly one scan handler
 - double-tap lock
-- same-M5 cache before Gemini
+- same-M5 cache checked before Gemini
+- successful result cached before rendering
 - no automatic retries
 
 Deploy server.py, index.html, sw.js, manifest.json and redeploy Render.
-Confirm the page says Gold Scanner V8.1 before scanning.
+Make sure the page says Gold Scanner V8.2.

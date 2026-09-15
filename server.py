@@ -6,7 +6,7 @@ from google.genai import types
 app = Flask(__name__, static_folder=".", static_url_path="")
 
 FINAL_PROMPT = """
-You are Gold Scanner V8.1.1, an XAUUSD ONE-SCAN FRESH ENTRY FINDER.
+You are Gold Scanner V8.2.1, an XAUUSD ONE-SCAN FRESH ENTRY FINDER.
 You receive H1, M15, then CURRENT M5 screenshots.
 
 GOAL:
