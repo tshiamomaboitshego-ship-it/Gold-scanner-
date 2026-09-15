@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="theme-color" content="#07111d">
-<title>Gold Scanner V8.3</title>
+<title>Gold Scanner V9</title>
 <link rel="manifest" href="/manifest.json">
 <style>
 *{box-sizing:border-box}
@@ -40,8 +40,8 @@ input[type=file]{padding:10px;background:#07101a;border:1px dashed #36516d;borde
 </head>
 <body>
 <div class="wrap">
-  <h1>Gold Scanner V8.3</h1>
-  <div class="sub">Fresh Entry Finder · screenshots stay in temporary memory</div>
+  <h1>Gold Scanner V9</h1>
+  <div class="sub">M5 Entry Scanner · one screenshot → one fresh setup</div>
 
   <div id="error" class="card warn hide"></div>
   <div id="status" class="card ok">
@@ -49,36 +49,13 @@ input[type=file]{padding:10px;background:#07101a;border:1px dashed #36516d;borde
     <div id="localCount" class="pill"></div>
   </div>
 
-  <div class="card">
-    <h2>1 · Higher-timeframe context</h2>
-    <div id="ageText" class="bigbox">No saved H1/M15 yet.</div>
-    <div id="staleWarn" class="bigbox warn hide">Saved charts are stale. Upload fresh H1 + M15.</div>
-    <label>H1 screenshot</label><input id="h1" type="file" accept="image/*"><div id="h1Ready" class="note">⚪ Not loaded</div>
-    <label>M15 screenshot</label><input id="m15" type="file" accept="image/*"><div id="m15Ready" class="note">⚪ Not loaded</div>
-    <button class="dark" id="clear">Clear saved H1/M15</button>
-  </div>
-
-  <div class="card">
-    <h2>2 · Current M5</h2>
-    <div class="small">One scan selects one fresh entry zone. Historical/used zones are rejected.</div>
-    <input id="m5" type="file" accept="image/*"><div id="m5Ready" class="note">⚪ Not loaded</div>
-    <button id="scan" disabled>⚡ Find Entry Zone</button>
-
-    <div id="chart" class="chartWrap hide">
-      <img id="preview" alt="M5 chart">
-      <div id="z1" class="zoneOverlay hide"></div><div id="z1L" class="zoneLabel hide"></div>
-      <div id="z2" class="zoneOverlay hide"></div><div id="z2L" class="zoneLabel hide"></div>
-      <div id="z3" class="zoneOverlay hide"></div><div id="z3L" class="zoneLabel hide"></div>
-      <div id="tp1" class="tpLine hide"></div><div id="tp1L" class="tpLabel hide"></div>
-      <div id="tp2" class="tpLine hide"></div><div id="tp2L" class="tpLabel hide"></div>
-      <div id="tp3" class="tpLine hide"></div><div id="tp3L" class="tpLabel hide"></div>
-    </div>
-    <div class="note">Only FRESH zones are shown. If the move already used the zone or reached TP1, V8.1 returns NO TRADE.</div>
+  
+    <div class="note">Only fresh M5 zones are shown. Used/missed setups are rejected.</div>
   </div>
 
   <div id="result" class="card hide">
 <div id="signal" class="sig"></div>
-<div class="grid"><div class="box">HTF bias<b id="bias">—</b></div><div class="box">M5 state<b id="momentum">—</b></div></div>
+<div class="box">M5 state<b id="momentum">—</b></div>
 <div id="readyCard" class="bigbox readybox hide">BEST ENTRY ZONE<b id="readyZone">—</b><div id="readyWhy" class="small"></div></div>
 <div class="bigbox">ENTRY STATUS<b id="freshness">—</b></div><div class="bigbox">ENTRY INSTRUCTION<b id="instruction">—</b></div>
 <div class="bigbox warn">IGNORE SETUP IF<b id="invalidation">—</b></div>
@@ -90,9 +67,9 @@ input[type=file]{padding:10px;background:#07101a;border:1px dashed #36516d;borde
 
 <script>
 const $=id=>document.getElementById(id);
-const K={h1:'v83_h1',m15:'v83_m15',ht:'v83_ht',mt:'v83_mt'};
+const K={h1:'v9_h1',m15:'v9_m15',ht:'v9_ht',mt:'v9_mt'};
 let scanBusy=false;
-let loaded={h1:null,m15:null,m5:null};
+let loaded={m5:null};
 
 const toDataURL=file=>new Promise((resolve,reject)=>{
   if(!file){ reject(new Error('No image selected')); return; }
@@ -119,9 +96,9 @@ function readyLabel(id,state,msg){
   el.style.color=state?'#42e493':'#ff7b83';
 }
 function updateScanReady(){
-  const ready=!!(loaded.h1 && loaded.m15 && loaded.m5);
+  const ready=!!loaded.m5;
   $('scan').disabled=scanBusy || !ready;
-  if(!scanBusy) $('scan').textContent=ready?'⚡ Find Entry Zone':'Load H1 + M15 + M5 first';
+  if(!scanBusy) $('scan').textContent=ready?'⚡ Scan M5 Entry':'Load M5 first';
 }
 async function loadSelectedImage(id){
   const f=$(id).files[0];
@@ -145,12 +122,9 @@ async function loadSelectedImage(id){
 
 function showError(x){$('error').textContent=x;$('error').classList.remove('hide')}
 function clearError(){$('error').classList.add('hide');$('error').textContent=''}
-function refreshAge(){
-  $('ageText').textContent=(loaded.h1&&loaded.m15)?'H1 + M15 loaded for this session.':'Upload fresh H1 + M15.';
-  $('staleWarn').classList.add('hide');
-}
+function refreshAge(){}
 function todayKey(){const d=new Date();return d.getFullYear()+'-'+(d.getMonth()+1)+'-'+d.getDate()}
-function countKey(){return 'v83_count_'+todayKey()}
+function countKey(){return 'v9_count_'+todayKey()}
 function updateCount(){const n=+(localStorage.getItem(countKey())||0);$('localCount').textContent='Successful AI scans saved today: '+n}
 function incCount(){try{localStorage.setItem(countKey(),+(localStorage.getItem(countKey())||0)+1)}catch(e){} updateCount()}
 function clamp(v){return Math.max(0,Math.min(1,Number(v)))}
@@ -182,7 +156,7 @@ function render(d){
  hideVisuals();
  const s=d.signal||'NO TRADE';
  $('signal').textContent=s;$('signal').className='sig '+sigClass(s);
- $('bias').textContent=d.higher_timeframe_bias||'MIXED';$('momentum').textContent=d.m5_state||'—';$('reason').textContent=d.reason||'—';
+ $('momentum').textContent=d.m5_state||'—';$('reason').textContent=d.reason||'—';
  const e=d.entry||{}; $('freshness').textContent=e.freshness||((s==='NO TRADE')?'NONE':'FRESH');
  if((s==='BUY SETUP'||s==='SELL SETUP')&&e.zone){
    $('readyCard').classList.remove('hide');$('readyZone').textContent=e.zone;
@@ -213,21 +187,14 @@ try{
 }catch(e){}
 refreshAge();updateCount();updateScanReady();
 
-$('clear').onclick=()=>{
-  loaded.h1=null; loaded.m15=null;
-  $('h1').value=''; $('m15').value='';
-  $('h1Ready').textContent='⚪ Not loaded'; $('m15Ready').textContent='⚪ Not loaded';
-  refreshAge(); clearError(); updateScanReady();
-};
 
-$('h1').onchange=()=>loadSelectedImage('h1');
-$('m15').onchange=()=>loadSelectedImage('m15');
+
 $('m5').onchange=()=>loadSelectedImage('m5');
 
 $('scan').onclick=async()=>{
   if(scanBusy)return;
-  if(!(loaded.h1&&loaded.m15&&loaded.m5)){
-    showError('All three images must show ✅ ready before scanning. No AI request used.');
+  if(!loaded.m5){
+    showError('M5 must show ✅ ready before scanning. No AI request used.');
     updateScanReady();
     return;
   }
@@ -237,9 +204,9 @@ $('scan').onclick=async()=>{
 
   try{
     // Use ONLY the already-read, verified image data. No FileReader work occurs after tap.
-    const h1=loaded.h1, m15=loaded.m15, m5=loaded.m5;
+    const m5=loaded.m5;
 
-    const key='v83_cache_'+await hashText(m5);
+    const key='v9_cache_'+await hashText(m5);
     const cached=localStorage.getItem(key);
     if(cached){
       render(JSON.parse(cached));
@@ -251,7 +218,7 @@ $('scan').onclick=async()=>{
     const r=await fetch('/api/scan',{
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({h1,m15,m5})
+      body:JSON.stringify({m5})
     });
 
     let d;

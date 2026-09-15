@@ -1,4 +1,20 @@
-# Gold Scanner V8.3
-Screenshots are kept only in temporary page memory and are never saved to localStorage. This fixes the browser Storage quota exceeded error. Old scanner screenshot keys are cleaned automatically when V8.3 opens. Small JSON result caching is optional and cannot block a scan. Fresh-entry logic is unchanged.
+# Gold Scanner V9 — M5-only Entry Scanner
 
-Deploy server.py, index.html, sw.js and manifest.json, redeploy, and confirm the page says Gold Scanner V8.3.
+V9 removes H1 and M15 from the workflow.
+
+Workflow:
+M5 screenshot → one AI request → BUY SETUP / SELL SETUP / NO TRADE → one fresh entry zone → invalidation → TP1/TP2/TP3.
+
+The model is explicitly instructed not to infer higher-timeframe bias. It focuses on current price and recent M5 structure only.
+
+Freshness protections remain:
+- rejects used/missed historical zones
+- rejects a setup if current price has already progressed to/past TP1
+- no confirmation rescan
+- no automatic retry
+- image remains in temporary browser memory
+- same exact M5 can use cached JSON result
+
+Important: M5-only removes higher-timeframe influence, but it does not guarantee better trading performance. Test before relying on it with live money.
+
+Deploy server.py, index.html, sw.js and manifest.json, then confirm the page says Gold Scanner V9.
