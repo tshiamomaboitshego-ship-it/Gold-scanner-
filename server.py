@@ -6,41 +6,30 @@ from google.genai import types
 app = Flask(__name__, static_folder=".", static_url_path="")
 
 FINAL_PROMPT = """
-You are Gold Scanner V11, an XAUUSD M5 TREND-FOLLOWING PULLBACK ENTRY SCANNER.
-Analyze ONE current M5 screenshot only. Never infer higher timeframes.
+You are Gold Scanner V12, an XAUUSD M5 TWO-SIDED PULLBACK ZONE MAPPER.
+Analyze ONE current XAUUSD M5 screenshot only. Never use or infer higher timeframes.
 
-STRICT STRATEGY:
-- Clearly BULLISH M5 => BUY PULLBACK only.
-- Clearly BEARISH M5 => SELL PULLBACK only.
-- UNCLEAR/choppy/ranging => NO TRADE.
-Never call a countertrend reversal just because price reaches support/resistance.
+Do NOT choose trade direction. Map BOTH sides when visibly valid:
+BUY PULLBACK = best fresh nearby support/demand/retest zone below or around current price.
+SELL PULLBACK = best fresh nearby resistance/supply/retest zone above or around current price.
 
-Determine direction mainly from the newest candles on the RIGHT edge and recent local structure.
-Bullish evidence: higher highs/higher lows, bullish displacement, broken resistance retesting/holding as support.
-Bearish evidence: lower highs/lower lows, bearish displacement, broken support retesting/holding as resistance.
-Old left-side structure must not override the active right-edge move.
-
-Find ONE fresh pullback WITH the current direction:
-- Bullish: nearby support/retest/demand below or around current price for a BUY pullback.
-- Bearish: nearby resistance/retest/supply above or around current price for a SELL pullback.
-Prefer recent break/retest, swing structure, impulse origin and local S/R.
-Reject zones already used and moved away from. Do not chase extended price. If no fresh sensible pullback exists, NO TRADE.
-No second scan is required.
-
-BUY targets must all be above the entry zone in ascending order.
-SELL targets must all be below the entry zone in descending order.
-Give one clear invalidation price beyond the pullback structure.
-y coordinates are normalized 0.0-1.0 from screenshot top.
+Focus on newest/right-edge candles and current price.
+BUY evidence: recent support, demand, swing low, broken resistance retest, bullish impulse origin.
+SELL evidence: recent resistance, supply, swing high, broken support retest, bearish impulse origin.
+Prefer recent, nearby, fresh zones. Reject clearly used, invalidated, exhausted, or distant zones.
+Do not invent a zone merely to provide both sides. A side may be null.
+Do not output TP/target/take-profit levels or a trade signal. User decides direction.
+Classify M5 state BULLISH, BEARISH, or UNCLEAR for context only.
+y_top/y_bottom are normalized 0.0-1.0 from screenshot top.
 
 Return JSON only:
 {
- "signal":"BUY SETUP|SELL SETUP|NO TRADE",
- "m5_direction":"BULLISH|BEARISH|UNCLEAR",
- "m5_state":"short current/right-edge M5 description",
  "current_price":null,
- "entry":{"zone":null,"type":"BUY PULLBACK|SELL PULLBACK|NONE","freshness":"FRESH|USED/MISSED|NONE","instruction":null,"invalidation":null,"y_top":null,"y_bottom":null},
- "tp1":null,"tp1_y":null,"tp2":null,"tp2_y":null,"tp3":null,"tp3_y":null,
- "reason":"short reason"
+ "m5_state":"BULLISH|BEARISH|UNCLEAR",
+ "m5_description":"short current/right-edge description",
+ "buy_pullback":{"zone":null,"freshness":"FRESH|NONE","reason":"short reason","invalidation":null,"y_top":null,"y_bottom":null},
+ "sell_pullback":{"zone":null,"freshness":"FRESH|NONE","reason":"short reason","invalidation":null,"y_top":null,"y_bottom":null},
+ "note":"These are potential reaction/pullback areas, not automatic entries."
 }
 """
 
@@ -92,73 +81,21 @@ def _empty_entry():
 
 def normalize_result(result):
     if not isinstance(result, dict): result={}
-    sig=str(result.get("signal") or "NO TRADE").upper()
-    if sig not in {"BUY SETUP","SELL SETUP","NO TRADE"}: sig="NO TRADE"
-    result["signal"]=sig
-    direction=str(result.get("m5_direction") or "UNCLEAR").upper()
-    if direction not in {"BULLISH","BEARISH","UNCLEAR"}: direction="UNCLEAR"
-    result["m5_direction"]=direction
-    result.setdefault("higher_timeframe_bias","MIXED")
-    result.setdefault("m5_state","")
-    result.setdefault("reason","No fresh entry setup found.")
-
-    e=result.get("entry") if isinstance(result.get("entry"),dict) else {}
-    for k in ("zone","type","freshness","instruction","invalidation","y_top","y_bottom"): e.setdefault(k,None)
-    result["entry"]=e
-
-    def no_trade(reason):
-        result["signal"]="NO TRADE"
-        result["reason"]=reason
-        result["entry"]={"zone":None,"type":None,"freshness":"NONE","instruction":None,"invalidation":None,"y_top":None,"y_bottom":None}
-        for n in (1,2,3):
-            result[f"tp{n}"]=None; result[f"tp{n}_y"]=None
-        return result
-
-    if direction=="UNCLEAR":
-        return no_trade("M5 direction is unclear; no trend-following pullback.")
-    if direction=="BULLISH" and sig!="BUY SETUP":
-        return no_trade("Bullish M5: no valid fresh BUY pullback identified.")
-    if direction=="BEARISH" and sig!="SELL SETUP":
-        return no_trade("Bearish M5: no valid fresh SELL pullback identified.")
-    if sig=="NO TRADE": return no_trade(result.get("reason") or "No fresh pullback setup found.")
-    if str(e.get("freshness") or "").upper() in {"USED","MISSED","USED/MISSED"}:
-        return no_trade("Best historical setup is already used/missed; no fresh entry selected.")
-
-    bounds=_zone_bounds(e.get("zone"))
-    if bounds is None: return no_trade("No reliable fresh entry zone could be identified.")
-    lo,hi=bounds
-
-    cp=_num(result.get("current_price"))
-    t1=_num(result.get("tp1")); t2=_num(result.get("tp2")); t3=_num(result.get("tp3"))
-
-    # Hard late-entry guard: if current price has already reached/passed TP1,
-    # the proposed setup is no longer actionable.
-    if cp is not None and t1 is not None:
-        if sig=="SELL SETUP" and cp <= t1:
-            return no_trade("Setup already progressed to/past TP1; entry is used/missed.")
-        if sig=="BUY SETUP" and cp >= t1:
-            return no_trade("Setup already progressed to/past TP1; entry is used/missed.")
-
-    # TP side/order validation.
-    valid1=t1 is not None and ((sig=="BUY SETUP" and t1>hi) or (sig=="SELL SETUP" and t1<lo))
-    if not valid1:
-        for n in (1,2,3):
-            result[f"tp{n}"]=None; result[f"tp{n}_y"]=None
-    elif sig=="BUY SETUP":
-        if t2 is not None and t2<=t1:
-            result["tp2"]=result["tp2_y"]=result["tp3"]=result["tp3_y"]=None
-        elif t3 is not None and t2 is not None and t3<=t2:
-            result["tp3"]=result["tp3_y"]=None
-    else:
-        if t2 is not None and t2>=t1:
-            result["tp2"]=result["tp2_y"]=result["tp3"]=result["tp3_y"]=None
-        elif t3 is not None and t2 is not None and t3>=t2:
-            result["tp3"]=result["tp3_y"]=None
-
-    result["entry"]["freshness"]="FRESH"
+    state=str(result.get("m5_state") or "UNCLEAR").upper()
+    result["m5_state"]=state if state in {"BULLISH","BEARISH","UNCLEAR"} else "UNCLEAR"
+    result.setdefault("current_price",None)
+    result.setdefault("m5_description","")
+    result.setdefault("note","These are potential reaction/pullback areas, not automatic entries.")
+    for side in ("buy_pullback","sell_pullback"):
+        z=result.get(side)
+        if not isinstance(z,dict): z={}
+        if str(z.get("freshness") or "NONE").upper()!="FRESH" or not z.get("zone"):
+            z={"zone":None,"freshness":"NONE","reason":z.get("reason","No clear fresh zone found."),"invalidation":None,"y_top":None,"y_bottom":None}
+        else:
+            z["freshness"]="FRESH"; z.setdefault("reason",""); z.setdefault("invalidation",None); z.setdefault("y_top",None); z.setdefault("y_bottom",None)
+        result[side]=z
     return result
 
-@app.get("/")
 def home():
     return send_from_directory(".", "index.html")
 
