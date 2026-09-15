@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="theme-color" content="#07111d">
-<title>Gold Scanner V8</title>
+<title>Gold Scanner V8.1</title>
 <link rel="manifest" href="/manifest.json">
 <style>
 *{box-sizing:border-box}
@@ -40,8 +40,8 @@ input[type=file]{padding:10px;background:#07101a;border:1px dashed #36516d;borde
 </head>
 <body>
 <div class="wrap">
-  <h1>Gold Scanner V8</h1>
-  <div class="sub">One-Scan Entry Finder · H1 + M15 + M5 → one best zone</div>
+  <h1>Gold Scanner V8.1</h1>
+  <div class="sub">One-Scan Fresh Entry Finder · rejects used/missed zones</div>
 
   <div id="error" class="card warn hide"></div>
   <div id="status" class="card ok">
@@ -60,7 +60,7 @@ input[type=file]{padding:10px;background:#07101a;border:1px dashed #36516d;borde
 
   <div class="card">
     <h2>2 · Current M5</h2>
-    <div class="small">One scan selects the best entry zone. You do not need to rescan when price reaches it.</div>
+    <div class="small">One scan selects one fresh entry zone. Historical/used zones are rejected.</div>
     <input id="m5" type="file" accept="image/*">
     <button id="scan">⚡ Find Entry Zone</button>
 
@@ -73,14 +73,14 @@ input[type=file]{padding:10px;background:#07101a;border:1px dashed #36516d;borde
       <div id="tp2" class="tpLine hide"></div><div id="tp2L" class="tpLabel hide"></div>
       <div id="tp3" class="tpLine hide"></div><div id="tp3L" class="tpLabel hide"></div>
     </div>
-    <div class="note">Use the selected zone with its instruction. Ignore the setup if its invalidation happens.</div>
+    <div class="note">Only FRESH zones are shown. If the move already used the zone or reached TP1, V8.1 returns NO TRADE.</div>
   </div>
 
   <div id="result" class="card hide">
 <div id="signal" class="sig"></div>
 <div class="grid"><div class="box">HTF bias<b id="bias">—</b></div><div class="box">M5 state<b id="momentum">—</b></div></div>
 <div id="readyCard" class="bigbox readybox hide">BEST ENTRY ZONE<b id="readyZone">—</b><div id="readyWhy" class="small"></div></div>
-<div class="bigbox">ENTRY INSTRUCTION<b id="instruction">—</b></div>
+<div class="bigbox">ENTRY STATUS<b id="freshness">—</b></div><div class="bigbox">ENTRY INSTRUCTION<b id="instruction">—</b></div>
 <div class="bigbox warn">IGNORE SETUP IF<b id="invalidation">—</b></div>
 <div class="bigbox">TAKE PROFIT<b id="tps">—</b></div>
 <div class="bigbox">Reason<b id="reason">—</b></div>
@@ -90,7 +90,7 @@ input[type=file]{padding:10px;background:#07101a;border:1px dashed #36516d;borde
 
 <script>
 const $=id=>document.getElementById(id);
-const K={h1:'v8_h1',m15:'v8_m15',ht:'v8_ht',mt:'v8_mt'};
+const K={h1:'v81_h1',m15:'v81_m15',ht:'v81_ht',mt:'v81_mt'};
 let scanBusy=false;
 
 const toDataURL=file=>new Promise((res,rej)=>{
@@ -115,7 +115,7 @@ function refreshAge(){
   }
 }
 function todayKey(){const d=new Date();return d.getFullYear()+'-'+(d.getMonth()+1)+'-'+d.getDate()}
-function countKey(){return 'v8_count_'+todayKey()}
+function countKey(){return 'v81_count_'+todayKey()}
 function updateCount(){const n=+(localStorage.getItem(countKey())||0);$('localCount').textContent='Successful AI scans saved today: '+n}
 function incCount(){localStorage.setItem(countKey(),+(localStorage.getItem(countKey())||0)+1);updateCount()}
 function clamp(v){return Math.max(0,Math.min(1,Number(v)))}
@@ -148,7 +148,7 @@ function render(d){
  const s=d.signal||'NO TRADE';
  $('signal').textContent=s;$('signal').className='sig '+sigClass(s);
  $('bias').textContent=d.higher_timeframe_bias||'MIXED';$('momentum').textContent=d.m5_state||'—';$('reason').textContent=d.reason||'—';
- const e=d.entry||{};
+ const e=d.entry||{}; $('freshness').textContent=e.freshness||((s==='NO TRADE')?'NONE':'FRESH');
  if((s==='BUY SETUP'||s==='SELL SETUP')&&e.zone){
    $('readyCard').classList.remove('hide');$('readyZone').textContent=e.zone;
    $('readyWhy').textContent=(e.type?e.type+' · ':'')+(d.m15_setup||'');
@@ -216,7 +216,7 @@ $('scan').onclick=async()=>{
     $('preview').src=m5;$('chart').classList.remove('hide');
 
     // CACHE CHECK HAPPENS BEFORE FETCH.
-    const key='v8_cache_'+await hashText(m5);
+    const key='v81_cache_'+await hashText(m5);
     const cached=localStorage.getItem(key);
     if(cached){
       render(JSON.parse(cached));
