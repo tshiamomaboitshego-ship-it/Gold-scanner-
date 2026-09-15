@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="theme-color" content="#07111d">
-<title>Gold Scanner V9</title>
+<title>Gold Scanner V9.1</title>
 <link rel="manifest" href="/manifest.json">
 <style>
 *{box-sizing:border-box}
@@ -40,7 +40,7 @@ input[type=file]{padding:10px;background:#07101a;border:1px dashed #36516d;borde
 </head>
 <body>
 <div class="wrap">
-  <h1>Gold Scanner V9</h1>
+  <h1>Gold Scanner V9.1</h1>
   <div class="sub">M5 Entry Scanner · one screenshot → one fresh setup</div>
 
   <div id="error" class="card warn hide"></div>
@@ -50,6 +50,23 @@ input[type=file]{padding:10px;background:#07101a;border:1px dashed #36516d;borde
   </div>
 
   
+  <div class="card">
+    <h2>1 · Current M5 screenshot</h2>
+    <label for="m5">Upload XAUUSD M5</label>
+    <input id="m5" type="file" accept="image/*">
+    <div id="m5Ready" class="pill">❌ No image selected</div>
+
+    <div id="chart" class="chartWrap hide">
+      <img id="preview" alt="M5 chart preview">
+      <div id="z1" class="zoneOverlay hide"></div><div id="z1L" class="zoneLabel hide"></div>
+      <div id="z2" class="zoneOverlay hide"></div><div id="z2L" class="zoneLabel hide"></div>
+      <div id="z3" class="zoneOverlay hide"></div><div id="z3L" class="zoneLabel hide"></div>
+      <div id="tp1" class="tpLine hide"></div><div id="tp1L" class="tpLabel hide"></div>
+      <div id="tp2" class="tpLine hide"></div><div id="tp2L" class="tpLabel hide"></div>
+      <div id="tp3" class="tpLine hide"></div><div id="tp3L" class="tpLabel hide"></div>
+    </div>
+
+    <button id="scan" disabled>Load M5 first</button>
     <div class="note">Only fresh M5 zones are shown. Used/missed setups are rejected.</div>
   </div>
 
@@ -67,7 +84,7 @@ input[type=file]{padding:10px;background:#07101a;border:1px dashed #36516d;borde
 
 <script>
 const $=id=>document.getElementById(id);
-const K={h1:'v9_h1',m15:'v9_m15',ht:'v9_ht',mt:'v9_mt'};
+const K={h1:'v91_h1',m15:'v91_m15',ht:'v91_ht',mt:'v91_mt'};
 let scanBusy=false;
 let loaded={m5:null};
 
@@ -124,7 +141,7 @@ function showError(x){$('error').textContent=x;$('error').classList.remove('hide
 function clearError(){$('error').classList.add('hide');$('error').textContent=''}
 function refreshAge(){}
 function todayKey(){const d=new Date();return d.getFullYear()+'-'+(d.getMonth()+1)+'-'+d.getDate()}
-function countKey(){return 'v9_count_'+todayKey()}
+function countKey(){return 'v91_count_'+todayKey()}
 function updateCount(){const n=+(localStorage.getItem(countKey())||0);$('localCount').textContent='Successful AI scans saved today: '+n}
 function incCount(){try{localStorage.setItem(countKey(),+(localStorage.getItem(countKey())||0)+1)}catch(e){} updateCount()}
 function clamp(v){return Math.max(0,Math.min(1,Number(v)))}
@@ -206,7 +223,7 @@ $('scan').onclick=async()=>{
     // Use ONLY the already-read, verified image data. No FileReader work occurs after tap.
     const m5=loaded.m5;
 
-    const key='v9_cache_'+await hashText(m5);
+    const key='v91_cache_'+await hashText(m5);
     const cached=localStorage.getItem(key);
     if(cached){
       render(JSON.parse(cached));
