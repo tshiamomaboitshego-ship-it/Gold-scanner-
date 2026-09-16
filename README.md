@@ -1,27 +1,30 @@
-# Gold Scanner V16 Advanced
+# Gold Scanner V17 — Saved HTF Context
 
-Phone-first XAUUSD M5 analysis aid. V16 extends V15 with deterministic OHLC context plus conservative AI chart interpretation.
+V17 adds saved H1 + M15 chart context to the V16 hybrid M5 scanner.
 
-## V16 additions
-- Zone lifecycle: fresh/testing/reacted/retested/consumed/invalidated/expired
-- Displacement and recent FVG/imbalance context
-- Support/resistance role-flip and fake-break/reclaim context
-- ATR-relative extension/chase filter
-- Session context
-- Spread/cost input
-- Setup-conflict detection
-- Strongest-zone-only output
-- Optional educational position-size estimate using balance, risk %, SL distance and broker contract size
-- Journal remains local on the phone/browser
-- Historical reaction remains separated from current confirmation
+## Workflow
+1. Upload H1 once and tap Analyze + save H1.
+2. Upload M15 once and tap Analyze + save M15.
+3. Upload fresh M5 screenshots for normal scans.
+4. V17 sends the saved compact H1/M15 analysis with each M5 scan; it does not re-send or re-analyze the old H1/M15 screenshots.
+5. Refresh H1/M15 when the UI warns that context is stale or the saved structural refresh condition occurs.
 
-## Existing core
-Real XAU/USD M5 OHLC when `TWELVE_DATA_API_KEY` is configured, swing structure, HH/HL and LL/LH, BOS/CHoCH, ATR, momentum, equal-high/low context, break/retest analysis, evidence scoring, event-risk switch, risk filter.
+## Quota behavior
+- H1 analysis = one Gemini request when you explicitly save/refresh it.
+- M15 analysis = one Gemini request when you explicitly save/refresh it.
+- Each M5 scan = one Gemini request.
+- No automatic retry loop.
+- Screenshots are not stored in localStorage; only compact JSON context is saved.
 
-## Render
-Build: `pip install -r requirements.txt`
-Start: `gunicorn server:app`
-Environment: `GEMINI_API_KEY`, optional `GEMINI_MODEL`, optional `TWELVE_DATA_API_KEY`.
+## Context roles
+H1 supplies broad structure and major zones. M15 supplies intermediate structure and nearby zones. M5 remains the execution timeframe. Higher-timeframe context adds evidence and conflict awareness but does not automatically veto M5.
 
-## Important limitations
-Automatic economic-calendar/news ingestion is NOT included; the high-impact event switch remains manual. The app does not know your broker's live spread or exact contract specification unless you enter them. Journal data is local and does not yet automatically label future trade outcomes. Evidence scores are not win probabilities. Demo/forward testing is required before drawing performance conclusions.
+## Existing V16 systems retained
+Real M5 OHLC support, deterministic swings, HH/HL and LL/LH, BOS/CHoCH, ATR, momentum, displacement, FVG context, role flips, fake breaks, zone lifecycle, chase protection, risk filtering, session context and journal.
+
+## Environment variables
+- GEMINI_API_KEY (required)
+- GEMINI_MODEL (optional, defaults to gemini-3.6-flash)
+- TWELVE_DATA_API_KEY (optional; enables exact M5 OHLC analytics)
+
+Analysis aid only. Demo-test before considering live use.

@@ -6,8 +6,8 @@ from google.genai import types
 app = Flask(__name__, static_folder='.', static_url_path='')
 
 PROMPT = r'''
-You are Gold Scanner V16, a conservative XAUUSD M5 HYBRID PULLBACK + CONFIRMATION ANALYST.
-You receive ONE current M5 screenshot plus optional deterministic M5 market-data metrics calculated by the server.
+You are Gold Scanner V17, a conservative XAUUSD M5 HYBRID PULLBACK + CONFIRMATION ANALYST.
+You receive ONE current M5 screenshot plus optional deterministic M5 market-data metrics and optional SAVED H1/M15 context. Use saved higher-timeframe context internally as confluence/context, but M5 remains the execution timeframe. H1/M15 must NOT automatically veto a valid M5 setup.
 Never issue BUY NOW / SELL NOW. Never promise profit, accuracy, or a reversal.
 
 CRITICAL CONFIRMATION RULE (fixes V14 weakness):
@@ -24,7 +24,7 @@ READING ORDER
 5) Detect break-and-retest: broken support can become resistance; broken resistance can become support, but require a fresh retest.
 6) Treat equal highs/lows and swing clusters only as liquidity context, never as guaranteed stop hunts.
 7) Volatility/momentum matter: do not fade strong expansion merely because a level exists.
-8) If event_risk is HIGH, downgrade confidence and say technical behavior can be unstable.
+8) If event_risk is HIGH, downgrade confidence and say technical behavior can be unstable.\n9) If saved_htf_context exists, use H1 for broad structure/major zones and M15 for intermediate structure/nearby zones. Do not dump HTF analysis into the user output; use it to improve M5 zone selection and conflict detection.\n10) If saved context is marked stale by the client, reduce reliance on it.
 
 ZONE SCORE 0-100 = evidence quality, NOT win probability:
 freshness 0-20; move-away strength 0-15; structure 0-20; limited touches 0-10; proximity 0-10; clean invalidation 0-10; momentum alignment 0-10; data agreement 0-5.
@@ -34,7 +34,7 @@ confirmation_state must be one of:
 NO_ZONE, WAIT, TESTING, REJECTION_DETECTED, CONFIRMATION_DEVELOPING, CURRENT_CONFIRMATION, HISTORICAL_REACTION, INVALIDATED.
 Be conservative. If newest candle closure is uncertain, do not use CURRENT_CONFIRMATION.
 
-V16 EXTRA RULES:
+V17 EXTRA RULES:
 - zone_lifecycle: FRESH, TESTING, REACTED, RETESTED, CONSUMED, INVALIDATED, EXPIRED. Never treat REACTED/CONSUMED as a fresh setup.
 - Detect displacement and FVG/imbalance only as supporting evidence.
 - Detect support/resistance role flips, fake breaks/reclaims, and setup conflicts.
@@ -69,6 +69,26 @@ Return JSON only:
  "action_state":"WAIT|OBSERVE_REACTION|CURRENT_CONFIRMATION_PRESENT|NO_VALID_SETUP|HIGH_RISK_EVENT",
  "note":"Analysis aid only; confirmation is not certainty."
 }
+'''
+
+HTF_PROMPT = r'''
+You are Gold Scanner V17 higher-timeframe context extractor. You receive ONE XAUUSD chart screenshot whose timeframe is explicitly H1 or M15. Extract compact context for later M5 analysis. Do not give entries, trade directions, targets, or predictions. Newest/right-edge candles matter most.
+Return JSON only:
+{
+ "timeframe":"H1|M15",
+ "state":"BULLISH|BEARISH|RANGE|UNCLEAR",
+ "structure":"HH_HL|LL_LH|MIXED|UNCLEAR",
+ "structure_event":"BULLISH_BOS|BEARISH_BOS|BULLISH_CHOCH|BEARISH_CHOCH|NONE|UNCLEAR",
+ "major_support":[{"low":0,"high":0,"reason":""}],
+ "major_resistance":[{"low":0,"high":0,"reason":""}],
+ "important_swing_highs":[0],
+ "important_swing_lows":[0],
+ "range_high":null,
+ "range_low":null,
+ "context_summary":"short factual summary",
+ "refresh_if":"specific structural condition that would make this screenshot context stale"
+}
+Keep at most 3 support and 3 resistance zones. Use null/empty arrays when unreadable.
 '''
 
 def image_part(data_url):
@@ -199,6 +219,23 @@ def sw():return send_from_directory('.','sw.js')
 @app.get('/icon.svg')
 def icon():return send_from_directory('.','icon.svg')
 
+@app.post('/api/context')
+def context_scan():
+    try:
+        d=request.get_json(force=True)
+        tf=str(d.get('timeframe') or '').upper()
+        img=d.get('image')
+        if tf not in {'H1','M15'} or not img:
+            return jsonify({'error':'missing_context','detail':'H1 or M15 screenshot and timeframe are required.'}),400
+        result=run_model([HTF_PROMPT, 'TIMEFRAME: '+tf, image_part(img)])
+        result['timeframe']=tf
+        result['saved_at']=__import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat()
+        result['refresh_after_minutes']=180 if tf=='H1' else 45
+        return jsonify(result)
+    except Exception as e:
+        text=str(e); low=text.lower(); quota=('429' in text or 'resource_exhausted' in low or 'quota' in low)
+        return jsonify({'error':'quota' if quota else 'context_failed','detail':text[:1200]}),429 if quota else 500
+
 @app.post('/api/scan')
 def scan():
     try:
@@ -206,7 +243,7 @@ def scan():
         if not d.get('m5'):return jsonify({'error':'missing_image','detail':'M5 screenshot is required.'}),400
         event_risk='HIGH' if d.get('event_risk') else 'NORMAL'
         candles,data_status,data_note=fetch_m5(); metrics=analytics(candles)
-        context={'data_status':data_status,'data_note':data_note,'deterministic_metrics':metrics,'event_risk':event_risk,'risk_budget':d.get('risk_budget'),'spread_cost':d.get('spread_cost'),'broker_specs':d.get('broker_specs')}
+        context={'data_status':data_status,'data_note':data_note,'deterministic_metrics':metrics,'event_risk':event_risk,'risk_budget':d.get('risk_budget'),'spread_cost':d.get('spread_cost'),'broker_specs':d.get('broker_specs'),'saved_htf_context':d.get('htf_context')}
         result=run_model([PROMPT,'SERVER CONTEXT JSON:\n'+json.dumps(context,separators=(',',':')),image_part(d['m5'])])
         return jsonify(norm(result,metrics,data_status,event_risk))
     except Exception as e:
