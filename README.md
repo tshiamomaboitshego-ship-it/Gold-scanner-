@@ -1,11 +1,15 @@
-# Gold Scanner V13 — M5 Pullback Finder
+# Gold Scanner V14 — Pullback + Confirmation Finder
 
-Focused screenshot scanner for XAUUSD M5. It maps fresh BUY and SELL pullback areas from visible recent structure and tells the user what reaction to wait for. It does not issue automatic entries or TP levels.
+Phone-friendly XAUUSD M5 screenshot analyzer.
 
-## Render
-Build: `pip install -r requirements.txt`
-Start: `gunicorn server:app`
-Environment: `GEMINI_API_KEY`
-Optional: `GEMINI_MODEL` (default `gemini-3.6-flash`) and `GEMINI_FALLBACK_MODEL` (default `gemini-3.5-flash`).
+V14 changes:
+- Conservative confirmation states: WAIT, TESTING, REJECTION DETECTED, CONFIRMATION DEVELOPING, CONFIRMED, INVALIDATED.
+- Evidence score for each zone (0–100). This is **not** a win probability.
+- Structure classification (HH/HL, LL/LH, mixed) and volatility flag.
+- Current price must come from a clearly readable right-edge price label; otherwise it returns null.
+- No automatic retry/fallback request, to protect free Gemini quota.
+- No BUY NOW / SELL NOW instruction and no TP prediction.
 
-V13 makes at most one controlled fallback request when the primary model returns 503/high demand or 429/resource exhausted. It never loops retries.
+Render setup stays the same: `pip install -r requirements.txt` then `gunicorn server:app`. Keep `GEMINI_API_KEY` and optionally `GEMINI_MODEL=gemini-3.6-flash` in environment variables.
+
+Important: V14 is still screenshot-based. Exact OHLC market-data integration and statistical validation require a reliable data source and are separate future upgrades. Test V14 on demo and log at least 50–100 setups before considering real-money use.
