@@ -1,30 +1,25 @@
-# Gold Scanner V17 — Saved HTF Context
+# Gold Scanner V18.1 — Landscape HTF + Portrait M5
 
-V17 adds saved H1 + M15 chart context to the V16 hybrid M5 scanner.
+V18.1 keeps V18's deep multi-timeframe engine and changes the visual workflow to match each timeframe's job.
 
-## Workflow
-1. Upload H1 once and tap Analyze + save H1.
-2. Upload M15 once and tap Analyze + save M15.
-3. Upload fresh M5 screenshots for normal scans.
-4. V17 sends the saved compact H1/M15 analysis with each M5 scan; it does not re-send or re-analyze the old H1/M15 screenshots.
-5. Refresh H1/M15 when the UI warns that context is stale or the saved structural refresh condition occurs.
+## Recommended workflow
+- H1: landscape screenshot, analyzed/saved for broad structure and major zones.
+- M15: landscape screenshot, analyzed/saved for intermediate structure and nearby context.
+- M5: fresh portrait screenshot on every scan so recent execution candles, wicks, rejection and local structure are larger.
+- Backend: when `TWELVE_DATA_API_KEY` is configured, up to 240 XAU/USD candles are analyzed independently for M5, M15 and H1.
+- Gemini combines the fresh M5 visual with saved H1/M15 visual context and deterministic multi-timeframe metrics.
+- BUY and SELL cases are evaluated independently; higher timeframes provide context and do not automatically force direction.
 
-## Quota behavior
-- H1 analysis = one Gemini request when you explicitly save/refresh it.
-- M15 analysis = one Gemini request when you explicitly save/refresh it.
-- Each M5 scan = one Gemini request.
-- No automatic retry loop.
-- Screenshots are not stored in localStorage; only compact JSON context is saved.
+## Retained systems
+Structure/BOS/CHoCH context, ATR, momentum, volatility, swings, liquidity/equal highs-lows, displacement, imbalance/FVG context, role flips, fake breaks, zone lifecycle/scoring, current-vs-historical confirmation, chase protection, event switch, risk filter, optional sizing estimate, saved HTF context and scan journal.
 
-## Context roles
-H1 supplies broad structure and major zones. M15 supplies intermediate structure and nearby zones. M5 remains the execution timeframe. Higher-timeframe context adds evidence and conflict awareness but does not automatically veto M5.
+## Render
+Build: `pip install -r requirements.txt`
+Start: `gunicorn server:app`
 
-## Existing V16 systems retained
-Real M5 OHLC support, deterministic swings, HH/HL and LL/LH, BOS/CHoCH, ATR, momentum, displacement, FVG context, role flips, fake breaks, zone lifecycle, chase protection, risk filtering, session context and journal.
+Environment variables:
+- `GEMINI_API_KEY` — required
+- `GEMINI_MODEL` — optional, defaults to `gemini-3.6-flash`
+- `TWELVE_DATA_API_KEY` — optional; enables deeper deterministic OHLC analysis
 
-## Environment variables
-- GEMINI_API_KEY (required)
-- GEMINI_MODEL (optional, defaults to gemini-3.6-flash)
-- TWELVE_DATA_API_KEY (optional; enables exact M5 OHLC analytics)
-
-Analysis aid only. Demo-test before considering live use.
+This is an analysis/testing tool, not an automated trading system. Evidence scores are not win probabilities. Demo/forward-test before live use.

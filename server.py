@@ -6,7 +6,7 @@ from google.genai import types
 app = Flask(__name__, static_folder='.', static_url_path='')
 
 PROMPT = r'''
-You are Gold Scanner V17, a conservative XAUUSD M5 HYBRID PULLBACK + CONFIRMATION ANALYST.
+You are Gold Scanner V18.1, a conservative XAUUSD M5 HYBRID PULLBACK + CONFIRMATION ANALYST.
 You receive ONE current M5 screenshot plus optional deterministic M5 market-data metrics and optional SAVED H1/M15 context. Use saved higher-timeframe context internally as confluence/context, but M5 remains the execution timeframe. H1/M15 must NOT automatically veto a valid M5 setup.
 Never issue BUY NOW / SELL NOW. Never promise profit, accuracy, or a reversal.
 
@@ -34,7 +34,7 @@ confirmation_state must be one of:
 NO_ZONE, WAIT, TESTING, REJECTION_DETECTED, CONFIRMATION_DEVELOPING, CURRENT_CONFIRMATION, HISTORICAL_REACTION, INVALIDATED.
 Be conservative. If newest candle closure is uncertain, do not use CURRENT_CONFIRMATION.
 
-V17 EXTRA RULES:
+V18 EXTRA RULES:
 - zone_lifecycle: FRESH, TESTING, REACTED, RETESTED, CONSUMED, INVALIDATED, EXPIRED. Never treat REACTED/CONSUMED as a fresh setup.
 - Detect displacement and FVG/imbalance only as supporting evidence.
 - Detect support/resistance role flips, fake breaks/reclaims, and setup conflicts.
@@ -43,6 +43,17 @@ V17 EXTRA RULES:
 - Session context is descriptive evidence, not a reason by itself to trade.
 - If spread_cost supplied is unusually high relative to ATR, risk_filter should be CAUTION/BLOCK.
 - risk_budget is a cap, not a trade recommendation.
+
+V18 MULTI-TIMEFRAME ARCHITECTURE:
+- multi_timeframe_metrics contains deterministic M5, M15 and H1 calculations from deeper OHLC history when LIVE/PARTIAL data is available. Use it even if screenshot zoom hides older structure.
+- H1 = broad context and major zones; M15 = intermediate context; M5 = execution. Higher timeframes add evidence but never automatically force direction.
+- Evaluate BUY CASE and SELL CASE independently on every scan. A bullish H1 recovery must not suppress a valid developing M15/M5 sell case, and vice versa. Output BUY only, SELL only, BOTH, or neither based on evidence.
+- Distinguish long-term trend, current recovery/pullback, and newest execution momentum. Do not label a recovery as a full structural reversal unless structure evidence supports it.
+- Prefer exact OHLC highs/lows for structure and zone boundaries when data exists; use Gemini screenshot vision as visual second opinion.
+- If screenshot interpretation conflicts with deterministic data, set setup_conflict=MIXED_SIGNALS and be conservative.
+- Use only CLOSED-candle structure evidence from deterministic metrics; do not call an intrabar wick a BOS/CHoCH.
+- H1 and M15 screenshots are preferably LANDSCAPE to maximize broad historical context. The fresh M5 screenshot is preferably PORTRAIT so newest execution candles, wicks, rejection and local structure are larger and easier to inspect. Do not penalize other orientations; deep OHLC data should reduce dependence on screenshot field-of-view.
+- Saved H1/M15 screenshot context is supplementary. If live higher-timeframe OHLC materially conflicts with saved screenshot context, reduce reliance on saved context and request refresh in m5_description, but still complete the M5 analysis.
 
 Return JSON only:
 {
@@ -72,7 +83,18 @@ Return JSON only:
 '''
 
 HTF_PROMPT = r'''
-You are Gold Scanner V17 higher-timeframe context extractor. You receive ONE XAUUSD chart screenshot whose timeframe is explicitly H1 or M15. Extract compact context for later M5 analysis. Do not give entries, trade directions, targets, or predictions. Newest/right-edge candles matter most.
+You are Gold Scanner V18.1 higher-timeframe context extractor. You receive ONE XAUUSD chart screenshot whose timeframe is explicitly H1 or M15. Extract compact context for later M5 analysis. Do not give entries, trade directions, targets, or predictions. Newest/right-edge candles matter most.
+V18 MULTI-TIMEFRAME ARCHITECTURE:
+- multi_timeframe_metrics contains deterministic M5, M15 and H1 calculations from deeper OHLC history when LIVE/PARTIAL data is available. Use it even if screenshot zoom hides older structure.
+- H1 = broad context and major zones; M15 = intermediate context; M5 = execution. Higher timeframes add evidence but never automatically force direction.
+- Evaluate BUY CASE and SELL CASE independently on every scan. A bullish H1 recovery must not suppress a valid developing M15/M5 sell case, and vice versa. Output BUY only, SELL only, BOTH, or neither based on evidence.
+- Distinguish long-term trend, current recovery/pullback, and newest execution momentum. Do not label a recovery as a full structural reversal unless structure evidence supports it.
+- Prefer exact OHLC highs/lows for structure and zone boundaries when data exists; use Gemini screenshot vision as visual second opinion.
+- If screenshot interpretation conflicts with deterministic data, set setup_conflict=MIXED_SIGNALS and be conservative.
+- Use only CLOSED-candle structure evidence from deterministic metrics; do not call an intrabar wick a BOS/CHoCH.
+- H1 and M15 screenshots are preferably LANDSCAPE to maximize broad historical context. The fresh M5 screenshot is preferably PORTRAIT so newest execution candles, wicks, rejection and local structure are larger and easier to inspect. Do not penalize other orientations; deep OHLC data should reduce dependence on screenshot field-of-view.
+- Saved H1/M15 screenshot context is supplementary. If live higher-timeframe OHLC materially conflicts with saved screenshot context, reduce reliance on saved context and request refresh in m5_description, but still complete the M5 analysis.
+
 Return JSON only:
 {
  "timeframe":"H1|M15",
@@ -96,21 +118,27 @@ def image_part(data_url):
     mime = header.split(';', 1)[0].replace('data:', '')
     return types.Part.from_bytes(data=base64.b64decode(body), mime_type=mime)
 
-def fetch_m5():
+def fetch_tf(interval, outputsize):
     key=os.environ.get('TWELVE_DATA_API_KEY','').strip()
     if not key: return None, 'SCREENSHOT_ONLY', 'TWELVE_DATA_API_KEY not configured'
-    q=urllib.parse.urlencode({'symbol':'XAU/USD','interval':'5min','outputsize':'120','timezone':'UTC','apikey':key})
+    q=urllib.parse.urlencode({'symbol':'XAU/USD','interval':interval,'outputsize':outputsize,'timezone':'UTC','apikey':key})
     try:
         with urllib.request.urlopen('https://api.twelvedata.com/time_series?'+q, timeout=8) as resp:
             d=json.loads(resp.read().decode())
         vals=d.get('values') or []
-        if d.get('status')=='error' or len(vals)<25: return None,'DATA_UNAVAILABLE',d.get('message','Not enough M5 candles')
-        candles=[]
-        for v in reversed(vals):
-            candles.append({'t':v['datetime'],'o':float(v['open']),'h':float(v['high']),'l':float(v['low']),'c':float(v['close'])})
-        return candles,'LIVE_DATA','Twelve Data XAU/USD 5min'
+        if d.get('status')=='error' or len(vals)<25: return None,'DATA_UNAVAILABLE',d.get('message','Not enough candles')
+        candles=[{'t':v['datetime'],'o':float(v['open']),'h':float(v['high']),'l':float(v['low']),'c':float(v['close'])} for v in reversed(vals)]
+        return candles,'LIVE_DATA',f'Twelve Data XAU/USD {interval}'
     except Exception as e:
         return None,'DATA_UNAVAILABLE',str(e)[:220]
+
+def fetch_multitimeframe():
+    specs={'M5':('5min',240),'M15':('15min',240),'H1':('1h',240)}
+    out={}; statuses=[]; notes=[]
+    for tf,(interval,n) in specs.items():
+        c,st,note=fetch_tf(interval,n); out[tf]={'candles':c,'status':st,'note':note,'metrics':analytics(c) if c else {}}; statuses.append(st); notes.append(tf+': '+note)
+    overall='LIVE_DATA' if all(x=='LIVE_DATA' for x in statuses) else 'PARTIAL_DATA' if any(x=='LIVE_DATA' for x in statuses) else statuses[0] if statuses else 'DATA_UNAVAILABLE'
+    return out,overall,' | '.join(notes)
 
 def analytics(c):
     if not c: return {}
@@ -242,10 +270,11 @@ def scan():
         d=request.get_json(force=True)
         if not d.get('m5'):return jsonify({'error':'missing_image','detail':'M5 screenshot is required.'}),400
         event_risk='HIGH' if d.get('event_risk') else 'NORMAL'
-        candles,data_status,data_note=fetch_m5(); metrics=analytics(candles)
-        context={'data_status':data_status,'data_note':data_note,'deterministic_metrics':metrics,'event_risk':event_risk,'risk_budget':d.get('risk_budget'),'spread_cost':d.get('spread_cost'),'broker_specs':d.get('broker_specs'),'saved_htf_context':d.get('htf_context')}
+        mtf,data_status,data_note=fetch_multitimeframe(); metrics=mtf.get('M5',{}).get('metrics',{})
+        mtf_metrics={tf:v.get('metrics',{}) for tf,v in mtf.items()}
+        context={'data_status':data_status,'data_note':data_note,'deterministic_metrics':metrics,'multi_timeframe_metrics':mtf_metrics,'event_risk':event_risk,'risk_budget':d.get('risk_budget'),'spread_cost':d.get('spread_cost'),'broker_specs':d.get('broker_specs'),'saved_htf_context':d.get('htf_context'),'input_guidance':'H1/M15 visual context is preferably landscape; fresh M5 execution screenshot is preferably portrait. Evaluate BUY and SELL cases independently; H1/M15 are context, M5 is execution.'}
         result=run_model([PROMPT,'SERVER CONTEXT JSON:\n'+json.dumps(context,separators=(',',':')),image_part(d['m5'])])
-        return jsonify(norm(result,metrics,data_status,event_risk))
+        out=norm(result,metrics,data_status,event_risk); out['multi_timeframe_metrics']=mtf_metrics; return jsonify(out)
     except Exception as e:
         text=str(e);low=text.lower();quota=('429' in text or 'resource_exhausted' in low or 'quota' in low)
         return jsonify({'error':'quota' if quota else 'scan_failed','detail':text[:1200]}),429 if quota else 500
