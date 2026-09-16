@@ -1,25 +1,24 @@
-# Gold Scanner V18.1 — Landscape HTF + Portrait M5
+# Gold Scanner V19
 
-V18.1 keeps V18's deep multi-timeframe engine and changes the visual workflow to match each timeframe's job.
+Phone-first XAUUSD analysis scanner. H1/M15 landscape context + fresh M5 portrait execution view.
 
-## Recommended workflow
-- H1: landscape screenshot, analyzed/saved for broad structure and major zones.
-- M15: landscape screenshot, analyzed/saved for intermediate structure and nearby context.
-- M5: fresh portrait screenshot on every scan so recent execution candles, wicks, rejection and local structure are larger.
-- Backend: when `TWELVE_DATA_API_KEY` is configured, up to 240 XAU/USD candles are analyzed independently for M5, M15 and H1.
-- Gemini combines the fresh M5 visual with saved H1/M15 visual context and deterministic multi-timeframe metrics.
-- BUY and SELL cases are evaluated independently; higher timeframes provide context and do not automatically force direction.
+## V19 additions
+- Current M5 pressure separated from future pullback zones
+- Deterministic market-phase classification
+- Closed-candle volatility shock detector
+- Approach-speed detection
+- Automatic volatility pause and HTF refresh warning after extreme displacement
+- AI-vs-OHLC conflict field
+- Setup memory passed from recent journal scans
+- Evidence score component support
+- Existing V18.1 deep M5/M15/H1 OHLC, structure, ATR, momentum, liquidity, FVG, role-flip, chase filter and zone lifecycle retained
 
-## Retained systems
-Structure/BOS/CHoCH context, ATR, momentum, volatility, swings, liquidity/equal highs-lows, displacement, imbalance/FVG context, role flips, fake breaks, zone lifecycle/scoring, current-vs-historical confirmation, chase protection, event switch, risk filter, optional sizing estimate, saved HTF context and scan journal.
+## Environment variables
+- `GEMINI_API_KEY` required
+- `GEMINI_MODEL` optional, defaults to `gemini-3.6-flash`
+- `TWELVE_DATA_API_KEY` optional but strongly recommended for deterministic M5/M15/H1 OHLC
 
-## Render
-Build: `pip install -r requirements.txt`
-Start: `gunicorn server:app`
+## Important limitation
+V19 does **not** pretend to have a live economic-calendar feed. The manual high-impact-event switch remains. V19 adds a deterministic volatility-shock fallback so abnormal closed-candle movement can pause normal zone logic even when the event switch was missed. A future version can add a verified calendar provider/API.
 
-Environment variables:
-- `GEMINI_API_KEY` — required
-- `GEMINI_MODEL` — optional, defaults to `gemini-3.6-flash`
-- `TWELVE_DATA_API_KEY` — optional; enables deeper deterministic OHLC analysis
-
-This is an analysis/testing tool, not an automated trading system. Evidence scores are not win probabilities. Demo/forward-test before live use.
+Analysis aid only. Demo-test before any real-money use.

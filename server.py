@@ -6,7 +6,7 @@ from google.genai import types
 app = Flask(__name__, static_folder='.', static_url_path='')
 
 PROMPT = r'''
-You are Gold Scanner V18.1, a conservative XAUUSD M5 HYBRID PULLBACK + CONFIRMATION ANALYST.
+You are Gold Scanner V19, a conservative XAUUSD M5 HYBRID PULLBACK + CONFIRMATION ANALYST.
 You receive ONE current M5 screenshot plus optional deterministic M5 market-data metrics and optional SAVED H1/M15 context. Use saved higher-timeframe context internally as confluence/context, but M5 remains the execution timeframe. H1/M15 must NOT automatically veto a valid M5 setup.
 Never issue BUY NOW / SELL NOW. Never promise profit, accuracy, or a reversal.
 
@@ -34,6 +34,19 @@ confirmation_state must be one of:
 NO_ZONE, WAIT, TESTING, REJECTION_DETECTED, CONFIRMATION_DEVELOPING, CURRENT_CONFIRMATION, HISTORICAL_REACTION, INVALIDATED.
 Be conservative. If newest candle closure is uncertain, do not use CURRENT_CONFIRMATION.
 
+V19 PROTECTION + STATE RULES:
+- Separate CURRENT M5 PRESSURE from a future pullback zone. A BUY zone may coexist with bearish current pressure and vice versa.
+- market_phase must classify TRENDING, PULLBACK, RANGING, BREAKOUT, REVERSAL_DEVELOPING, EVENT_SHOCK, or UNCLEAR.
+- If deterministic shock_detector is TRIGGERED, normal counter-momentum zone logic is suspended unless price has stabilized; action_state=VOLATILITY_PAUSE and risk_filter=BLOCK.
+- approach_speed describes how aggressively price is moving toward a zone. FAST/EXTREME approach against a zone weakens it; an extreme displacement smashing into/through a zone invalidates or blocks it.
+- CLOSED-candle acceptance beyond a zone/invalidation is more important than a wick. Mark broken zones INVALIDATED, never WAIT.
+- If saved H1/M15 context is materially stale or deterministic HTF structure conflicts with it after a shock/major break, set htf_refresh_needed=true and explain which timeframe needs refresh.
+- data_ai_conflict must explicitly report agreement/disagreement between deterministic metrics and screenshot interpretation. Strong disagreement => conservative WAIT/NO_VALID_SETUP.
+- score_components must explain the evidence score (freshness, move_away, structure, touches, proximity, invalidation, momentum, data_agreement).
+- setup_memory from the client contains prior zones/states. Continue their lifecycle rather than treating every screenshot as a blank slate.
+- automatic_event_status may be supplied by the server. If HIGH, use HIGH_RISK_EVENT. If UNKNOWN, never pretend the calendar is clear; shock detection remains active.
+- Do not call a zone failure a bad prediction when the zone was never confirmed. Distinguish NOT_TRIGGERED, TESTED, CONFIRMED, INVALIDATED.
+
 V18 EXTRA RULES:
 - zone_lifecycle: FRESH, TESTING, REACTED, RETESTED, CONSUMED, INVALIDATED, EXPIRED. Never treat REACTED/CONSUMED as a fresh setup.
 - Detect displacement and FVG/imbalance only as supporting evidence.
@@ -58,14 +71,23 @@ V18 MULTI-TIMEFRAME ARCHITECTURE:
 Return JSON only:
 {
  "current_price": null,
+ "current_pressure":"BULLISH|BEARISH|NEUTRAL|EXTREME_BULLISH|EXTREME_BEARISH|UNCLEAR",
+ "market_phase":"TRENDING|PULLBACK|RANGING|BREAKOUT|REVERSAL_DEVELOPING|EVENT_SHOCK|UNCLEAR",
+ "shock_detector":"NORMAL|ELEVATED|TRIGGERED",
+ "shock_reason":"short reason",
+ "approach_speed":"SLOW|NORMAL|FAST|EXTREME|UNCLEAR",
+ "data_ai_conflict":"NONE|MINOR|MAJOR|UNKNOWN",
+ "data_ai_conflict_reason":"short reason",
+ "htf_refresh_needed":false,
+ "htf_refresh_reason":"short reason",
  "m5_state":"BULLISH|BEARISH|UNCLEAR",
  "structure":"HH_HL|LL_LH|MIXED|UNCLEAR",
  "structure_event":"BULLISH_BOS|BEARISH_BOS|BULLISH_CHOCH|BEARISH_CHOCH|NONE|UNCLEAR",
  "volatility":"LOW|NORMAL|HIGH|EXTREME",
  "momentum":"BULLISH_STRONG|BULLISH|NEUTRAL|BEARISH|BEARISH_STRONG|UNCLEAR",
  "m5_description":"short factual description",
- "buy_pullback":{"zone":null,"freshness":"FRESH|NONE","zone_lifecycle":"FRESH|TESTING|REACTED|RETESTED|CONSUMED|INVALIDATED|EXPIRED|NONE","score":0,"quality":"WEAK|MODERATE|STRONG|VERY_STRONG|NONE","reason":"","confirmation_state":"NO_ZONE|WAIT|TESTING|REJECTION_DETECTED|CONFIRMATION_DEVELOPING|CURRENT_CONFIRMATION|HISTORICAL_REACTION|INVALIDATED","confirmation":"","invalidation":""},
- "sell_pullback":{"zone":null,"freshness":"FRESH|NONE","zone_lifecycle":"FRESH|TESTING|REACTED|RETESTED|CONSUMED|INVALIDATED|EXPIRED|NONE","score":0,"quality":"WEAK|MODERATE|STRONG|VERY_STRONG|NONE","reason":"","confirmation_state":"NO_ZONE|WAIT|TESTING|REJECTION_DETECTED|CONFIRMATION_DEVELOPING|CURRENT_CONFIRMATION|HISTORICAL_REACTION|INVALIDATED","confirmation":"","invalidation":""},
+ "buy_pullback":{"zone":null,"freshness":"FRESH|NONE","zone_lifecycle":"FRESH|TESTING|REACTED|RETESTED|CONSUMED|INVALIDATED|EXPIRED|NONE","score":0,"score_components":{"freshness":0,"move_away":0,"structure":0,"touches":0,"proximity":0,"invalidation":0,"momentum":0,"data_agreement":0},"quality":"WEAK|MODERATE|STRONG|VERY_STRONG|NONE","reason":"","confirmation_state":"NO_ZONE|WAIT|TESTING|REJECTION_DETECTED|CONFIRMATION_DEVELOPING|CURRENT_CONFIRMATION|HISTORICAL_REACTION|INVALIDATED","confirmation":"","invalidation":""},
+ "sell_pullback":{"zone":null,"freshness":"FRESH|NONE","zone_lifecycle":"FRESH|TESTING|REACTED|RETESTED|CONSUMED|INVALIDATED|EXPIRED|NONE","score":0,"score_components":{"freshness":0,"move_away":0,"structure":0,"touches":0,"proximity":0,"invalidation":0,"momentum":0,"data_agreement":0},"quality":"WEAK|MODERATE|STRONG|VERY_STRONG|NONE","reason":"","confirmation_state":"NO_ZONE|WAIT|TESTING|REJECTION_DETECTED|CONFIRMATION_DEVELOPING|CURRENT_CONFIRMATION|HISTORICAL_REACTION|INVALIDATED","confirmation":"","invalidation":""},
  "liquidity_context":"short factual note or none",
  "break_retest_context":"short factual note or none",
  "role_flip_context":"short factual note or none",
@@ -77,13 +99,13 @@ Return JSON only:
  "too_late_reason":"short reason or none",
  "risk_filter":"PASS|CAUTION|BLOCK",
  "risk_reason":"short reason",
- "action_state":"WAIT|OBSERVE_REACTION|CURRENT_CONFIRMATION_PRESENT|NO_VALID_SETUP|HIGH_RISK_EVENT",
+ "action_state":"WAIT|OBSERVE_REACTION|CURRENT_CONFIRMATION_PRESENT|NO_VALID_SETUP|HIGH_RISK_EVENT|VOLATILITY_PAUSE",
  "note":"Analysis aid only; confirmation is not certainty."
 }
 '''
 
 HTF_PROMPT = r'''
-You are Gold Scanner V18.1 higher-timeframe context extractor. You receive ONE XAUUSD chart screenshot whose timeframe is explicitly H1 or M15. Extract compact context for later M5 analysis. Do not give entries, trade directions, targets, or predictions. Newest/right-edge candles matter most.
+You are Gold Scanner V19 higher-timeframe context extractor. You receive ONE XAUUSD chart screenshot whose timeframe is explicitly H1 or M15. Extract compact context for later M5 analysis. Do not give entries, trade directions, targets, or predictions. Newest/right-edge candles matter most.
 V18 MULTI-TIMEFRAME ARCHITECTURE:
 - multi_timeframe_metrics contains deterministic M5, M15 and H1 calculations from deeper OHLC history when LIVE/PARTIAL data is available. Use it even if screenshot zoom hides older structure.
 - H1 = broad context and major zones; M15 = intermediate context; M5 = execution. Higher timeframes add evidence but never automatically force direction.
@@ -192,7 +214,19 @@ def analytics(c):
     session='ASIA' if hour<7 else 'LONDON' if hour<12 else 'LONDON_NEW_YORK_OVERLAP' if hour<16 else 'NEW_YORK' if hour<21 else 'OFF_HOURS'
     extension_atr=round(abs(move)/(atr or 1),2)
     chase_risk='HIGH' if extension_atr>=2.0 else 'CAUTION' if extension_atr>=1.25 else 'NORMAL'
-    return {'data_current_price':round(last['c'],3),'atr14':round(atr,3),'structure':structure,'structure_event':event,'momentum':mom,'volatility':vol,'last_swing_highs':[round(x[1],2) for x in swings_hi[-3:]],'last_swing_lows':[round(x[1],2) for x in swings_lo[-3:]],'equal_highs':eqh[-2:],'equal_lows':eql[-2:],'recent_5bar_move':round(move,3),'avg_body_5':round(avg_body,3),'displacement':displacement,'recent_fvgs':fvgs[-4:],'session_utc':session,'extension_atr_5bar':extension_atr,'chase_risk':chase_risk,'latest_closed_candles':c[-12:]}
+    # V19 deterministic protection: pressure, phase, shock and approach speed.
+    last_range=last['h']-last['l']; range_atr=last_range/(atr or 1); body_atr=abs(last['c']-last['o'])/(atr or 1)
+    last3_move=last['c']-(c[-4]['c'] if len(c)>=4 else c[0]['c']); move3_atr=abs(last3_move)/(atr or 1)
+    shock='TRIGGERED' if (range_atr>=2.4 or move3_atr>=3.0) else 'ELEVATED' if (range_atr>=1.6 or move3_atr>=2.0 or vol=='EXTREME') else 'NORMAL'
+    pressure='EXTREME_BULLISH' if last3_move>0 and shock=='TRIGGERED' else 'EXTREME_BEARISH' if last3_move<0 and shock=='TRIGGERED' else 'BULLISH' if last3_move>0.35*(atr or 1) else 'BEARISH' if last3_move<-0.35*(atr or 1) else 'NEUTRAL'
+    if shock=='TRIGGERED': phase='EVENT_SHOCK'
+    elif event in ('BULLISH_BOS','BEARISH_BOS') and vol in ('HIGH','EXTREME'): phase='BREAKOUT'
+    elif structure in ('HH_HL','LL_LH') and mom not in ('NEUTRAL','UNCLEAR'): phase='TRENDING'
+    elif structure=='MIXED' and vol in ('LOW','NORMAL'): phase='RANGING'
+    elif event in ('BULLISH_CHOCH','BEARISH_CHOCH'): phase='REVERSAL_DEVELOPING'
+    else: phase='PULLBACK' if mom not in ('NEUTRAL','UNCLEAR') else 'UNCLEAR'
+    speed='EXTREME' if move3_atr>=2.5 else 'FAST' if move3_atr>=1.4 else 'SLOW' if move3_atr<0.45 else 'NORMAL'
+    return {'data_current_price':round(last['c'],3),'atr14':round(atr,3),'structure':structure,'structure_event':event,'momentum':mom,'volatility':vol,'current_pressure':pressure,'market_phase':phase,'shock_detector':shock,'last_candle_range_atr':round(range_atr,2),'last_candle_body_atr':round(body_atr,2),'approach_speed':speed,'move_3bar_atr':round(move3_atr,2),'last_swing_highs':[round(x[1],2) for x in swings_hi[-3:]],'last_swing_lows':[round(x[1],2) for x in swings_lo[-3:]],'equal_highs':eqh[-2:],'equal_lows':eql[-2:],'recent_5bar_move':round(move,3),'avg_body_5':round(avg_body,3),'displacement':displacement,'recent_fvgs':fvgs[-4:],'session_utc':session,'extension_atr_5bar':extension_atr,'chase_risk':chase_risk,'latest_closed_candles':c[-12:]}
 
 def run_model(contents):
     client=genai.Client(api_key=os.environ['GEMINI_API_KEY'])
@@ -214,25 +248,34 @@ def norm(r,metrics,data_status,event_risk):
         except:r['current_price']=None
     for k,allowed,default in [('m5_state',{'BULLISH','BEARISH','UNCLEAR'},'UNCLEAR'),('structure',{'HH_HL','LL_LH','MIXED','UNCLEAR'},'UNCLEAR'),('structure_event',{'BULLISH_BOS','BEARISH_BOS','BULLISH_CHOCH','BEARISH_CHOCH','NONE','UNCLEAR'},'UNCLEAR'),('volatility',{'LOW','NORMAL','HIGH','EXTREME'},'NORMAL'),('momentum',{'BULLISH_STRONG','BULLISH','NEUTRAL','BEARISH','BEARISH_STRONG','UNCLEAR'},'UNCLEAR')]:
         v=str(r.get(k) or default).upper(); r[k]=v if v in allowed else default
+    # Deterministic V19 fields override visual guesses when live data exists.
+    if data_status=='LIVE_DATA':
+        r['current_pressure']=metrics.get('current_pressure','UNCLEAR'); r['market_phase']=metrics.get('market_phase','UNCLEAR'); r['shock_detector']=metrics.get('shock_detector','NORMAL'); r['approach_speed']=metrics.get('approach_speed','UNCLEAR')
+    else:
+        r.setdefault('current_pressure','UNCLEAR'); r.setdefault('market_phase','UNCLEAR'); r.setdefault('shock_detector','NORMAL'); r.setdefault('approach_speed','UNCLEAR')
+    r.setdefault('data_ai_conflict','UNKNOWN'); r.setdefault('data_ai_conflict_reason','')
+    r.setdefault('htf_refresh_needed',False); r.setdefault('htf_refresh_reason','')
     valid={'NO_ZONE','WAIT','TESTING','REJECTION_DETECTED','CONFIRMATION_DEVELOPING','CURRENT_CONFIRMATION','HISTORICAL_REACTION','INVALIDATED'}
     cp=r.get('current_price')
     for side in ('buy_pullback','sell_pullback'):
         z=r.get(side) if isinstance(r.get(side),dict) else {}; zone=z.get('zone'); fresh=str(z.get('freshness') or 'NONE').upper()
         if fresh!='FRESH' or not zone:
-            r[side]={'zone':None,'freshness':'NONE','zone_lifecycle':'NONE','score':0,'quality':'NONE','reason':z.get('reason') or 'No clear fresh zone.','confirmation_state':'NO_ZONE','confirmation':'','invalidation':''};continue
+            r[side]={'zone':None,'freshness':'NONE','zone_lifecycle':'NONE','score':0,'score_components':{},'quality':'NONE','reason':z.get('reason') or 'No clear fresh zone.','confirmation_state':'NO_ZONE','confirmation':'','invalidation':''};continue
         s=clamp(z.get('score')); st=str(z.get('confirmation_state') or 'WAIT').upper(); st=st if st in valid else 'WAIT'
         # Hard guardrail: current confirmation requires the model to assert a current retest; distant/old reactions are historical.
         conf=(z.get('confirmation') or '').lower()
         if st=='CURRENT_CONFIRMATION' and not any(w in conf for w in ('current','newest','retest','testing','now','latest')): st='HISTORICAL_REACTION'
         life=str(z.get('zone_lifecycle') or 'FRESH').upper(); life=life if life in {'FRESH','TESTING','REACTED','RETESTED','CONSUMED','INVALIDATED','EXPIRED'} else 'FRESH'
         if life in {'CONSUMED','INVALIDATED','EXPIRED'} and st=='CURRENT_CONFIRMATION': st='INVALIDATED'
-        z.update({'freshness':'FRESH','zone_lifecycle':life,'score':s,'quality':qual(s),'confirmation_state':st})
+        z.update({'freshness':'FRESH','zone_lifecycle':life,'score':s,'quality':qual(s),'confirmation_state':st}); z.setdefault('score_components',{})
         for k in ('reason','confirmation','invalidation'):z.setdefault(k,'')
         r[side]=z
-    act=str(r.get('action_state') or 'WAIT').upper(); allowed={'WAIT','OBSERVE_REACTION','CURRENT_CONFIRMATION_PRESENT','NO_VALID_SETUP','HIGH_RISK_EVENT'}
+    act=str(r.get('action_state') or 'WAIT').upper(); allowed={'WAIT','OBSERVE_REACTION','CURRENT_CONFIRMATION_PRESENT','NO_VALID_SETUP','HIGH_RISK_EVENT','VOLATILITY_PAUSE'}
     if act not in allowed:act='WAIT'
     if bool(r.get('too_late')): act='NO_VALID_SETUP'; r['risk_filter']='BLOCK'; r['risk_reason']=r.get('too_late_reason') or 'Move is already extended; chase filter blocked the setup.'
     if event_risk=='HIGH':act='HIGH_RISK_EVENT';r['risk_filter']='BLOCK';r['risk_reason']='High-impact news/event mode is enabled; technical confirmation can be unstable.'
+    elif metrics.get('shock_detector')=='TRIGGERED':
+        act='VOLATILITY_PAUSE'; r['risk_filter']='BLOCK'; r['risk_reason']='V19 volatility-shock detector triggered from closed-candle OHLC; normal zone logic is paused until structure stabilizes.'; r['htf_refresh_needed']=True; r['htf_refresh_reason']=r.get('htf_refresh_reason') or 'Extreme M5 displacement can make saved H1/M15 visual context stale; refresh after volatility settles.'
     elif act=='CURRENT_CONFIRMATION_PRESENT' and not any(r[s]['confirmation_state']=='CURRENT_CONFIRMATION' for s in ('buy_pullback','sell_pullback')):act='OBSERVE_REACTION'
     r['action_state']=act;r['data_status']=data_status;r['data_metrics']=metrics;r['event_risk']=event_risk
     r['note']='Analysis aid only. CURRENT_CONFIRMATION is not certainty or an automatic entry. Test on demo.'
@@ -272,7 +315,7 @@ def scan():
         event_risk='HIGH' if d.get('event_risk') else 'NORMAL'
         mtf,data_status,data_note=fetch_multitimeframe(); metrics=mtf.get('M5',{}).get('metrics',{})
         mtf_metrics={tf:v.get('metrics',{}) for tf,v in mtf.items()}
-        context={'data_status':data_status,'data_note':data_note,'deterministic_metrics':metrics,'multi_timeframe_metrics':mtf_metrics,'event_risk':event_risk,'risk_budget':d.get('risk_budget'),'spread_cost':d.get('spread_cost'),'broker_specs':d.get('broker_specs'),'saved_htf_context':d.get('htf_context'),'input_guidance':'H1/M15 visual context is preferably landscape; fresh M5 execution screenshot is preferably portrait. Evaluate BUY and SELL cases independently; H1/M15 are context, M5 is execution.'}
+        context={'data_status':data_status,'data_note':data_note,'deterministic_metrics':metrics,'multi_timeframe_metrics':mtf_metrics,'event_risk':event_risk,'risk_budget':d.get('risk_budget'),'spread_cost':d.get('spread_cost'),'broker_specs':d.get('broker_specs'),'saved_htf_context':d.get('htf_context'),'setup_memory':d.get('setup_memory'),'automatic_event_status':'UNKNOWN_NO_CALENDAR_FEED','input_guidance':'H1/M15 visual context is preferably landscape; fresh M5 execution screenshot is preferably portrait. Evaluate BUY and SELL cases independently; H1/M15 are context, M5 is execution.'}
         result=run_model([PROMPT,'SERVER CONTEXT JSON:\n'+json.dumps(context,separators=(',',':')),image_part(d['m5'])])
         out=norm(result,metrics,data_status,event_risk); out['multi_timeframe_metrics']=mtf_metrics; return jsonify(out)
     except Exception as e:
