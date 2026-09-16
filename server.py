@@ -6,7 +6,7 @@ from google.genai import types
 app = Flask(__name__, static_folder='.', static_url_path='')
 
 PROMPT = r'''
-You are Gold Scanner V15, a conservative XAUUSD M5 HYBRID PULLBACK + CONFIRMATION ANALYST.
+You are Gold Scanner V16, a conservative XAUUSD M5 HYBRID PULLBACK + CONFIRMATION ANALYST.
 You receive ONE current M5 screenshot plus optional deterministic M5 market-data metrics calculated by the server.
 Never issue BUY NOW / SELL NOW. Never promise profit, accuracy, or a reversal.
 
@@ -34,6 +34,16 @@ confirmation_state must be one of:
 NO_ZONE, WAIT, TESTING, REJECTION_DETECTED, CONFIRMATION_DEVELOPING, CURRENT_CONFIRMATION, HISTORICAL_REACTION, INVALIDATED.
 Be conservative. If newest candle closure is uncertain, do not use CURRENT_CONFIRMATION.
 
+V16 EXTRA RULES:
+- zone_lifecycle: FRESH, TESTING, REACTED, RETESTED, CONSUMED, INVALIDATED, EXPIRED. Never treat REACTED/CONSUMED as a fresh setup.
+- Detect displacement and FVG/imbalance only as supporting evidence.
+- Detect support/resistance role flips, fake breaks/reclaims, and setup conflicts.
+- Use ATR-relative proximity. If confirmation arrives after price is already extended, set too_late=true and action_state=NO_VALID_SETUP. Do not chase.
+- Prefer at most the strongest nearby BUY and SELL zone; do not clutter output.
+- Session context is descriptive evidence, not a reason by itself to trade.
+- If spread_cost supplied is unusually high relative to ATR, risk_filter should be CAUTION/BLOCK.
+- risk_budget is a cap, not a trade recommendation.
+
 Return JSON only:
 {
  "current_price": null,
@@ -43,10 +53,17 @@ Return JSON only:
  "volatility":"LOW|NORMAL|HIGH|EXTREME",
  "momentum":"BULLISH_STRONG|BULLISH|NEUTRAL|BEARISH|BEARISH_STRONG|UNCLEAR",
  "m5_description":"short factual description",
- "buy_pullback":{"zone":null,"freshness":"FRESH|NONE","score":0,"quality":"WEAK|MODERATE|STRONG|VERY_STRONG|NONE","reason":"","confirmation_state":"NO_ZONE|WAIT|TESTING|REJECTION_DETECTED|CONFIRMATION_DEVELOPING|CURRENT_CONFIRMATION|HISTORICAL_REACTION|INVALIDATED","confirmation":"","invalidation":""},
- "sell_pullback":{"zone":null,"freshness":"FRESH|NONE","score":0,"quality":"WEAK|MODERATE|STRONG|VERY_STRONG|NONE","reason":"","confirmation_state":"NO_ZONE|WAIT|TESTING|REJECTION_DETECTED|CONFIRMATION_DEVELOPING|CURRENT_CONFIRMATION|HISTORICAL_REACTION|INVALIDATED","confirmation":"","invalidation":""},
+ "buy_pullback":{"zone":null,"freshness":"FRESH|NONE","zone_lifecycle":"FRESH|TESTING|REACTED|RETESTED|CONSUMED|INVALIDATED|EXPIRED|NONE","score":0,"quality":"WEAK|MODERATE|STRONG|VERY_STRONG|NONE","reason":"","confirmation_state":"NO_ZONE|WAIT|TESTING|REJECTION_DETECTED|CONFIRMATION_DEVELOPING|CURRENT_CONFIRMATION|HISTORICAL_REACTION|INVALIDATED","confirmation":"","invalidation":""},
+ "sell_pullback":{"zone":null,"freshness":"FRESH|NONE","zone_lifecycle":"FRESH|TESTING|REACTED|RETESTED|CONSUMED|INVALIDATED|EXPIRED|NONE","score":0,"quality":"WEAK|MODERATE|STRONG|VERY_STRONG|NONE","reason":"","confirmation_state":"NO_ZONE|WAIT|TESTING|REJECTION_DETECTED|CONFIRMATION_DEVELOPING|CURRENT_CONFIRMATION|HISTORICAL_REACTION|INVALIDATED","confirmation":"","invalidation":""},
  "liquidity_context":"short factual note or none",
  "break_retest_context":"short factual note or none",
+ "role_flip_context":"short factual note or none",
+ "fake_break_context":"short factual note or none",
+ "imbalance_context":"short factual note or none",
+ "session_context":"short factual note",
+ "setup_conflict":"NONE|BULLISH_STRUCTURE_VS_RESISTANCE|BEARISH_STRUCTURE_VS_SUPPORT|MIXED_SIGNALS",
+ "too_late":false,
+ "too_late_reason":"short reason or none",
  "risk_filter":"PASS|CAUTION|BLOCK",
  "risk_reason":"short reason",
  "action_state":"WAIT|OBSERVE_REACTION|CURRENT_CONFIRMATION_PRESENT|NO_VALID_SETUP|HIGH_RISK_EVENT",
@@ -111,7 +128,23 @@ def analytics(c):
     for arr,out in ((swings_hi,eqh),(swings_lo,eql)):
         for a,b in zip(arr[-5:-1],arr[-4:]):
             if abs(a[1]-b[1])<=tol: out.append(round((a[1]+b[1])/2,2))
-    return {'data_current_price':round(last['c'],3),'atr14':round(atr,3),'structure':structure,'structure_event':event,'momentum':mom,'volatility':vol,'last_swing_highs':[round(x[1],2) for x in swings_hi[-3:]],'last_swing_lows':[round(x[1],2) for x in swings_lo[-3:]],'equal_highs':eqh[-2:],'equal_lows':eql[-2:],'recent_5bar_move':round(move,3),'avg_body_5':round(avg_body,3),'latest_closed_candles':c[-12:]}
+    # V16 deterministic context: displacement, FVGs, session and extension/chase context.
+    avg20=sum(abs(x['c']-x['o']) for x in c[-20:])/min(20,len(c))
+    displacement='NONE'
+    if avg20>0 and abs(last['c']-last['o']) >= 1.8*avg20:
+        displacement='BULLISH' if last['c']>last['o'] else 'BEARISH'
+    fvgs=[]
+    for i in range(max(2,len(c)-30),len(c)):
+        a,b=c[i-2],c[i]
+        if b['l']>a['h']: fvgs.append({'type':'BULLISH_FVG','low':round(a['h'],2),'high':round(b['l'],2),'age_bars':len(c)-1-i})
+        elif b['h']<a['l']: fvgs.append({'type':'BEARISH_FVG','low':round(b['h'],2),'high':round(a['l'],2),'age_bars':len(c)-1-i})
+    try:
+        hour=int(str(last['t']).split(' ')[1].split(':')[0])
+    except: hour=0
+    session='ASIA' if hour<7 else 'LONDON' if hour<12 else 'LONDON_NEW_YORK_OVERLAP' if hour<16 else 'NEW_YORK' if hour<21 else 'OFF_HOURS'
+    extension_atr=round(abs(move)/(atr or 1),2)
+    chase_risk='HIGH' if extension_atr>=2.0 else 'CAUTION' if extension_atr>=1.25 else 'NORMAL'
+    return {'data_current_price':round(last['c'],3),'atr14':round(atr,3),'structure':structure,'structure_event':event,'momentum':mom,'volatility':vol,'last_swing_highs':[round(x[1],2) for x in swings_hi[-3:]],'last_swing_lows':[round(x[1],2) for x in swings_lo[-3:]],'equal_highs':eqh[-2:],'equal_lows':eql[-2:],'recent_5bar_move':round(move,3),'avg_body_5':round(avg_body,3),'displacement':displacement,'recent_fvgs':fvgs[-4:],'session_utc':session,'extension_atr_5bar':extension_atr,'chase_risk':chase_risk,'latest_closed_candles':c[-12:]}
 
 def run_model(contents):
     client=genai.Client(api_key=os.environ['GEMINI_API_KEY'])
@@ -138,16 +171,19 @@ def norm(r,metrics,data_status,event_risk):
     for side in ('buy_pullback','sell_pullback'):
         z=r.get(side) if isinstance(r.get(side),dict) else {}; zone=z.get('zone'); fresh=str(z.get('freshness') or 'NONE').upper()
         if fresh!='FRESH' or not zone:
-            r[side]={'zone':None,'freshness':'NONE','score':0,'quality':'NONE','reason':z.get('reason') or 'No clear fresh zone.','confirmation_state':'NO_ZONE','confirmation':'','invalidation':''};continue
+            r[side]={'zone':None,'freshness':'NONE','zone_lifecycle':'NONE','score':0,'quality':'NONE','reason':z.get('reason') or 'No clear fresh zone.','confirmation_state':'NO_ZONE','confirmation':'','invalidation':''};continue
         s=clamp(z.get('score')); st=str(z.get('confirmation_state') or 'WAIT').upper(); st=st if st in valid else 'WAIT'
         # Hard guardrail: current confirmation requires the model to assert a current retest; distant/old reactions are historical.
         conf=(z.get('confirmation') or '').lower()
         if st=='CURRENT_CONFIRMATION' and not any(w in conf for w in ('current','newest','retest','testing','now','latest')): st='HISTORICAL_REACTION'
-        z.update({'freshness':'FRESH','score':s,'quality':qual(s),'confirmation_state':st})
+        life=str(z.get('zone_lifecycle') or 'FRESH').upper(); life=life if life in {'FRESH','TESTING','REACTED','RETESTED','CONSUMED','INVALIDATED','EXPIRED'} else 'FRESH'
+        if life in {'CONSUMED','INVALIDATED','EXPIRED'} and st=='CURRENT_CONFIRMATION': st='INVALIDATED'
+        z.update({'freshness':'FRESH','zone_lifecycle':life,'score':s,'quality':qual(s),'confirmation_state':st})
         for k in ('reason','confirmation','invalidation'):z.setdefault(k,'')
         r[side]=z
     act=str(r.get('action_state') or 'WAIT').upper(); allowed={'WAIT','OBSERVE_REACTION','CURRENT_CONFIRMATION_PRESENT','NO_VALID_SETUP','HIGH_RISK_EVENT'}
     if act not in allowed:act='WAIT'
+    if bool(r.get('too_late')): act='NO_VALID_SETUP'; r['risk_filter']='BLOCK'; r['risk_reason']=r.get('too_late_reason') or 'Move is already extended; chase filter blocked the setup.'
     if event_risk=='HIGH':act='HIGH_RISK_EVENT';r['risk_filter']='BLOCK';r['risk_reason']='High-impact news/event mode is enabled; technical confirmation can be unstable.'
     elif act=='CURRENT_CONFIRMATION_PRESENT' and not any(r[s]['confirmation_state']=='CURRENT_CONFIRMATION' for s in ('buy_pullback','sell_pullback')):act='OBSERVE_REACTION'
     r['action_state']=act;r['data_status']=data_status;r['data_metrics']=metrics;r['event_risk']=event_risk
@@ -170,7 +206,7 @@ def scan():
         if not d.get('m5'):return jsonify({'error':'missing_image','detail':'M5 screenshot is required.'}),400
         event_risk='HIGH' if d.get('event_risk') else 'NORMAL'
         candles,data_status,data_note=fetch_m5(); metrics=analytics(candles)
-        context={'data_status':data_status,'data_note':data_note,'deterministic_metrics':metrics,'event_risk':event_risk,'risk_budget':d.get('risk_budget')}
+        context={'data_status':data_status,'data_note':data_note,'deterministic_metrics':metrics,'event_risk':event_risk,'risk_budget':d.get('risk_budget'),'spread_cost':d.get('spread_cost'),'broker_specs':d.get('broker_specs')}
         result=run_model([PROMPT,'SERVER CONTEXT JSON:\n'+json.dumps(context,separators=(',',':')),image_part(d['m5'])])
         return jsonify(norm(result,metrics,data_status,event_risk))
     except Exception as e:

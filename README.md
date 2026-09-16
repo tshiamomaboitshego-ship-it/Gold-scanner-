@@ -1,25 +1,27 @@
-# Gold Scanner V15 Hybrid
+# Gold Scanner V16 Advanced
 
-V15 adds the next architecture layer without pretending a scanner can be perfect.
+Phone-first XAUUSD M5 analysis aid. V16 extends V15 with deterministic OHLC context plus conservative AI chart interpretation.
 
-## Implemented now
-- Optional real XAU/USD 5-minute OHLC via Twelve Data (`TWELVE_DATA_API_KEY`).
-- Deterministic ATR14 volatility, momentum, fractal swing highs/lows, HH/HL vs LL/LH structure, BOS/CHoCH checks, and equal-high/low context.
-- Gemini screenshot analysis used as a second analyst, not the only analyst.
-- Freshness/zone evidence scoring (not win probability).
-- Break-and-retest context and liquidity context.
-- Strict fresh-confirmation states. `HISTORICAL_REACTION` is separate from `CURRENT_CONFIRMATION`.
-- Manual high-impact-news switch that blocks confirmation mode during event risk.
-- Risk filter plus optional demo risk budget display.
-- Text-only scan journal stored on the phone/browser (last 100 scans; images are never stored in localStorage).
-- Current-price preference from live OHLC when connected; screenshot label is fallback.
+## V16 additions
+- Zone lifecycle: fresh/testing/reacted/retested/consumed/invalidated/expired
+- Displacement and recent FVG/imbalance context
+- Support/resistance role-flip and fake-break/reclaim context
+- ATR-relative extension/chase filter
+- Session context
+- Spread/cost input
+- Setup-conflict detection
+- Strongest-zone-only output
+- Optional educational position-size estimate using balance, risk %, SL distance and broker contract size
+- Journal remains local on the phone/browser
+- Historical reaction remains separated from current confirmation
 
-## Render setup
-Keep existing `GEMINI_API_KEY` and `GEMINI_MODEL`.
-Optional but recommended: create a Twelve Data API key and add `TWELVE_DATA_API_KEY` in Render environment variables. Without it, V15 still runs in screenshot-only mode and clearly labels that limitation.
+## Existing core
+Real XAU/USD M5 OHLC when `TWELVE_DATA_API_KEY` is configured, swing structure, HH/HL and LL/LH, BOS/CHoCH, ATR, momentum, equal-high/low context, break/retest analysis, evidence scoring, event-risk switch, risk filter.
 
-## Still requires real testing
-The scanner cannot honestly claim improved profitability until the journal contains enough historical/demo/forward observations. Test 50–100+ setups first. News awareness is manual in this build; automatic economic-calendar integration needs a separate reliable calendar source/API.
+## Render
+Build: `pip install -r requirements.txt`
+Start: `gunicorn server:app`
+Environment: `GEMINI_API_KEY`, optional `GEMINI_MODEL`, optional `TWELVE_DATA_API_KEY`.
 
-## Important
-`CURRENT_CONFIRMATION` means the newest visible/data-supported setup met the scanner's evidence rules. It is not a guaranteed trade or automatic entry.
+## Important limitations
+Automatic economic-calendar/news ingestion is NOT included; the high-impact event switch remains manual. The app does not know your broker's live spread or exact contract specification unless you enter them. Journal data is local and does not yet automatically label future trade outcomes. Evidence scores are not win probabilities. Demo/forward testing is required before drawing performance conclusions.
