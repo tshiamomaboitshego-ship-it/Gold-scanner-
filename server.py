@@ -6,7 +6,7 @@ from google.genai import types
 app = Flask(__name__, static_folder='.', static_url_path='')
 
 PROMPT = r'''
-You are Gold Scanner V24, a conservative XAUUSD M5 HYBRID PULLBACK + CONFIRMATION ANALYST.
+You are Gold Scanner V25, a conservative XAUUSD M5 HYBRID PULLBACK + CONFIRMATION ANALYST.
 You receive ONE current M5 screenshot plus deterministic H1/M15/M5 market-data metrics fetched automatically from Twelve Data. Use H1/M15 OHLC context internally as confluence/context, but M5 remains the execution timeframe. H1/M15 must NOT automatically veto a valid M5 setup.
 Never issue BUY NOW / SELL NOW. Never promise profit, accuracy, or a reversal.
 
@@ -194,6 +194,7 @@ def fetch_multitimeframe():
     for tf,(interval,n) in specs.items():
         c,st,note=fetch_tf(interval,n); out[tf]={'candles':c,'status':st,'note':note,'metrics':analytics(c) if c else {}}; statuses.append(st); notes.append(tf+': '+note)
     overall='LIVE_DATA' if all(x=='LIVE_DATA' for x in statuses) else 'PARTIAL_DATA' if any(x=='LIVE_DATA' for x in statuses) else statuses[0] if statuses else 'DATA_UNAVAILABLE'
+    if any(x=='LIVE_DATA' for x in statuses): enrich_mtf_candidates(out)
     return out,overall,' | '.join(notes)
 
 def analytics(c):
@@ -397,6 +398,74 @@ def analytics(c):
 
     return {'closed_candle_engine':True,'reaction_quality':reaction_quality,'latest_wick_rejection':wick_reject,'recent_bull_candles':bull,'recent_bear_candles':bear,'data_current_price':round(last['c'],3),'atr14':round(atr,3),'structure':structure,'structure_event':event,'momentum':mom,'volatility':vol,'current_pressure':pressure,'market_phase':phase,'shock_detector':shock,'last_candle_range_atr':round(range_atr,2),'last_candle_body_atr':round(body_atr,2),'approach_speed':speed,'move_3bar_atr':round(move3_atr,2),'last_swing_highs':[round(x[1],2) for x in swings_hi[-3:]],'last_swing_lows':[round(x[1],2) for x in swings_lo[-3:]],'equal_highs':eqh[-2:],'equal_lows':eql[-2:],'recent_5bar_move':round(move,3),'avg_body_5':round(avg_body,3),'displacement':displacement,'recent_fvgs':fvgs[-4:],'session_utc':session,'extension_atr_5bar':extension_atr,'chase_risk':chase_risk,'fvg_quality':quality_fvgs[-6:],'order_blocks':obs,'premium_discount':{'state':pd,'range_low':round(range_lo,2),'equilibrium':round(equilibrium,2),'range_high':round(range_hi,2)},'external_liquidity':external_liq,'internal_liquidity':internal_liq,'liquidity_sweep':sweep,'body_acceptance':acceptance,'session_liquidity':session_liq,'price_action_sequence':sequence,'confluence_cluster':confluence,'candidate_zones':candidate_zones,'latest_closed_candles':c[-12:]}
 
+
+
+def enrich_mtf_candidates(mtf):
+    """V25: rank M5 execution zones with M15/H1 confluence without letting HTF force direction."""
+    m5=(mtf.get('M5') or {}).get('metrics') or {}
+    m15=(mtf.get('M15') or {}).get('metrics') or {}
+    h1=(mtf.get('H1') or {}).get('metrics') or {}
+    cp=m5.get('data_current_price'); atr=float(m5.get('atr14') or 1)
+    if cp is None:return
+    def zones(m,side): return ((m.get('candidate_zones') or {}).get(side) or [])
+    def overlap_or_near(a,b,near):
+        return not (a['high'] < b['low']-near or a['low'] > b['high']+near)
+    for side in ('buy','sell'):
+        arr=zones(m5,side)
+        for z in arr:
+            base=int(z.get('rank_score') or 0); evidence=[]; opposition=[]; bonus=0
+            m15_hits=[x for x in zones(m15,side) if overlap_or_near(z,x,max(atr*.35,.35))]
+            h1_hits=[x for x in zones(h1,side) if overlap_or_near(z,x,max(atr*.65,.6))]
+            if m15_hits: bonus+=10; evidence.append('M15 zone overlap')
+            if h1_hits: bonus+=12; evidence.append('H1 zone overlap')
+            # Structure is context, not a veto. Small bonus/penalty only.
+            bull=(side=='buy')
+            for name,m,w in [('M15',m15,5),('H1',h1,4)]:
+                st=m.get('structure')
+                aligned=(bull and st=='HH_HL') or ((not bull) and st=='LL_LH')
+                opposed=(bull and st=='LL_LH') or ((not bull) and st=='HH_HL')
+                if aligned: bonus+=w; evidence.append(name+' structure aligned')
+                elif opposed: bonus-=max(2,w-2); opposition.append(name+' structure opposed')
+            # Premium/discount is location context only.
+            pd=h1.get('premium_discount',{}).get('state')
+            if bull and pd=='DISCOUNT': bonus+=4; evidence.append('H1 discount')
+            elif (not bull) and pd=='PREMIUM': bonus+=4; evidence.append('H1 premium')
+            # Liquidity below a BUY / above a SELL can mean price may seek deeper liquidity: caution, not veto.
+            ext=h1.get('external_liquidity') or {}
+            target=ext.get('below' if bull else 'above')
+            if isinstance(target,(int,float)):
+                if (bull and target < z['low']) or ((not bull) and target > z['high']): opposition.append('external liquidity remains beyond zone')
+            z['m5_base_score']=base; z['mtf_bonus']=bonus; z['rank_score']=max(0,min(100,base+bonus))
+            z['mtf_evidence']=evidence; z['mtf_opposition']=opposition
+            z['depth']='SHALLOW'
+        # Label by distance from current price after re-ranking.
+        arr.sort(key=lambda x:x.get('rank_score',0),reverse=True)
+        bydist=sorted(arr,key=lambda x:x.get('distance_atr',999))
+        labels=['SHALLOW','INTERMEDIATE','DEEP','DEEPER']
+        for i,z in enumerate(bydist): z['depth']=labels[min(i,len(labels)-1)]
+    m5['candidate_zones']={'buy':zones(m5,'buy'),'sell':zones(m5,'sell')}
+    # Closed-candle confirmation evidence around the strongest candidates.
+    candles=m5.get('latest_closed_candles') or []
+    for side in ('buy','sell'):
+        for z in zones(m5,side):
+            lo,hi=z['low'],z['high']; recent=candles[-6:]; touched=[x for x in recent if x['l']<=hi and x['h']>=lo]
+            z['confirmation_stage']='WAIT'
+            if touched:
+                z['confirmation_stage']='TESTING'
+                last=recent[-1] if recent else None
+                if last:
+                    body=max(abs(last['c']-last['o']),atr*.05); lower=last['c']-last['l']; upper=last['h']-last['c']
+                    reject=(side=='buy' and lower>=1.4*body and last['c']>=lo) or (side=='sell' and upper>=1.4*body and last['c']<=hi)
+                    if reject:z['confirmation_stage']='REJECTION_DETECTED'
+                if len(recent)>=3:
+                    a,b=recent[-2],recent[-1]
+                    follow=(side=='buy' and a['c']>a['o'] and b['c']>a['h']) or (side=='sell' and a['c']<a['o'] and b['c']<a['l'])
+                    if follow:z['confirmation_stage']='FOLLOW_THROUGH'
+            # Acceptance through zone overrides a pretty wick.
+            if recent:
+                accepted=sum(1 for x in recent[-3:] if (side=='buy' and x['c']<lo) or (side=='sell' and x['c']>hi))>=2
+                if accepted:z['confirmation_stage']='INVALIDATED'
+
 def run_model(contents):
     client=genai.Client(api_key=os.environ['GEMINI_API_KEY'])
     model=os.environ.get('GEMINI_MODEL','gemini-3.6-flash')
@@ -555,7 +624,7 @@ def data_only_result(mtf,data_status,data_note,why='Gemini visual check unavaila
       'approach_speed':m5.get('approach_speed','UNCLEAR'),'m5_state':'BULLISH' if str(m5.get('momentum','')).startswith('BULLISH') else 'BEARISH' if str(m5.get('momentum','')).startswith('BEARISH') else 'UNCLEAR',
       'structure':m5.get('structure','UNCLEAR'),'structure_event':m5.get('structure_event','NONE'),'volatility':m5.get('volatility','NORMAL'),'momentum':m5.get('momentum','UNCLEAR'),
       'multi_timeframe_metrics':{'H1':h1,'M15':m15,'M5':m5},'candidate_zones':m5.get('candidate_zones',{}),
-      'data_only_summary':f"H1 {h1.get('structure','—')} · M15 {m15.get('structure','—')} · M5 {m5.get('structure','—')}. Exact OHLC engine active; Gemini visual confirmation unavailable.",
+      'data_only_summary':f"H1 {h1.get('structure','—')} · M15 {m15.get('structure','—')} · M5 {m5.get('structure','—')}. V25 ranks M5 candidates with H1/M15 confluence; Gemini visual confirmation unavailable.",
       'buy_candidate':top('buy'),'sell_candidate':top('sell'),
       'note':'Data-only analysis aid. Candidate zones and structure are deterministic evidence, not guaranteed reversal points.'
     }

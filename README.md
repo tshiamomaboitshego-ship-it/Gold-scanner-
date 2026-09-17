@@ -1,4 +1,4 @@
-# Gold Scanner V24 — One Screenshot Hybrid
+# Gold Scanner V25 — One Screenshot Hybrid
 
 Normal workflow: upload ONE fresh M5 screenshot. The backend automatically fetches XAU/USD H1, M15 and M5 OHLC from Twelve Data and runs the deterministic Python engine. Gemini receives only the M5 screenshot plus compact OHLC metrics as a visual second opinion.
 
@@ -7,7 +7,7 @@ Normal workflow: upload ONE fresh M5 screenshot. The backend automatically fetch
 - `GEMINI_MODEL` optional, default `gemini-3.6-flash`
 - `TWELVE_DATA_API_KEY`
 
-## V24 changes
+## V25 changes
 - H1/M15 screenshot uploads removed from normal UI.
 - `/api/ohlc-test` tests H1/M15/M5 Twelve Data without using Gemini quota.
 - H1/M15/M5 exact OHLC analyzed automatically.
@@ -16,3 +16,6 @@ Normal workflow: upload ONE fresh M5 screenshot. The backend automatically fetch
 - Hybrid scan uses one Gemini request per M5 scan under normal operation.
 
 This is an analysis/testing aid, not an automated trading system or guarantee of profitable outcomes.
+
+
+V25 adds multi-timeframe candidate enrichment: M5 zones are re-ranked using M15/H1 zone overlap, structure context, premium/discount context, depth labels, and deterministic closed-candle confirmation stages. HTF evidence is deliberately a bonus/penalty rather than a directional veto.
