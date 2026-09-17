@@ -6,7 +6,7 @@ from google.genai import types
 app = Flask(__name__, static_folder='.', static_url_path='')
 
 PROMPT = r'''
-You are Gold Scanner V21, a conservative XAUUSD M5 HYBRID PULLBACK + CONFIRMATION ANALYST.
+You are Gold Scanner V22, a conservative XAUUSD M5 HYBRID PULLBACK + CONFIRMATION ANALYST.
 You receive ONE current M5 screenshot plus optional deterministic M5 market-data metrics and optional SAVED H1/M15 context. Use saved higher-timeframe context internally as confluence/context, but M5 remains the execution timeframe. H1/M15 must NOT automatically veto a valid M5 setup.
 Never issue BUY NOW / SELL NOW. Never promise profit, accuracy, or a reversal.
 
@@ -77,6 +77,9 @@ V21 PRICE-ACTION CONFLUENCE RULES:
 - Use session_liquidity/opening ranges descriptively. Session levels never force a direction.
 - body_acceptance is more important than a single wick: repeated closed-candle acceptance through structure weakens/invalidate opposing zones; wick sweep + reclaim is different.
 - confluence_cluster must explain supporting AND opposing evidence. Do not inflate confidence by double-counting correlated concepts.
+- V22 TIMING: explicitly distinguish UNTESTED future zone, ACTIVE_TEST, ALREADY_REACTED, RETEST_PENDING and INVALIDATED. Never call a recently touched/rejected zone FRESH.
+- Explain H1/M15/M5 support and opposition separately for each zone.
+- If no zone is currently confirming, say NO_ACTIVE_SETUP even when future BUY/SELL locations are mapped.
 - inducement is only a POSSIBLE label when a clear minor internal swing sits between current price and a more important external liquidity/HTF objective. If uncertain say NONE.
 - Keep the final zone map uncluttered: these concepts improve zone selection/confirmation, not the number of zones shown.
 
@@ -125,7 +128,7 @@ Return JSON only:
 '''
 
 HTF_PROMPT = r'''
-You are Gold Scanner V21 higher-timeframe context extractor. You receive ONE XAUUSD chart screenshot whose timeframe is explicitly H1 or M15. Extract compact context for later M5 analysis. Do not give entries, trade directions, targets, or predictions. Newest/right-edge candles matter most.
+You are Gold Scanner V22 higher-timeframe context extractor. You receive ONE XAUUSD chart screenshot whose timeframe is explicitly H1 or M15. Extract compact context for later M5 analysis. Do not give entries, trade directions, targets, or predictions. Newest/right-edge candles matter most.
 V18 MULTI-TIMEFRAME ARCHITECTURE:
 - multi_timeframe_metrics contains deterministic M5, M15 and H1 calculations from deeper OHLC history when LIVE/PARTIAL data is available. Use it even if screenshot zoom hides older structure.
 - H1 = broad context and major zones; M15 = intermediate context; M5 = execution. Higher timeframes add evidence but never automatically force direction.
@@ -367,6 +370,44 @@ def clamp(v):
 
 def qual(s): return 'NONE' if s<=0 else 'WEAK' if s<50 else 'MODERATE' if s<70 else 'STRONG' if s<85 else 'VERY_STRONG'
 
+def zone_bounds(zone):
+    import re
+    if not zone: return None
+    nums=[float(x) for x in re.findall(r'\d+(?:\.\d+)?',str(zone))]
+    if len(nums)<2:return None
+    return min(nums[0],nums[1]),max(nums[0],nums[1])
+
+def reconcile_zone_lifecycle(z,side,metrics,current_price):
+    """V22: deterministic closed-candle lifecycle/timing reconciliation."""
+    bounds=zone_bounds(z.get('zone'))
+    candles=(metrics.get('latest_closed_candles') or [])[-24:]
+    if not bounds or not candles:return z
+    lo,hi=bounds; atr=float(metrics.get('atr14') or max((hi-lo),1.0)); cp=float(current_price) if current_price is not None else float(candles[-1]['c'])
+    touched_idx=[i for i,x in enumerate(candles) if float(x['l'])<=hi and float(x['h'])>=lo]
+    close_beyond=[i for i,x in enumerate(candles) if (side=='buy' and float(x['c'])<lo) or (side=='sell' and float(x['c'])>hi)]
+    dist=0.0 if lo<=cp<=hi else (lo-cp if cp<lo else cp-hi)
+    z['distance_to_zone']=round(dist,3); z['distance_atr']=round(dist/atr,2) if atr else None
+    if close_beyond:
+        z['zone_lifecycle']='INVALIDATED'; z['freshness']='USED'; z['confirmation_state']='INVALIDATED'
+        z['timing_status']='INVALIDATED'; z['timing_note']='Closed M5 acceptance beyond the zone detected in recent OHLC.'
+        return z
+    if touched_idx:
+        last=touched_idx[-1]; bars_since=len(candles)-1-last
+        moved=(cp-hi) if side=='buy' else (lo-cp)
+        if bars_since==0 or dist<=0.20*atr:
+            z['zone_lifecycle']='TESTING'; z['freshness']='USED'; z['timing_status']='ACTIVE_TEST'
+            z['timing_note']='Price is currently at/near a previously touched zone; it is not fresh.'
+        elif moved>=0.35*atr:
+            z['zone_lifecycle']='REACTED'; z['freshness']='USED'; z['confirmation_state']='HISTORICAL_REACTION'
+            z['timing_status']='ALREADY_REACTED'; z['timing_note']='Recent OHLC shows price already touched this zone and moved away. Do not present it as a fresh first-touch setup.'
+        else:
+            z['zone_lifecycle']='RETESTED'; z['freshness']='USED'; z['timing_status']='RETEST_PENDING'
+            z['timing_note']='The zone has already been touched; any future visit is a retest, not a fresh test.'
+    else:
+        z['zone_lifecycle']='FRESH'; z['freshness']='FRESH'; z['timing_status']='UNTESTED'
+        z['timing_note']='No touch found in the recent closed-candle window.'
+    return z
+
 def norm(r,metrics,data_status,event_risk):
     if not isinstance(r,dict):r={}
     if data_status=='LIVE_DATA' and metrics.get('data_current_price') is not None:r['current_price']=metrics['data_current_price']
@@ -385,24 +426,31 @@ def norm(r,metrics,data_status,event_risk):
     valid={'NO_ZONE','WAIT','TESTING','REJECTION_DETECTED','CONFIRMATION_DEVELOPING','CURRENT_CONFIRMATION','HISTORICAL_REACTION','INVALIDATED'}
     cp=r.get('current_price')
     for side in ('buy_pullback','sell_pullback'):
-        z=r.get(side) if isinstance(r.get(side),dict) else {}; zone=z.get('zone'); fresh=str(z.get('freshness') or 'NONE').upper()
-        if fresh!='FRESH' or not zone:
-            r[side]={'zone':None,'freshness':'NONE','zone_lifecycle':'NONE','score':0,'score_components':{},'quality':'NONE','reason':z.get('reason') or 'No clear fresh zone.','confirmation_state':'NO_ZONE','confirmation':'','invalidation':''};continue
+        z=r.get(side) if isinstance(r.get(side),dict) else {}; zone=z.get('zone')
+        if not zone:
+            r[side]={'zone':None,'freshness':'NONE','zone_lifecycle':'NONE','score':0,'score_components':{},'quality':'NONE','reason':z.get('reason') or 'No clear zone.','confirmation_state':'NO_ZONE','confirmation':'','invalidation':'','timing_status':'NO_ZONE','timing_note':'','distance_to_zone':None,'distance_atr':None};continue
         s=clamp(z.get('score')); st=str(z.get('confirmation_state') or 'WAIT').upper(); st=st if st in valid else 'WAIT'
-        # Hard guardrail: current confirmation requires the model to assert a current retest; distant/old reactions are historical.
         conf=(z.get('confirmation') or '').lower()
         if st=='CURRENT_CONFIRMATION' and not any(w in conf for w in ('current','newest','retest','testing','now','latest')): st='HISTORICAL_REACTION'
-        life=str(z.get('zone_lifecycle') or 'FRESH').upper(); life=life if life in {'FRESH','TESTING','REACTED','RETESTED','CONSUMED','INVALIDATED','EXPIRED'} else 'FRESH'
-        if life in {'CONSUMED','INVALIDATED','EXPIRED'} and st=='CURRENT_CONFIRMATION': st='INVALIDATED'
-        z.update({'freshness':'FRESH','zone_lifecycle':life,'score':s,'quality':qual(s),'confirmation_state':st}); z.setdefault('score_components',{})
+        z.update({'score':s,'quality':qual(s),'confirmation_state':st}); z.setdefault('score_components',{})
         for k in ('reason','confirmation','invalidation'):z.setdefault(k,'')
+        if data_status=='LIVE_DATA': z=reconcile_zone_lifecycle(z,'buy' if side=='buy_pullback' else 'sell',metrics,cp)
+        else:
+            life=str(z.get('zone_lifecycle') or 'FRESH').upper(); z['zone_lifecycle']=life if life in {'FRESH','TESTING','REACTED','RETESTED','CONSUMED','INVALIDATED','EXPIRED'} else 'FRESH'; z.setdefault('timing_status','VISUAL_ONLY'); z.setdefault('timing_note','Lifecycle is based on screenshot analysis because live OHLC is unavailable.'); z.setdefault('distance_to_zone',None); z.setdefault('distance_atr',None)
         r[side]=z
+    # V22 active-setup summary separates mapped locations from what is actionable now.
+    active=[]
+    for name,side in [('BUY','buy_pullback'),('SELL','sell_pullback')]:
+        z=r[side]
+        if z.get('confirmation_state') in {'CURRENT_CONFIRMATION','CONFIRMATION_DEVELOPING','REJECTION_DETECTED'} and z.get('zone_lifecycle') not in {'REACTED','CONSUMED','INVALIDATED','EXPIRED'}: active.append(name)
+    r['active_setup']=' + '.join(active) if active else 'NO_ACTIVE_SETUP'
+    r['timing_summary']='Mapped zones are locations to monitor. Lifecycle and current pressure determine whether anything is active now.'
     act=str(r.get('action_state') or 'WAIT').upper(); allowed={'WAIT','OBSERVE_REACTION','CURRENT_CONFIRMATION_PRESENT','NO_VALID_SETUP','HIGH_RISK_EVENT','VOLATILITY_PAUSE'}
     if act not in allowed:act='WAIT'
     if bool(r.get('too_late')): act='NO_VALID_SETUP'; r['risk_filter']='BLOCK'; r['risk_reason']=r.get('too_late_reason') or 'Move is already extended; chase filter blocked the setup.'
     if event_risk=='HIGH':act='HIGH_RISK_EVENT';r['risk_filter']='BLOCK';r['risk_reason']='High-impact news/event mode is enabled; technical confirmation can be unstable.'
     elif metrics.get('shock_detector')=='TRIGGERED':
-        act='VOLATILITY_PAUSE'; r['risk_filter']='BLOCK'; r['risk_reason']='V19 volatility-shock detector triggered from closed-candle OHLC; normal zone logic is paused until structure stabilizes.'; r['htf_refresh_needed']=True; r['htf_refresh_reason']=r.get('htf_refresh_reason') or 'Extreme M5 displacement can make saved H1/M15 visual context stale; refresh after volatility settles.'
+        act='VOLATILITY_PAUSE'; r['risk_filter']='BLOCK'; r['risk_reason']='V22 volatility-shock detector triggered from closed-candle OHLC; normal zone logic is paused until structure stabilizes.'; r['htf_refresh_needed']=True; r['htf_refresh_reason']=r.get('htf_refresh_reason') or 'Extreme M5 displacement can make saved H1/M15 visual context stale; refresh after volatility settles.'
     elif act=='CURRENT_CONFIRMATION_PRESENT' and not any(r[s]['confirmation_state']=='CURRENT_CONFIRMATION' for s in ('buy_pullback','sell_pullback')):act='OBSERVE_REACTION'
     r['action_state']=act;r['data_status']=data_status;r['data_metrics']=metrics;r['event_risk']=event_risk
     r['note']='Analysis aid only. CURRENT_CONFIRMATION is not certainty or an automatic entry. Test on demo.'

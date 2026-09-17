@@ -1,23 +1,19 @@
-# Gold Scanner V21 — Price-Action Confluence Engine
+# Gold Scanner V22 — Lifecycle & Timing Engine
 
-V21 keeps V20 testing/protection and adds deterministic price-action confluence:
+V22 is built on V21 and focuses on the failure found during live testing: a useful level could be labelled FRESH even after price had already touched and reacted from it.
 
-- order-block / breaker-block heuristic
-- FVG quality + fill-state tracking
-- liquidity sweep → structure → FVG sequence recognition
-- premium / equilibrium / discount context
-- internal vs external liquidity
-- cautious inducement context through Gemini (only when clear)
-- session highs/lows + simple London/New York opening ranges from OHLC
-- closed-candle body acceptance vs wick sweep/reclaim
-- confluence clustering with supporting and opposing evidence
-- V20 setup tracking, outcome checks and deterministic replay retained
+## V22 upgrades
+- Deterministic closed-candle zone lifecycle reconciliation from live M5 OHLC.
+- Timing states: UNTESTED, ACTIVE_TEST, ALREADY_REACTED, RETEST_PENDING, INVALIDATED.
+- Recently touched/rejected zones are no longer presented as fresh first-touch setups when live OHLC can verify the touch.
+- `NO_ACTIVE_SETUP` is separated from future mapped BUY/SELL locations.
+- Distance to each zone and ATR-normalized distance are shown.
+- Evidence-score components are surfaced in the phone UI when supplied.
+- Current pressure/market phase remain separate from future zones.
+- V21 confluence engine remains: market structure, BOS/CHoCH, liquidity, FVG quality, order blocks/breakers, premium/discount, session liquidity, displacement, acceptance/rejection and sequence recognition.
+- V20/V19 testing, outcome tracking, volatility-shock, approach-speed, chase and AI/data conflict protections remain.
 
-These are evidence features, not guaranteed signals. V21 deliberately avoids treating a single FVG, order block, liquidity level, premium/discount state, or session level as an automatic BUY/SELL rule.
+## Important
+This is an analysis/testing aid, not an automatic trading system and not a profitability guarantee. Automatic economic-calendar integration is still not included. Manual event-risk mode and deterministic volatility-shock protection remain.
 
-## Environment
-- GEMINI_API_KEY required for screenshot analysis.
-- GEMINI_MODEL optional; defaults to gemini-3.6-flash.
-- TWELVE_DATA_API_KEY strongly recommended for deterministic M5/M15/H1 OHLC features.
-
-Automatic economic-calendar integration is still not included; use the manual high-impact-event switch. Volatility-shock protection remains active when OHLC is connected.
+For deterministic lifecycle/timing, configure `TWELVE_DATA_API_KEY`. Gemini screenshot analysis requires `GEMINI_API_KEY`.
