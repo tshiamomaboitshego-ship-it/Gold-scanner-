@@ -7,7 +7,7 @@ from google.genai import types
 app = Flask(__name__, static_folder='.', static_url_path='')
 
 PROMPT = r'''
-You are Gold Scanner V26.1, a conservative XAUUSD M5 HYBRID OPPORTUNITY + CONFIRMATION ANALYST.
+You are Gold Scanner V26.2, a conservative XAUUSD M5 HYBRID OPPORTUNITY + CONFIRMATION ANALYST.
 You receive ONE current M5 screenshot plus deterministic H1/M15/M5 market-data metrics fetched automatically from Twelve Data. Use H1/M15 OHLC context internally as confluence/context, but M5 remains the execution timeframe. H1/M15 must NOT automatically veto a valid M5 setup.
 Never issue BUY NOW / SELL NOW. Never promise profit, accuracy, or a reversal.
 
@@ -239,7 +239,8 @@ def reanchor_candidates(mtf, reference_price):
             z['side_of_reference']='ABOVE' if lo>reference_price else 'BELOW' if hi<reference_price else 'AT_PRICE'
             rel=max(0,12-min(12,int((dist/atr if atr else 99)*2)))
             z['current_price_relevance']=rel
-            z['opportunity_score']=max(0,min(100,int(z.get('rank_score') or 0)+rel//3))
+            family=max(int(z.get('rank_score') or 0), int(z.get('origin_score') or 0) if z.get('setup_type') in ('NEW_MOVE_ORIGIN','BOTH') else 0, int(z.get('continuation_score') or 0) if z.get('setup_type') in ('PULLBACK_CONTINUATION','BOTH') else 0)
+            z['opportunity_score']=max(0,min(100,family+rel//4))
         bydist=sorted(arr,key=lambda x:x.get('distance_atr',999)); labels=['SHALLOW','INTERMEDIATE','DEEP','DEEPER']
         for i,z in enumerate(bydist):z['depth']=labels[min(i,len(labels)-1)]
         arr.sort(key=lambda x:(x.get('opportunity_score',0),x.get('rank_score',0)),reverse=True)
@@ -452,6 +453,19 @@ def analytics(c):
         add_candidate('BUY' if g['type']=='BULLISH_FVG' else 'SELL',g['low'],g['high'],g['type'],72 if g.get('quality')=='HIGH' else 60,{'quality':g.get('quality'),'fill_state':g.get('fill_state')})
     for _,v in swings_lo[-5:]: add_candidate('BUY',v-ztol,v+ztol,'SWING_DEMAND',62)
     for _,v in swings_hi[-5:]: add_candidate('SELL',v-ztol,v+ztol,'SWING_SUPPLY',62)
+    # V26.2 LOCAL TRANSITION ORIGINS: recent M5 swing/range extremes near price are
+    # evaluated independently from continuation pullbacks. This helps surface a nearby
+    # possible phase-transition area without assuming price must travel to a deeper zone.
+    recent_window=c[-36:] if len(c)>=12 else c
+    local_hi=max(x['h'] for x in recent_window); local_lo=min(x['l'] for x in recent_window)
+    recent_hi=[x for x in swings_hi if x[0]>=max(0,len(c)-48)][-3:]
+    recent_lo=[x for x in swings_lo if x[0]>=max(0,len(c)-48)][-3:]
+    for _,v in recent_hi:
+        add_candidate('SELL',v-ztol,v+ztol,'LOCAL_BEARISH_ORIGIN',76,{'origin_family':True,'local_transition':True})
+    for _,v in recent_lo:
+        add_candidate('BUY',v-ztol,v+ztol,'LOCAL_BULLISH_ORIGIN',76,{'origin_family':True,'local_transition':True})
+    add_candidate('SELL',local_hi-ztol,local_hi+ztol,'LOCAL_RANGE_HIGH_ORIGIN',74,{'origin_family':True,'local_transition':True})
+    add_candidate('BUY',local_lo-ztol,local_lo+ztol,'LOCAL_RANGE_LOW_ORIGIN',74,{'origin_family':True,'local_transition':True})
     # V26 ahead-of-price origin candidates: meaningful range/liquidity extremes can matter before a new move begins.
     add_candidate('BUY',range_lo-ztol,range_lo+ztol,'RANGE_LOW_ORIGIN',70,{'market_phase':phase,'liquidity':'external_below'})
     add_candidate('SELL',range_hi-ztol,range_hi+ztol,'RANGE_HIGH_ORIGIN',70,{'market_phase':phase,'liquidity':'external_above'})
@@ -517,22 +531,34 @@ def enrich_mtf_candidates(mtf):
         bull=(side=='buy')
         trend_aligned=(bull and (m5st=='HH_HL' or m15st=='HH_HL')) or ((not bull) and (m5st=='LL_LH' or m15st=='LL_LH'))
         for z in zones(m5,side):
-            origin_source=z.get('source') in {'RANGE_LOW_ORIGIN','RANGE_HIGH_ORIGIN','EQUAL_LOW_LIQUIDITY','EQUAL_HIGH_LIQUIDITY','SWING_DEMAND','SWING_SUPPLY'}
+            src=z.get('source')
+            origin_source=src in {'RANGE_LOW_ORIGIN','RANGE_HIGH_ORIGIN','EQUAL_LOW_LIQUIDITY','EQUAL_HIGH_LIQUIDITY','SWING_DEMAND','SWING_SUPPLY','LOCAL_BEARISH_ORIGIN','LOCAL_BULLISH_ORIGIN','LOCAL_RANGE_HIGH_ORIGIN','LOCAL_RANGE_LOW_ORIGIN'}
+            local_origin=src in {'LOCAL_BEARISH_ORIGIN','LOCAL_BULLISH_ORIGIN','LOCAL_RANGE_HIGH_ORIGIN','LOCAL_RANGE_LOW_ORIGIN'}
             transition_phase=phase in {'RANGING','REVERSAL_DEVELOPING','BREAKOUT','UNCLEAR'}
             seq_support=(bull and seq.startswith('BULLISH')) or ((not bull) and seq.startswith('BEARISH'))
-            new_move=origin_source and transition_phase
+            new_move=(origin_source and transition_phase) or local_origin
             if seq_support: new_move=True
-            pullback=trend_aligned and z.get('source') in {'BULLISH_OB','BEARISH_OB','BULLISH_FVG','BEARISH_FVG','SWING_DEMAND','SWING_SUPPLY'}
+            pullback=trend_aligned and src in {'BULLISH_OB','BEARISH_OB','BULLISH_FVG','BEARISH_FVG','SWING_DEMAND','SWING_SUPPLY'}
             z['setup_type']='BOTH' if new_move and pullback else 'NEW_MOVE_ORIGIN' if new_move else 'PULLBACK_CONTINUATION' if pullback else 'WATCH_AREA'
-            # Current-price relevance: nearest matters, but quality/confluence remains dominant.
+            # Current price ranks relevance AFTER structural candidates exist; it never creates direction.
             dist=float(z.get('distance_atr') or 0)
-            relevance=max(0,12-min(12,int(dist*2)))
+            relevance=max(0,10-min(10,int(dist*1.5)))
             z['current_price_relevance']=relevance
+            # Transparent family scoring: continuation and transition/origin are independent.
+            liquidity=18 if ('LIQUIDITY' in src or 'RANGE_' in src or local_origin) else 10
+            structure_ev=18 if (seq_support or m5.get('structure_event') in ('BULLISH_BOS','BULLISH_CHOCH','BEARISH_BOS','BEARISH_CHOCH')) else 11
+            displacement_ev=17 if m5.get('displacement') not in (None,'NONE','UNCLEAR') else 9
+            freshness=max(4,20-min(16,max(0,int(z.get('touch_count') or 0)-1)*4))
+            htf=max(4,min(20,10+int(z.get('mtf_bonus') or 0)//2))
+            z['origin_score_components']={'liquidity_location':liquidity,'structure_transition':structure_ev,'displacement':displacement_ev,'freshness':freshness,'htf_context':htf}
+            z['origin_score']=min(100,liquidity+structure_ev+displacement_ev+freshness+htf)
+            z['continuation_score']=min(100,max(0,int(z.get('rank_score') or 0)+(8 if trend_aligned else -12)))
             if z['setup_type']=='NEW_MOVE_ORIGIN': z['opportunity_reason']='Ahead-of-price origin area to monitor for a possible market-phase transition; confirmation is required later.'
             elif z['setup_type']=='PULLBACK_CONTINUATION': z['opportunity_reason']='Ahead-of-price continuation area aligned with existing M5/M15 structure; confirmation is required later.'
             elif z['setup_type']=='BOTH': z['opportunity_reason']='Area has both continuation and possible transition/origin evidence; treat as a watch area, not a forecast.'
             else: z['opportunity_reason']='Structurally relevant ahead-of-price watch area; setup family is not yet clear.'
-            z['opportunity_score']=max(0,min(100,int(z.get('rank_score') or 0)+relevance//3))
+            family=max(int(z.get('rank_score') or 0), int(z.get('origin_score') or 0) if z.get('setup_type') in ('NEW_MOVE_ORIGIN','BOTH') else 0, int(z.get('continuation_score') or 0) if z.get('setup_type') in ('PULLBACK_CONTINUATION','BOTH') else 0)
+            z['opportunity_score']=max(0,min(100,family+relevance//4))
         zones(m5,side).sort(key=lambda x:(x.get('opportunity_score',0),x.get('rank_score',0)),reverse=True)
     m5['candidate_zones']={'buy':zones(m5,'buy'),'sell':zones(m5,'sell')}
     m5['opportunity_map']={'current_price':cp,'market_phase':phase,'buy_watch_areas':zones(m5,'buy'),'sell_watch_areas':zones(m5,'sell'),'purpose':'Ahead-of-price watch areas for either pullback continuation or a possible new-move origin. Not predictions.'}
