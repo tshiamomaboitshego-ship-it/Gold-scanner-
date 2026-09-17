@@ -178,15 +178,24 @@ def fetch_tf(interval, outputsize):
     key=os.environ.get('TWELVE_DATA_API_KEY','').strip()
     if not key: return None, 'SCREENSHOT_ONLY', 'TWELVE_DATA_API_KEY not configured'
     q=urllib.parse.urlencode({'symbol':'XAU/USD','interval':interval,'outputsize':outputsize,'timezone':'UTC','apikey':key})
-    try:
-        with urllib.request.urlopen('https://api.twelvedata.com/time_series?'+q, timeout=8) as resp:
-            d=json.loads(resp.read().decode())
-        vals=d.get('values') or []
-        if d.get('status')=='error' or len(vals)<25: return None,'DATA_UNAVAILABLE',d.get('message','Not enough candles')
-        candles=[{'t':v['datetime'],'o':float(v['open']),'h':float(v['high']),'l':float(v['low']),'c':float(v['close'])} for v in reversed(vals)]
-        return candles,'LIVE_DATA',f'Twelve Data XAU/USD {interval}'
-    except Exception as e:
-        return None,'DATA_UNAVAILABLE',str(e)[:220]
+    last_err=''
+    # One retry is allowed here because this is Twelve Data, not Gemini; it cannot consume Gemini quota.
+    for attempt in range(2):
+        try:
+            with urllib.request.urlopen('https://api.twelvedata.com/time_series?'+q, timeout=10) as resp:
+                d=json.loads(resp.read().decode())
+            vals=d.get('values') or []
+            if d.get('status')=='error':
+                last_err=d.get('message','Twelve Data error')
+                continue
+            if len(vals)<25:
+                last_err=f'Not enough candles ({len(vals)})'
+                continue
+            candles=[{'t':v['datetime'],'o':float(v['open']),'h':float(v['high']),'l':float(v['low']),'c':float(v['close'])} for v in reversed(vals)]
+            return candles,'LIVE_DATA',f'Twelve Data XAU/USD {interval}'
+        except Exception as e:
+            last_err=str(e)[:220]
+    return None,'DATA_UNAVAILABLE',last_err or 'Twelve Data request failed'
 
 def fetch_multitimeframe():
     specs={'M5':('5min',240),'M15':('15min',240),'H1':('1h',240)}
@@ -521,16 +530,18 @@ def reconcile_zone_lifecycle(z,side,metrics,current_price):
         z['zone_lifecycle']='RETESTED'; z['freshness']='USED'; z['timing_status']='WEAK_REACTION'; z['timing_note']=f'Zone was touched but favorable follow-through was weak. Touches: {touches}; consumption {consumption}/100.'
     return z
 
-def norm(r,metrics,data_status,event_risk):
+def norm(r,metrics,data_status,event_risk,m5_live=None):
     if not isinstance(r,dict):r={}
-    if data_status=='LIVE_DATA' and metrics.get('data_current_price') is not None:r['current_price']=metrics['data_current_price']
+    # Lifecycle only needs M5 OHLC. Do not disable it just because H1 or M15 had a temporary fetch failure.
+    if m5_live is None: m5_live = (data_status=='LIVE_DATA')
+    if m5_live and metrics.get('data_current_price') is not None:r['current_price']=metrics['data_current_price']
     else:
         try:r['current_price']=float(r.get('current_price')) if r.get('current_price') is not None else None
         except:r['current_price']=None
     for k,allowed,default in [('m5_state',{'BULLISH','BEARISH','UNCLEAR'},'UNCLEAR'),('structure',{'HH_HL','LL_LH','MIXED','UNCLEAR'},'UNCLEAR'),('structure_event',{'BULLISH_BOS','BEARISH_BOS','BULLISH_CHOCH','BEARISH_CHOCH','NONE','UNCLEAR'},'UNCLEAR'),('volatility',{'LOW','NORMAL','HIGH','EXTREME'},'NORMAL'),('momentum',{'BULLISH_STRONG','BULLISH','NEUTRAL','BEARISH','BEARISH_STRONG','UNCLEAR'},'UNCLEAR')]:
         v=str(r.get(k) or default).upper(); r[k]=v if v in allowed else default
     # Deterministic V19 fields override visual guesses when live data exists.
-    if data_status=='LIVE_DATA':
+    if m5_live:
         r['current_pressure']=metrics.get('current_pressure','UNCLEAR'); r['market_phase']=metrics.get('market_phase','UNCLEAR'); r['shock_detector']=metrics.get('shock_detector','NORMAL'); r['approach_speed']=metrics.get('approach_speed','UNCLEAR')
     else:
         r.setdefault('current_pressure','UNCLEAR'); r.setdefault('market_phase','UNCLEAR'); r.setdefault('shock_detector','NORMAL'); r.setdefault('approach_speed','UNCLEAR')
@@ -547,9 +558,9 @@ def norm(r,metrics,data_status,event_risk):
         if st=='CURRENT_CONFIRMATION' and not any(w in conf for w in ('current','newest','retest','testing','now','latest')): st='HISTORICAL_REACTION'
         z.update({'score':s,'quality':qual(s),'confirmation_state':st}); z.setdefault('score_components',{})
         for k in ('reason','confirmation','invalidation'):z.setdefault(k,'')
-        if data_status=='LIVE_DATA': z=reconcile_zone_lifecycle(z,'buy' if side=='buy_pullback' else 'sell',metrics,cp)
+        if m5_live: z=reconcile_zone_lifecycle(z,'buy' if side=='buy_pullback' else 'sell',metrics,cp)
         else:
-            life=str(z.get('zone_lifecycle') or 'FRESH').upper(); z['zone_lifecycle']=life if life in {'FRESH','TESTING','REACTED','RETESTED','CONSUMED','INVALIDATED','EXPIRED'} else 'FRESH'; z.setdefault('timing_status','VISUAL_ONLY'); z.setdefault('timing_note','Lifecycle is based on screenshot analysis because live OHLC is unavailable.'); z.setdefault('distance_to_zone',None); z.setdefault('distance_atr',None)
+            life=str(z.get('zone_lifecycle') or 'FRESH').upper(); z['zone_lifecycle']=life if life in {'FRESH','TESTING','REACTED','RETESTED','CONSUMED','INVALIDATED','EXPIRED'} else 'FRESH'; z.setdefault('timing_status','VISUAL_ONLY'); z.setdefault('timing_note','M5 lifecycle fallback: live M5 OHLC was unavailable for this scan, so timing is visual-only.'); z.setdefault('distance_to_zone',None); z.setdefault('distance_atr',None)
         r[side]=z
     # V22 active-setup summary separates mapped locations from what is actionable now.
     active=[]
@@ -557,7 +568,7 @@ def norm(r,metrics,data_status,event_risk):
         z=r[side]
         if z.get('confirmation_state') in {'CURRENT_CONFIRMATION','CONFIRMATION_DEVELOPING','REJECTION_DETECTED'} and z.get('zone_lifecycle') not in {'REACTED','CONSUMED','INVALIDATED','EXPIRED'}: active.append(name)
     r['active_setup']=' + '.join(active) if active else 'NO_ACTIVE_SETUP'
-    r['candidate_zones']=metrics.get('candidate_zones',{}) if data_status=='LIVE_DATA' else {}
+    r['candidate_zones']=metrics.get('candidate_zones',{}) if m5_live else {}
     r['timing_summary']='Mapped zones are locations to monitor. V23 compares multiple candidates, consumption and reaction quality before treating a zone as strong.'
     act=str(r.get('action_state') or 'WAIT').upper(); allowed={'WAIT','OBSERVE_REACTION','CURRENT_CONFIRMATION_PRESENT','NO_VALID_SETUP','HIGH_RISK_EVENT','VOLATILITY_PAUSE'}
     if act not in allowed:act='WAIT'
@@ -640,7 +651,7 @@ def scan():
         context={'data_status':data_status,'data_note':data_note,'deterministic_metrics':metrics,'multi_timeframe_metrics':mtf_metrics,'event_risk':event_risk,'risk_budget':d.get('risk_budget'),'spread_cost':d.get('spread_cost'),'broker_specs':d.get('broker_specs'),'setup_memory':d.get('setup_memory'),'automatic_event_status':'UNKNOWN_NO_CALENDAR_FEED','input_guidance':'H1/M15/M5 are fetched automatically from OHLC. The user supplies only one fresh M5 screenshot. Evaluate BUY and SELL cases independently; H1/M15 are context, M5 is execution.'}
         try:
             result=run_model([PROMPT,'SERVER CONTEXT JSON:\n'+json.dumps(context,separators=(',',':')),image_part(d['m5'])])
-            out=norm(result,metrics,data_status,event_risk); out['multi_timeframe_metrics']=mtf_metrics; out['mode']='HYBRID_OHLC_VISUAL'; out['gemini_status']='AVAILABLE'; return jsonify(out)
+            m5_live=(mtf.get('M5',{}).get('status')=='LIVE_DATA' and bool(mtf.get('M5',{}).get('candles'))); out=norm(result,metrics,data_status,event_risk,m5_live=m5_live); out['multi_timeframe_metrics']=mtf_metrics; out['mode']='HYBRID_OHLC_VISUAL'; out['gemini_status']='AVAILABLE'; out['m5_ohlc_live']=m5_live; out['timeframe_data_status']={tf:v.get('status') for tf,v in mtf.items()}; return jsonify(out)
         except Exception as ge:
             text=str(ge); low=text.lower(); quota=('429' in text or 'resource_exhausted' in low or 'quota' in low)
             if quota and data_status in ('LIVE_DATA','PARTIAL_DATA'):

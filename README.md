@@ -19,3 +19,9 @@ This is an analysis/testing aid, not an automated trading system or guarantee of
 
 
 V25 adds multi-timeframe candidate enrichment: M5 zones are re-ranked using M15/H1 zone overlap, structure context, premium/discount context, depth labels, and deterministic closed-candle confirmation stages. HTF evidence is deliberately a bonus/penalty rather than a directional veto.
+
+## V25.1 lifecycle data fix
+- Lifecycle now keys off the actual M5 Twelve Data status, not the all-timeframe aggregate status.
+- A temporary H1 or M15 failure no longer forces M5 lifecycle into screenshot-only mode when M5 OHLC is live.
+- Twelve Data gets one safe retry per timeframe; this does not use Gemini quota.
+- Hybrid scan response exposes per-timeframe data status and whether M5 lifecycle used live OHLC.
