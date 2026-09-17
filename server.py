@@ -77,7 +77,7 @@ V21 PRICE-ACTION CONFLUENCE RULES:
 - Use session_liquidity/opening ranges descriptively. Session levels never force a direction.
 - body_acceptance is more important than a single wick: repeated closed-candle acceptance through structure weakens/invalidate opposing zones; wick sweep + reclaim is different.
 - confluence_cluster must explain supporting AND opposing evidence. Do not inflate confidence by double-counting correlated concepts.
-- V22 TIMING: explicitly distinguish UNTESTED future zone, ACTIVE_TEST, ALREADY_REACTED, RETEST_PENDING and INVALIDATED. Never call a recently touched/rejected zone FRESH.
+- V26 TIMING: explicitly distinguish UNTESTED future zone, ACTIVE_TEST, ALREADY_REACTED, RETEST_PENDING and INVALIDATED. Never call a recently touched/rejected zone FRESH.
 - Explain H1/M15/M5 support and opposition separately for each zone.
 - If no zone is currently confirming, say NO_ACTIVE_SETUP even when future BUY/SELL locations are mapped.
 - inducement is only a POSSIBLE label when a clear minor internal swing sits between current price and a more important external liquidity/HTF objective. If uncertain say NONE.
@@ -93,6 +93,12 @@ V23 MULTI-CANDIDATE + ZONE-STRENGTH RULES:
 - A small wick bounce is REACTION only. CURRENT_CONFIRMATION requires follow-through plus a closed-candle local structure shift; if price returns and loses the reaction extreme, mark REACTION_FAILED / CONSUMED as appropriate.
 - Liquidity beyond a candidate zone is opposing context: if material sell-side liquidity sits below a BUY area, do not assume the first support is the final destination. Reverse for SELL.
 - Never move a zone lower/higher merely because a previous zone failed. Candidate selection must be based on information available in the supplied screenshot/OHLC, not hindsight.
+- V26 OPPORTUNITY MODE: the scanner is not pullback-only. Evaluate two setup families independently: PULLBACK_CONTINUATION and NEW_MOVE_ORIGIN.
+- NEW_MOVE_ORIGIN means an ahead-of-price area where a new bullish/bearish phase could begin if later confirmation develops. It is NOT a prediction that reversal will happen.
+- Anchor selection to current price: SELL watch areas must normally be above current price and BUY watch areas below current price. Search outward from current price, but allow a deeper/farther zone to outrank a nearer one when confluence is materially stronger.
+- In RANGING/REVERSAL_DEVELOPING conditions, prioritize meaningful range extremes, liquidity pools/sweeps, fresh supply/demand, FVG/OB and structure-transition locations rather than chasing the middle of the range.
+- In TRENDING/PULLBACK conditions, preserve continuation pullback areas while also mapping credible opposite-side NEW_MOVE_ORIGIN areas when evidence exists.
+- setup_type must be PULLBACK_CONTINUATION, NEW_MOVE_ORIGIN, BOTH, or NONE.
 
 Return JSON only:
 {
@@ -112,8 +118,8 @@ Return JSON only:
  "volatility":"LOW|NORMAL|HIGH|EXTREME",
  "momentum":"BULLISH_STRONG|BULLISH|NEUTRAL|BEARISH|BEARISH_STRONG|UNCLEAR",
  "m5_description":"short factual description",
- "buy_pullback":{"zone":null,"freshness":"FRESH|NONE","zone_lifecycle":"FRESH|TESTING|REACTED|RETESTED|CONSUMED|INVALIDATED|EXPIRED|NONE","score":0,"score_components":{"freshness":0,"move_away":0,"structure":0,"touches":0,"proximity":0,"invalidation":0,"momentum":0,"data_agreement":0},"quality":"WEAK|MODERATE|STRONG|VERY_STRONG|NONE","reason":"","confirmation_state":"NO_ZONE|WAIT|TESTING|REJECTION_DETECTED|CONFIRMATION_DEVELOPING|CURRENT_CONFIRMATION|HISTORICAL_REACTION|INVALIDATED","confirmation":"","invalidation":""},
- "sell_pullback":{"zone":null,"freshness":"FRESH|NONE","zone_lifecycle":"FRESH|TESTING|REACTED|RETESTED|CONSUMED|INVALIDATED|EXPIRED|NONE","score":0,"score_components":{"freshness":0,"move_away":0,"structure":0,"touches":0,"proximity":0,"invalidation":0,"momentum":0,"data_agreement":0},"quality":"WEAK|MODERATE|STRONG|VERY_STRONG|NONE","reason":"","confirmation_state":"NO_ZONE|WAIT|TESTING|REJECTION_DETECTED|CONFIRMATION_DEVELOPING|CURRENT_CONFIRMATION|HISTORICAL_REACTION|INVALIDATED","confirmation":"","invalidation":""},
+ "buy_pullback":{"zone":null,"setup_type":"PULLBACK_CONTINUATION|NEW_MOVE_ORIGIN|BOTH|NONE","freshness":"FRESH|NONE","zone_lifecycle":"FRESH|TESTING|REACTED|RETESTED|CONSUMED|INVALIDATED|EXPIRED|NONE","score":0,"score_components":{"freshness":0,"move_away":0,"structure":0,"touches":0,"proximity":0,"invalidation":0,"momentum":0,"data_agreement":0},"quality":"WEAK|MODERATE|STRONG|VERY_STRONG|NONE","reason":"","confirmation_state":"NO_ZONE|WAIT|TESTING|REJECTION_DETECTED|CONFIRMATION_DEVELOPING|CURRENT_CONFIRMATION|HISTORICAL_REACTION|INVALIDATED","confirmation":"","invalidation":""},
+ "sell_pullback":{"zone":null,"setup_type":"PULLBACK_CONTINUATION|NEW_MOVE_ORIGIN|BOTH|NONE","freshness":"FRESH|NONE","zone_lifecycle":"FRESH|TESTING|REACTED|RETESTED|CONSUMED|INVALIDATED|EXPIRED|NONE","score":0,"score_components":{"freshness":0,"move_away":0,"structure":0,"touches":0,"proximity":0,"invalidation":0,"momentum":0,"data_agreement":0},"quality":"WEAK|MODERATE|STRONG|VERY_STRONG|NONE","reason":"","confirmation_state":"NO_ZONE|WAIT|TESTING|REJECTION_DETECTED|CONFIRMATION_DEVELOPING|CURRENT_CONFIRMATION|HISTORICAL_REACTION|INVALIDATED","confirmation":"","invalidation":""},
  "confluence_summary":"short sequence-based summary including supporting and opposing evidence",
  "order_block_context":"short factual note or none",
  "fvg_quality_context":"short factual note or none",
@@ -139,7 +145,7 @@ Return JSON only:
 '''
 
 HTF_PROMPT = r'''
-You are Gold Scanner V22 higher-timeframe context extractor. You receive ONE XAUUSD chart screenshot whose timeframe is explicitly H1 or M15. Extract compact context for later M5 analysis. Do not give entries, trade directions, targets, or predictions. Newest/right-edge candles matter most.
+You are Gold Scanner V26 higher-timeframe context extractor. You receive ONE XAUUSD chart screenshot whose timeframe is explicitly H1 or M15. Extract compact context for later M5 analysis. Do not give entries, trade directions, targets, or predictions. Newest/right-edge candles matter most.
 V18 MULTI-TIMEFRAME ARCHITECTURE:
 - multi_timeframe_metrics contains deterministic M5, M15 and H1 calculations from deeper OHLC history when LIVE/PARTIAL data is available. Use it even if screenshot zoom hides older structure.
 - H1 = broad context and major zones; M15 = intermediate context; M5 = execution. Higher timeframes add evidence but never automatically force direction.
@@ -377,7 +383,7 @@ def analytics(c):
     if pd=='PREMIUM': bear_factors.append('premium location')
     confluence={'bullish':bull_factors,'bearish':bear_factors,'bullish_count':len(bull_factors),'bearish_count':len(bear_factors),'sequence':sequence}
 
-    # V23 multi-candidate zone map. Deterministic candidates are ranked evidence locations, not signals.
+    # V26 multi-candidate opportunity map. Deterministic candidates are ranked evidence locations, not signals.
     cp=last['c']; candidates=[]; ztol=max(atr*0.18,0.25)
     def add_candidate(side,lo,hi,kind,base,meta=None):
         lo,hi=float(min(lo,hi)),float(max(lo,hi))
@@ -399,6 +405,11 @@ def analytics(c):
         add_candidate('BUY' if g['type']=='BULLISH_FVG' else 'SELL',g['low'],g['high'],g['type'],72 if g.get('quality')=='HIGH' else 60,{'quality':g.get('quality'),'fill_state':g.get('fill_state')})
     for _,v in swings_lo[-5:]: add_candidate('BUY',v-ztol,v+ztol,'SWING_DEMAND',62)
     for _,v in swings_hi[-5:]: add_candidate('SELL',v-ztol,v+ztol,'SWING_SUPPLY',62)
+    # V26 ahead-of-price origin candidates: meaningful range/liquidity extremes can matter before a new move begins.
+    add_candidate('BUY',range_lo-ztol,range_lo+ztol,'RANGE_LOW_ORIGIN',70,{'market_phase':phase,'liquidity':'external_below'})
+    add_candidate('SELL',range_hi-ztol,range_hi+ztol,'RANGE_HIGH_ORIGIN',70,{'market_phase':phase,'liquidity':'external_above'})
+    for v in eql[-2:]: add_candidate('BUY',v-ztol,v+ztol,'EQUAL_LOW_LIQUIDITY',68,{'liquidity_pool':True})
+    for v in eqh[-2:]: add_candidate('SELL',v-ztol,v+ztol,'EQUAL_HIGH_LIQUIDITY',68,{'liquidity_pool':True})
     # Deduplicate overlapping same-side candidates, preserving the stronger one.
     ranked=[]
     for q in sorted(candidates,key=lambda x:x['rank_score'],reverse=True):
@@ -410,7 +421,7 @@ def analytics(c):
 
 
 def enrich_mtf_candidates(mtf):
-    """V25: rank M5 execution zones with M15/H1 confluence without letting HTF force direction."""
+    """V26: rank M5 watch areas with M15/H1 confluence, current-price relevance, and setup type without letting HTF force direction."""
     m5=(mtf.get('M5') or {}).get('metrics') or {}
     m15=(mtf.get('M15') or {}).get('metrics') or {}
     h1=(mtf.get('H1') or {}).get('metrics') or {}
@@ -452,7 +463,32 @@ def enrich_mtf_candidates(mtf):
         bydist=sorted(arr,key=lambda x:x.get('distance_atr',999))
         labels=['SHALLOW','INTERMEDIATE','DEEP','DEEPER']
         for i,z in enumerate(bydist): z['depth']=labels[min(i,len(labels)-1)]
+    # V26 classify why each ahead-of-price area matters. This is evidence classification, never a direction prediction.
+    phase=m5.get('market_phase','UNCLEAR'); m5st=m5.get('structure','UNCLEAR'); m15st=m15.get('structure','UNCLEAR')
+    seq=str(m5.get('price_action_sequence') or 'NONE')
+    for side in ('buy','sell'):
+        bull=(side=='buy')
+        trend_aligned=(bull and (m5st=='HH_HL' or m15st=='HH_HL')) or ((not bull) and (m5st=='LL_LH' or m15st=='LL_LH'))
+        for z in zones(m5,side):
+            origin_source=z.get('source') in {'RANGE_LOW_ORIGIN','RANGE_HIGH_ORIGIN','EQUAL_LOW_LIQUIDITY','EQUAL_HIGH_LIQUIDITY','SWING_DEMAND','SWING_SUPPLY'}
+            transition_phase=phase in {'RANGING','REVERSAL_DEVELOPING','BREAKOUT','UNCLEAR'}
+            seq_support=(bull and seq.startswith('BULLISH')) or ((not bull) and seq.startswith('BEARISH'))
+            new_move=origin_source and transition_phase
+            if seq_support: new_move=True
+            pullback=trend_aligned and z.get('source') in {'BULLISH_OB','BEARISH_OB','BULLISH_FVG','BEARISH_FVG','SWING_DEMAND','SWING_SUPPLY'}
+            z['setup_type']='BOTH' if new_move and pullback else 'NEW_MOVE_ORIGIN' if new_move else 'PULLBACK_CONTINUATION' if pullback else 'WATCH_AREA'
+            # Current-price relevance: nearest matters, but quality/confluence remains dominant.
+            dist=float(z.get('distance_atr') or 0)
+            relevance=max(0,12-min(12,int(dist*2)))
+            z['current_price_relevance']=relevance
+            if z['setup_type']=='NEW_MOVE_ORIGIN': z['opportunity_reason']='Ahead-of-price origin area to monitor for a possible market-phase transition; confirmation is required later.'
+            elif z['setup_type']=='PULLBACK_CONTINUATION': z['opportunity_reason']='Ahead-of-price continuation area aligned with existing M5/M15 structure; confirmation is required later.'
+            elif z['setup_type']=='BOTH': z['opportunity_reason']='Area has both continuation and possible transition/origin evidence; treat as a watch area, not a forecast.'
+            else: z['opportunity_reason']='Structurally relevant ahead-of-price watch area; setup family is not yet clear.'
+            z['opportunity_score']=max(0,min(100,int(z.get('rank_score') or 0)+relevance//3))
+        zones(m5,side).sort(key=lambda x:(x.get('opportunity_score',0),x.get('rank_score',0)),reverse=True)
     m5['candidate_zones']={'buy':zones(m5,'buy'),'sell':zones(m5,'sell')}
+    m5['opportunity_map']={'current_price':cp,'market_phase':phase,'buy_watch_areas':zones(m5,'buy'),'sell_watch_areas':zones(m5,'sell'),'purpose':'Ahead-of-price watch areas for either pullback continuation or a possible new-move origin. Not predictions.'}
     # Closed-candle confirmation evidence around the strongest candidates.
     candles=m5.get('latest_closed_candles') or []
     for side in ('buy','sell'):
@@ -552,13 +588,22 @@ def norm(r,metrics,data_status,event_risk,m5_live=None):
     for side in ('buy_pullback','sell_pullback'):
         z=r.get(side) if isinstance(r.get(side),dict) else {}; zone=z.get('zone')
         if not zone:
-            r[side]={'zone':None,'freshness':'NONE','zone_lifecycle':'NONE','score':0,'score_components':{},'quality':'NONE','reason':z.get('reason') or 'No clear zone.','confirmation_state':'NO_ZONE','confirmation':'','invalidation':'','timing_status':'NO_ZONE','timing_note':'','distance_to_zone':None,'distance_atr':None};continue
+            r[side]={'zone':None,'setup_type':'NONE','freshness':'NONE','zone_lifecycle':'NONE','score':0,'score_components':{},'quality':'NONE','reason':z.get('reason') or 'No clear zone.','confirmation_state':'NO_ZONE','confirmation':'','invalidation':'','timing_status':'NO_ZONE','timing_note':'','distance_to_zone':None,'distance_atr':None};continue
         s=clamp(z.get('score')); st=str(z.get('confirmation_state') or 'WAIT').upper(); st=st if st in valid else 'WAIT'
         conf=(z.get('confirmation') or '').lower()
         if st=='CURRENT_CONFIRMATION' and not any(w in conf for w in ('current','newest','retest','testing','now','latest')): st='HISTORICAL_REACTION'
         z.update({'score':s,'quality':qual(s),'confirmation_state':st}); z.setdefault('score_components',{})
         for k in ('reason','confirmation','invalidation'):z.setdefault(k,'')
-        if m5_live: z=reconcile_zone_lifecycle(z,'buy' if side=='buy_pullback' else 'sell',metrics,cp)
+        if m5_live:
+            z=reconcile_zone_lifecycle(z,'buy' if side=='buy_pullback' else 'sell',metrics,cp)
+            # Attach deterministic V26 setup-family classification to Gemini's displayed zone when boundaries overlap.
+            bounds=zone_bounds(z.get('zone')); candidates=((metrics.get('candidate_zones') or {}).get('buy' if side=='buy_pullback' else 'sell') or [])
+            if bounds and candidates:
+                lo,hi=bounds; matches=[q for q in candidates if not (hi < q.get('low',0) or lo > q.get('high',0))]
+                if matches:
+                    best=max(matches,key=lambda q:q.get('opportunity_score',q.get('rank_score',0)))
+                    z['setup_type']=best.get('setup_type','WATCH_AREA'); z['opportunity_reason']=best.get('opportunity_reason',''); z['opportunity_score']=best.get('opportunity_score',best.get('rank_score'))
+            z.setdefault('setup_type','WATCH_AREA')
         else:
             life=str(z.get('zone_lifecycle') or 'FRESH').upper(); z['zone_lifecycle']=life if life in {'FRESH','TESTING','REACTED','RETESTED','CONSUMED','INVALIDATED','EXPIRED'} else 'FRESH'; z.setdefault('timing_status','VISUAL_ONLY'); z.setdefault('timing_note','M5 lifecycle fallback: live M5 OHLC was unavailable for this scan, so timing is visual-only.'); z.setdefault('distance_to_zone',None); z.setdefault('distance_atr',None)
         r[side]=z
@@ -568,8 +613,8 @@ def norm(r,metrics,data_status,event_risk,m5_live=None):
         z=r[side]
         if z.get('confirmation_state') in {'CURRENT_CONFIRMATION','CONFIRMATION_DEVELOPING','REJECTION_DETECTED'} and z.get('zone_lifecycle') not in {'REACTED','CONSUMED','INVALIDATED','EXPIRED'}: active.append(name)
     r['active_setup']=' + '.join(active) if active else 'NO_ACTIVE_SETUP'
-    r['candidate_zones']=metrics.get('candidate_zones',{}) if m5_live else {}
-    r['timing_summary']='Mapped zones are locations to monitor. V23 compares multiple candidates, consumption and reaction quality before treating a zone as strong.'
+    r['candidate_zones']=metrics.get('candidate_zones',{}) if m5_live else {}; r['opportunity_map']=metrics.get('opportunity_map',{}) if m5_live else {}
+    r['timing_summary']='V26 maps ahead-of-price watch areas for both pullback continuation and possible new-move origins, then tracks lifecycle/confirmation separately.'
     act=str(r.get('action_state') or 'WAIT').upper(); allowed={'WAIT','OBSERVE_REACTION','CURRENT_CONFIRMATION_PRESENT','NO_VALID_SETUP','HIGH_RISK_EVENT','VOLATILITY_PAUSE'}
     if act not in allowed:act='WAIT'
     if bool(r.get('too_late')): act='NO_VALID_SETUP'; r['risk_filter']='BLOCK'; r['risk_reason']=r.get('too_late_reason') or 'Move is already extended; chase filter blocked the setup.'
@@ -634,10 +679,10 @@ def data_only_result(mtf,data_status,data_note,why='Gemini visual check unavaila
       'market_phase':m5.get('market_phase','UNCLEAR'),'shock_detector':m5.get('shock_detector','NORMAL'),
       'approach_speed':m5.get('approach_speed','UNCLEAR'),'m5_state':'BULLISH' if str(m5.get('momentum','')).startswith('BULLISH') else 'BEARISH' if str(m5.get('momentum','')).startswith('BEARISH') else 'UNCLEAR',
       'structure':m5.get('structure','UNCLEAR'),'structure_event':m5.get('structure_event','NONE'),'volatility':m5.get('volatility','NORMAL'),'momentum':m5.get('momentum','UNCLEAR'),
-      'multi_timeframe_metrics':{'H1':h1,'M15':m15,'M5':m5},'candidate_zones':m5.get('candidate_zones',{}),
-      'data_only_summary':f"H1 {h1.get('structure','—')} · M15 {m15.get('structure','—')} · M5 {m5.get('structure','—')}. V25 ranks M5 candidates with H1/M15 confluence; Gemini visual confirmation unavailable.",
+      'multi_timeframe_metrics':{'H1':h1,'M15':m15,'M5':m5},'candidate_zones':m5.get('candidate_zones',{}),'opportunity_map':m5.get('opportunity_map',{}),
+      'data_only_summary':f"H1 {h1.get('structure','—')} · M15 {m15.get('structure','—')} · M5 {m5.get('structure','—')}. V26 maps ahead-of-price pullback and new-move-origin candidates with H1/M15 confluence; Gemini visual confirmation unavailable.",
       'buy_candidate':top('buy'),'sell_candidate':top('sell'),
-      'note':'Data-only analysis aid. Candidate zones and structure are deterministic evidence, not guaranteed reversal points.'
+      'note':'Data-only analysis aid. Ahead-of-price watch areas are deterministic evidence locations, not predictions or guaranteed reversal points.'
     }
 
 @app.post('/api/scan')
