@@ -1,4 +1,5 @@
 import os, json, base64, urllib.parse, urllib.request, statistics
+from datetime import datetime, timezone
 from flask import Flask, request, jsonify, send_from_directory
 from google import genai
 from google.genai import types
@@ -6,7 +7,7 @@ from google.genai import types
 app = Flask(__name__, static_folder='.', static_url_path='')
 
 PROMPT = r'''
-You are Gold Scanner V25, a conservative XAUUSD M5 HYBRID PULLBACK + CONFIRMATION ANALYST.
+You are Gold Scanner V26.1, a conservative XAUUSD M5 HYBRID OPPORTUNITY + CONFIRMATION ANALYST.
 You receive ONE current M5 screenshot plus deterministic H1/M15/M5 market-data metrics fetched automatically from Twelve Data. Use H1/M15 OHLC context internally as confluence/context, but M5 remains the execution timeframe. H1/M15 must NOT automatically veto a valid M5 setup.
 Never issue BUY NOW / SELL NOW. Never promise profit, accuracy, or a reversal.
 
@@ -18,7 +19,7 @@ CRITICAL CONFIRMATION RULE (fixes V14 weakness):
 
 READING ORDER
 1) Newest/right-edge candles first; older candles are context only.
-2) Prefer exact market-data metrics when data_status=LIVE_DATA. Screenshot price is secondary and may differ slightly by broker/feed.
+2) PRICE SOURCES: deterministic structure uses exact OHLC. For current-price proximity, use SERVER CONTEXT reference_price when fresh. Also read the newest visible MT5 right-edge price label from the screenshot into current_price when clearly readable. If screenshot and provider reference differ materially, set data_ai_conflict and explain the mismatch; do not silently pretend they are identical.
 3) Use mathematical structure metrics (swings, BOS/CHoCH, ATR, momentum) when supplied; do not contradict them without clearly stating a screenshot/data mismatch.
 4) Find fresh nearby pullback zones. Penalize broken, heavily retested, consumed, distant or already-used zones.
 5) Detect break-and-retest: broken support can become resistance; broken resistance can become support, but require a fresh retest.
@@ -203,6 +204,47 @@ def fetch_tf(interval, outputsize):
             last_err=str(e)[:220]
     return None,'DATA_UNAVAILABLE',last_err or 'Twelve Data request failed'
 
+def fetch_reference_price():
+    """Fetch a fresh provider reference price separately from M5 candle closes. This is not a broker execution quote."""
+    key=os.environ.get('TWELVE_DATA_API_KEY','').strip()
+    if not key:return None,'UNAVAILABLE','TWELVE_DATA_API_KEY not configured'
+    q=urllib.parse.urlencode({'symbol':'XAU/USD','apikey':key})
+    try:
+        with urllib.request.urlopen('https://api.twelvedata.com/price?'+q, timeout=10) as resp:
+            d=json.loads(resp.read().decode())
+        if d.get('status')=='error':return None,'UNAVAILABLE',d.get('message','Twelve Data price error')
+        price=float(d.get('price'))
+        return price,'LIVE_REFERENCE','Twelve Data /price reference'
+    except Exception as e:return None,'UNAVAILABLE',str(e)[:220]
+
+def candle_age_minutes(candles):
+    if not candles:return None
+    try:
+        raw=str(candles[-1]['t']).replace('T',' ')
+        dt=datetime.fromisoformat(raw).replace(tzinfo=timezone.utc)
+        return max(0,round((datetime.now(timezone.utc)-dt).total_seconds()/60,1))
+    except Exception:return None
+
+def reanchor_candidates(mtf, reference_price):
+    """Recompute proximity/depth around the freshest provider reference price without changing structural evidence."""
+    if reference_price is None:return
+    m5=(mtf.get('M5') or {}).get('metrics') or {}; atr=float(m5.get('atr14') or 1)
+    m5['reference_price']=round(float(reference_price),3)
+    for side in ('buy','sell'):
+        arr=((m5.get('candidate_zones') or {}).get(side) or [])
+        for z in arr:
+            lo=float(z.get('low')); hi=float(z.get('high'))
+            dist=max(0, lo-reference_price) if side=='sell' else max(0, reference_price-hi)
+            z['distance_to_reference']=round(dist,3); z['distance_atr']=round(dist/atr,2) if atr else None
+            z['side_of_reference']='ABOVE' if lo>reference_price else 'BELOW' if hi<reference_price else 'AT_PRICE'
+            rel=max(0,12-min(12,int((dist/atr if atr else 99)*2)))
+            z['current_price_relevance']=rel
+            z['opportunity_score']=max(0,min(100,int(z.get('rank_score') or 0)+rel//3))
+        bydist=sorted(arr,key=lambda x:x.get('distance_atr',999)); labels=['SHALLOW','INTERMEDIATE','DEEP','DEEPER']
+        for i,z in enumerate(bydist):z['depth']=labels[min(i,len(labels)-1)]
+        arr.sort(key=lambda x:(x.get('opportunity_score',0),x.get('rank_score',0)),reverse=True)
+    m5['opportunity_map']={'current_price':round(float(reference_price),3),'market_phase':m5.get('market_phase','UNCLEAR'),'buy_watch_areas':((m5.get('candidate_zones') or {}).get('buy') or []),'sell_watch_areas':((m5.get('candidate_zones') or {}).get('sell') or []),'purpose':'Ahead-of-price watch areas anchored to provider reference price. Not predictions.'}
+
 def fetch_multitimeframe():
     specs={'M5':('5min',240),'M15':('15min',240),'H1':('1h',240)}
     out={}; statuses=[]; notes=[]
@@ -210,7 +252,12 @@ def fetch_multitimeframe():
         c,st,note=fetch_tf(interval,n); out[tf]={'candles':c,'status':st,'note':note,'metrics':analytics(c) if c else {}}; statuses.append(st); notes.append(tf+': '+note)
     overall='LIVE_DATA' if all(x=='LIVE_DATA' for x in statuses) else 'PARTIAL_DATA' if any(x=='LIVE_DATA' for x in statuses) else statuses[0] if statuses else 'DATA_UNAVAILABLE'
     if any(x=='LIVE_DATA' for x in statuses): enrich_mtf_candidates(out)
-    return out,overall,' | '.join(notes)
+    ref,ref_status,ref_note=fetch_reference_price()
+    if ref is not None: reanchor_candidates(out,ref)
+    m5c=(out.get('M5') or {}).get('candles') or []
+    age=candle_age_minutes(m5c)
+    out['_price_meta']={'reference_price':round(ref,3) if ref is not None else None,'reference_status':ref_status,'reference_note':ref_note,'latest_m5_time':m5c[-1]['t'] if m5c else None,'m5_feed_age_minutes':age,'m5_feed_stale':bool(age is not None and age>8)}
+    return out,overall,' | '.join(notes)+' | PRICE: '+ref_note
 
 def analytics(c):
     if not c: return {}
@@ -570,10 +617,15 @@ def norm(r,metrics,data_status,event_risk,m5_live=None):
     if not isinstance(r,dict):r={}
     # Lifecycle only needs M5 OHLC. Do not disable it just because H1 or M15 had a temporary fetch failure.
     if m5_live is None: m5_live = (data_status=='LIVE_DATA')
-    if m5_live and metrics.get('data_current_price') is not None:r['current_price']=metrics['data_current_price']
-    else:
-        try:r['current_price']=float(r.get('current_price')) if r.get('current_price') is not None else None
-        except:r['current_price']=None
+    visual_cp=None
+    try: visual_cp=float(r.get('current_price')) if r.get('current_price') is not None else None
+    except: visual_cp=None
+    ref_cp=metrics.get('reference_price') if m5_live else None
+    # In hybrid mode, a clearly read screenshot price is closest to the user's broker view. Fall back to provider reference, then candle close.
+    r['screenshot_price']=visual_cp
+    r['provider_reference_price']=ref_cp
+    r['latest_m5_feed_close']=metrics.get('data_current_price') if m5_live else None
+    r['current_price']=visual_cp if visual_cp is not None else ref_cp if ref_cp is not None else metrics.get('data_current_price') if m5_live else None
     for k,allowed,default in [('m5_state',{'BULLISH','BEARISH','UNCLEAR'},'UNCLEAR'),('structure',{'HH_HL','LL_LH','MIXED','UNCLEAR'},'UNCLEAR'),('structure_event',{'BULLISH_BOS','BEARISH_BOS','BULLISH_CHOCH','BEARISH_CHOCH','NONE','UNCLEAR'},'UNCLEAR'),('volatility',{'LOW','NORMAL','HIGH','EXTREME'},'NORMAL'),('momentum',{'BULLISH_STRONG','BULLISH','NEUTRAL','BEARISH','BEARISH_STRONG','UNCLEAR'},'UNCLEAR')]:
         v=str(r.get(k) or default).upper(); r[k]=v if v in allowed else default
     # Deterministic V19 fields override visual guesses when live data exists.
@@ -659,13 +711,14 @@ def ohlc_test():
         mtf,status,note=fetch_multitimeframe()
         details={}
         for tf,v in mtf.items():
+            if tf.startswith('_'): continue
             c=v.get('candles') or []; m=v.get('metrics') or {}
             details[tf]={
                 'status':v.get('status'),'candles_received':len(c),'latest_time':c[-1]['t'] if c else None,
                 'latest_close':c[-1]['c'] if c else None,'structure':m.get('structure'),'structure_event':m.get('structure_event'),
                 'momentum':m.get('momentum'),'atr14':m.get('atr14'),'candidate_zones':m.get('candidate_zones',{})
             }
-        return jsonify({'status':status,'gemini_used':False,'symbol':'XAU/USD','timeframes':details,'note':note})
+        return jsonify({'status':status,'gemini_used':False,'symbol':'XAU/USD','price_meta':mtf.get('_price_meta',{}),'timeframes':details,'note':note})
     except Exception as e:return jsonify({'error':'ohlc_test_failed','detail':str(e)[:900]}),500
 
 def data_only_result(mtf,data_status,data_note,why='Gemini visual check unavailable'):
@@ -675,7 +728,7 @@ def data_only_result(mtf,data_status,data_note,why='Gemini visual check unavaila
         return arr[0] if arr else None
     return {
       'mode':'DATA_ONLY','data_status':data_status,'data_note':data_note,'gemini_status':why,
-      'current_price':m5.get('data_current_price'),'current_pressure':m5.get('current_pressure','UNCLEAR'),
+      'current_price':(mtf.get('_price_meta') or {}).get('reference_price') if (mtf.get('_price_meta') or {}).get('reference_price') is not None else m5.get('data_current_price'),'price_source':'TWELVE_DATA_REFERENCE' if (mtf.get('_price_meta') or {}).get('reference_price') is not None else 'LATEST_M5_FEED_CANDLE','latest_m5_feed_close':m5.get('data_current_price'),'price_meta':mtf.get('_price_meta',{}),'current_pressure':m5.get('current_pressure','UNCLEAR'),
       'market_phase':m5.get('market_phase','UNCLEAR'),'shock_detector':m5.get('shock_detector','NORMAL'),
       'approach_speed':m5.get('approach_speed','UNCLEAR'),'m5_state':'BULLISH' if str(m5.get('momentum','')).startswith('BULLISH') else 'BEARISH' if str(m5.get('momentum','')).startswith('BEARISH') else 'UNCLEAR',
       'structure':m5.get('structure','UNCLEAR'),'structure_event':m5.get('structure_event','NONE'),'volatility':m5.get('volatility','NORMAL'),'momentum':m5.get('momentum','UNCLEAR'),
@@ -693,10 +746,12 @@ def scan():
         event_risk='HIGH' if d.get('event_risk') else 'NORMAL'
         mtf,data_status,data_note=fetch_multitimeframe(); metrics=mtf.get('M5',{}).get('metrics',{})
         mtf_metrics={tf:v.get('metrics',{}) for tf,v in mtf.items()}
-        context={'data_status':data_status,'data_note':data_note,'deterministic_metrics':metrics,'multi_timeframe_metrics':mtf_metrics,'event_risk':event_risk,'risk_budget':d.get('risk_budget'),'spread_cost':d.get('spread_cost'),'broker_specs':d.get('broker_specs'),'setup_memory':d.get('setup_memory'),'automatic_event_status':'UNKNOWN_NO_CALENDAR_FEED','input_guidance':'H1/M15/M5 are fetched automatically from OHLC. The user supplies only one fresh M5 screenshot. Evaluate BUY and SELL cases independently; H1/M15 are context, M5 is execution.'}
+        price_meta=mtf.get('_price_meta',{}); context={'data_status':data_status,'data_note':data_note,'reference_price':price_meta.get('reference_price'),'price_meta':price_meta,'deterministic_metrics':metrics,'multi_timeframe_metrics':mtf_metrics,'event_risk':event_risk,'risk_budget':d.get('risk_budget'),'spread_cost':d.get('spread_cost'),'broker_specs':d.get('broker_specs'),'setup_memory':d.get('setup_memory'),'automatic_event_status':'UNKNOWN_NO_CALENDAR_FEED','input_guidance':'H1/M15/M5 are fetched automatically from OHLC. The user supplies only one fresh M5 screenshot. Evaluate BUY and SELL cases independently; H1/M15 are context, M5 is execution.'}
         try:
             result=run_model([PROMPT,'SERVER CONTEXT JSON:\n'+json.dumps(context,separators=(',',':')),image_part(d['m5'])])
-            m5_live=(mtf.get('M5',{}).get('status')=='LIVE_DATA' and bool(mtf.get('M5',{}).get('candles'))); out=norm(result,metrics,data_status,event_risk,m5_live=m5_live); out['multi_timeframe_metrics']=mtf_metrics; out['mode']='HYBRID_OHLC_VISUAL'; out['gemini_status']='AVAILABLE'; out['m5_ohlc_live']=m5_live; out['timeframe_data_status']={tf:v.get('status') for tf,v in mtf.items()}; return jsonify(out)
+            m5_live=(mtf.get('M5',{}).get('status')=='LIVE_DATA' and bool(mtf.get('M5',{}).get('candles'))); out=norm(result,metrics,data_status,event_risk,m5_live=m5_live); out['multi_timeframe_metrics']=mtf_metrics; out['mode']='HYBRID_OHLC_VISUAL'; out['gemini_status']='AVAILABLE'; out['m5_ohlc_live']=m5_live; out['timeframe_data_status']={tf:v.get('status') for tf,v in mtf.items() if not tf.startswith('_')}; out['price_meta']=price_meta; vp=out.get('screenshot_price'); rp=price_meta.get('reference_price'); atr=float(metrics.get('atr14') or 1);
+            if vp is not None and rp is not None and abs(float(vp)-float(rp))>max(1.0,0.5*atr): out['data_ai_conflict']='MINOR' if abs(float(vp)-float(rp))<=max(3.0,1.5*atr) else 'MAJOR'; out['data_ai_conflict_reason']=f'MT5 screenshot price {vp:.3f} differs from Twelve Data reference {rp:.3f} by {abs(float(vp)-float(rp)):.3f}.'
+            return jsonify(out)
         except Exception as ge:
             text=str(ge); low=text.lower(); quota=('429' in text or 'resource_exhausted' in low or 'quota' in low)
             if quota and data_status in ('LIVE_DATA','PARTIAL_DATA'):
