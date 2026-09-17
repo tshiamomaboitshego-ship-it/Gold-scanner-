@@ -1,24 +1,23 @@
-# Gold Scanner V19
+# Gold Scanner V20 — Testing & State Engine
 
-Phone-first XAUUSD analysis scanner. H1/M15 landscape context + fresh M5 portrait execution view.
+V20 keeps V19 protection and adds a measurement layer instead of piling on indicators.
 
-## V19 additions
-- Current M5 pressure separated from future pullback zones
-- Deterministic market-phase classification
-- Closed-candle volatility shock detector
-- Approach-speed detection
-- Automatic volatility pause and HTF refresh warning after extreme displacement
-- AI-vs-OHLC conflict field
-- Setup memory passed from recent journal scans
-- Evidence score component support
-- Existing V18.1 deep M5/M15/H1 OHLC, structure, ATR, momentum, liquidity, FVG, role-flip, chase filter and zone lifecycle retained
+## New in V20
+- Closed-candle deterministic diagnostics.
+- Reaction-quality and wick-rejection metrics.
+- Persistent setup memory/journal (last 100 scans).
+- Deterministic zone outcome tracker: NOT_TRIGGERED / TESTED / REACTED / INVALIDATED.
+- Outcome tracking filters OHLC to candles after each saved prediction timestamp.
+- Quota-free recent M5 replay diagnostics for pressure, phase, structure and shock states.
+- Phone testing-lab controls in the UI.
+- Existing V19 shock, approach-speed, chase, HTF refresh, AI/data conflict, zone lifecycle and evidence decomposition retained.
 
-## Environment variables
-- `GEMINI_API_KEY` required
-- `GEMINI_MODEL` optional, defaults to `gemini-3.6-flash`
-- `TWELVE_DATA_API_KEY` optional but strongly recommended for deterministic M5/M15/H1 OHLC
+## Important limitations
+- Outcome tracking measures zone behavior, not trade profitability or win probability.
+- Replay currently validates deterministic market-state logic; it is not yet a full historical Gemini screenshot replay or a profit backtest.
+- Automatic economic-calendar integration is NOT included. Manual event mode + volatility-shock protection remain.
+- Deep OHLC and testing lab require `TWELVE_DATA_API_KEY`.
+- Gemini analysis requires `GEMINI_API_KEY`.
 
-## Important limitation
-V19 does **not** pretend to have a live economic-calendar feed. The manual high-impact-event switch remains. V19 adds a deterministic volatility-shock fallback so abnormal closed-candle movement can pause normal zone logic even when the event switch was missed. A future version can add a verified calendar provider/API.
-
-Analysis aid only. Demo-test before any real-money use.
+## Deploy
+Put all files at the GitHub repository root. Render build: `pip install -r requirements.txt`. Start: `gunicorn server:app`.

@@ -6,7 +6,7 @@ from google.genai import types
 app = Flask(__name__, static_folder='.', static_url_path='')
 
 PROMPT = r'''
-You are Gold Scanner V19, a conservative XAUUSD M5 HYBRID PULLBACK + CONFIRMATION ANALYST.
+You are Gold Scanner V20, a conservative XAUUSD M5 HYBRID PULLBACK + CONFIRMATION ANALYST.
 You receive ONE current M5 screenshot plus optional deterministic M5 market-data metrics and optional SAVED H1/M15 context. Use saved higher-timeframe context internally as confluence/context, but M5 remains the execution timeframe. H1/M15 must NOT automatically veto a valid M5 setup.
 Never issue BUY NOW / SELL NOW. Never promise profit, accuracy, or a reversal.
 
@@ -34,7 +34,7 @@ confirmation_state must be one of:
 NO_ZONE, WAIT, TESTING, REJECTION_DETECTED, CONFIRMATION_DEVELOPING, CURRENT_CONFIRMATION, HISTORICAL_REACTION, INVALIDATED.
 Be conservative. If newest candle closure is uncertain, do not use CURRENT_CONFIRMATION.
 
-V19 PROTECTION + STATE RULES:
+V20 PROTECTION + STATE RULES:
 - Separate CURRENT M5 PRESSURE from a future pullback zone. A BUY zone may coexist with bearish current pressure and vice versa.
 - market_phase must classify TRENDING, PULLBACK, RANGING, BREAKOUT, REVERSAL_DEVELOPING, EVENT_SHOCK, or UNCLEAR.
 - If deterministic shock_detector is TRIGGERED, normal counter-momentum zone logic is suspended unless price has stabilized; action_state=VOLATILITY_PAUSE and risk_filter=BLOCK.
@@ -105,7 +105,7 @@ Return JSON only:
 '''
 
 HTF_PROMPT = r'''
-You are Gold Scanner V19 higher-timeframe context extractor. You receive ONE XAUUSD chart screenshot whose timeframe is explicitly H1 or M15. Extract compact context for later M5 analysis. Do not give entries, trade directions, targets, or predictions. Newest/right-edge candles matter most.
+You are Gold Scanner V20 higher-timeframe context extractor. You receive ONE XAUUSD chart screenshot whose timeframe is explicitly H1 or M15. Extract compact context for later M5 analysis. Do not give entries, trade directions, targets, or predictions. Newest/right-edge candles matter most.
 V18 MULTI-TIMEFRAME ARCHITECTURE:
 - multi_timeframe_metrics contains deterministic M5, M15 and H1 calculations from deeper OHLC history when LIVE/PARTIAL data is available. Use it even if screenshot zoom hides older structure.
 - H1 = broad context and major zones; M15 = intermediate context; M5 = execution. Higher timeframes add evidence but never automatically force direction.
@@ -226,7 +226,13 @@ def analytics(c):
     elif event in ('BULLISH_CHOCH','BEARISH_CHOCH'): phase='REVERSAL_DEVELOPING'
     else: phase='PULLBACK' if mom not in ('NEUTRAL','UNCLEAR') else 'UNCLEAR'
     speed='EXTREME' if move3_atr>=2.5 else 'FAST' if move3_atr>=1.4 else 'SLOW' if move3_atr<0.45 else 'NORMAL'
-    return {'data_current_price':round(last['c'],3),'atr14':round(atr,3),'structure':structure,'structure_event':event,'momentum':mom,'volatility':vol,'current_pressure':pressure,'market_phase':phase,'shock_detector':shock,'last_candle_range_atr':round(range_atr,2),'last_candle_body_atr':round(body_atr,2),'approach_speed':speed,'move_3bar_atr':round(move3_atr,2),'last_swing_highs':[round(x[1],2) for x in swings_hi[-3:]],'last_swing_lows':[round(x[1],2) for x in swings_lo[-3:]],'equal_highs':eqh[-2:],'equal_lows':eql[-2:],'recent_5bar_move':round(move,3),'avg_body_5':round(avg_body,3),'displacement':displacement,'recent_fvgs':fvgs[-4:],'session_utc':session,'extension_atr_5bar':extension_atr,'chase_risk':chase_risk,'latest_closed_candles':c[-12:]}
+    
+    # V20 closed-candle/reaction diagnostics. Twelve Data series is treated as closed-candle input by the engine.
+    recent=c[-6:]
+    bull=sum(1 for x in recent if x['c']>x['o']); bear=sum(1 for x in recent if x['c']<x['o'])
+    wick_reject='LOWER' if (last['c']-last['l']) > 1.4*abs(last['c']-last['o']) else 'UPPER' if (last['h']-last['c']) > 1.4*abs(last['c']-last['o']) else 'NONE'
+    reaction_quality='STRONG' if abs(move3_atr)>=1.8 and max(bull,bear)>=4 else 'MODERATE' if abs(move3_atr)>=0.8 and max(bull,bear)>=3 else 'WEAK'
+    return {'closed_candle_engine':True,'reaction_quality':reaction_quality,'latest_wick_rejection':wick_reject,'recent_bull_candles':bull,'recent_bear_candles':bear,'data_current_price':round(last['c'],3),'atr14':round(atr,3),'structure':structure,'structure_event':event,'momentum':mom,'volatility':vol,'current_pressure':pressure,'market_phase':phase,'shock_detector':shock,'last_candle_range_atr':round(range_atr,2),'last_candle_body_atr':round(body_atr,2),'approach_speed':speed,'move_3bar_atr':round(move3_atr,2),'last_swing_highs':[round(x[1],2) for x in swings_hi[-3:]],'last_swing_lows':[round(x[1],2) for x in swings_lo[-3:]],'equal_highs':eqh[-2:],'equal_lows':eql[-2:],'recent_5bar_move':round(move,3),'avg_body_5':round(avg_body,3),'displacement':displacement,'recent_fvgs':fvgs[-4:],'session_utc':session,'extension_atr_5bar':extension_atr,'chase_risk':chase_risk,'latest_closed_candles':c[-12:]}
 
 def run_model(contents):
     client=genai.Client(api_key=os.environ['GEMINI_API_KEY'])
@@ -321,5 +327,67 @@ def scan():
     except Exception as e:
         text=str(e);low=text.lower();quota=('429' in text or 'resource_exhausted' in low or 'quota' in low)
         return jsonify({'error':'quota' if quota else 'scan_failed','detail':text[:1200]}),429 if quota else 500
+
+
+
+def parse_zone(zone):
+    import re
+    if not zone: return None
+    nums=[float(x) for x in re.findall(r'\d+(?:\.\d+)?',str(zone))]
+    if len(nums)<2:return None
+    return (min(nums[0],nums[1]),max(nums[0],nums[1]))
+
+def evaluate_setup(setup,candles):
+    """Deterministic journal outcome. This measures zone behavior, not profitability."""
+    out={'time':setup.get('time'),'price':setup.get('price'),'buy':'NO_ZONE','sell':'NO_ZONE'}
+    if not candles:return out
+    for side in ('buy','sell'):
+        z=setup.get(side) or {}; bounds=parse_zone(z.get('zone')) if isinstance(z,dict) else None
+        if not bounds:continue
+        lo,hi=bounds; touched=any(x['l']<=hi and x['h']>=lo for x in candles)
+        if not touched:out[side]='NOT_TRIGGERED';continue
+        if side=='buy':
+            invalid=any(x['c']<lo for x in candles); favorable=max(x['h']-hi for x in candles)
+        else:
+            invalid=any(x['c']>hi for x in candles); favorable=max(lo-x['l'] for x in candles)
+        if invalid: state='INVALIDATED'
+        elif favorable>0: state='REACTED'
+        else: state='TESTED'
+        out[side]=state; out[side+'_favorable_move']=round(max(0,favorable),2)
+    return out
+
+@app.post('/api/outcomes')
+def outcomes():
+    try:
+        d=request.get_json(force=True); setups=(d.get('setups') or [])[:100]
+        candles,st,note=fetch_tf('5min',500)
+        if not candles:return jsonify({'status':st,'note':note,'outcomes':[]})
+        results=[]
+        for x in setups:
+            # Timestamp filtering prevents old candles before the prediction from grading it.
+            t=str(x.get('time') or '').replace('T',' ')[:16]
+            after=[c for c in candles if str(c.get('t',''))[:16]>=t] if t else candles
+            results.append(evaluate_setup(x,after))
+        counts={}
+        for r in results:
+            for side in ('buy','sell'):
+                k=side.upper()+'_'+r[side];counts[k]=counts.get(k,0)+1
+        return jsonify({'status':'LIVE_DATA','note':'Deterministic M5 outcome tracking; zone behavior only, not win rate.','counts':counts,'outcomes':results})
+    except Exception as e:return jsonify({'error':'outcome_failed','detail':str(e)[:800]}),500
+
+@app.get('/api/replay')
+def replay():
+    """Quota-free deterministic replay diagnostics over recent M5 history. Not a strategy win-rate backtest."""
+    try:
+        candles,st,note=fetch_tf('5min',500)
+        if not candles:return jsonify({'status':st,'note':note})
+        phases={};shocks=0; structures={}; samples=[]
+        for i in range(40,len(candles)):
+            m=analytics(candles[:i+1]); phases[m.get('market_phase','UNCLEAR')]=phases.get(m.get('market_phase','UNCLEAR'),0)+1
+            structures[m.get('structure','UNCLEAR')]=structures.get(m.get('structure','UNCLEAR'),0)+1
+            shocks+=1 if m.get('shock_detector')=='TRIGGERED' else 0
+            if i%50==0:samples.append({'t':candles[i]['t'],'price':candles[i]['c'],'phase':m.get('market_phase'),'pressure':m.get('current_pressure'),'shock':m.get('shock_detector')})
+        return jsonify({'status':'LIVE_DATA','candles_analyzed':len(candles)-40,'phases':phases,'structures':structures,'shock_bars':shocks,'samples':samples,'note':'Replay validates deterministic state logic candle-by-candle. It does not claim strategy profitability.'})
+    except Exception as e:return jsonify({'error':'replay_failed','detail':str(e)[:800]}),500
 
 if __name__=='__main__':app.run(host='0.0.0.0',port=int(os.environ.get('PORT',8080)))
