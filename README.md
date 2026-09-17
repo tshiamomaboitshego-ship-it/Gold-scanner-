@@ -1,19 +1,16 @@
-# Gold Scanner V22 — Lifecycle & Timing Engine
+# Gold Scanner V23 — Candidate Ranking + Zone Strength Engine
 
-V22 is built on V21 and focuses on the failure found during live testing: a useful level could be labelled FRESH even after price had already touched and reacted from it.
+V23 is built from V22 after the 4308–4313 live test showed an important weakness: a technically meaningful M5 area can react briefly yet still be too high/too weak to be the strongest demand area.
 
-## V22 upgrades
-- Deterministic closed-candle zone lifecycle reconciliation from live M5 OHLC.
-- Timing states: UNTESTED, ACTIVE_TEST, ALREADY_REACTED, RETEST_PENDING, INVALIDATED.
-- Recently touched/rejected zones are no longer presented as fresh first-touch setups when live OHLC can verify the touch.
-- `NO_ACTIVE_SETUP` is separated from future mapped BUY/SELL locations.
-- Distance to each zone and ATR-normalized distance are shown.
-- Evidence-score components are surfaced in the phone UI when supplied.
-- Current pressure/market phase remain separate from future zones.
-- V21 confluence engine remains: market structure, BOS/CHoCH, liquidity, FVG quality, order blocks/breakers, premium/discount, session liquidity, displacement, acceptance/rejection and sequence recognition.
-- V20/V19 testing, outcome tracking, volatility-shock, approach-speed, chase and AI/data conflict protections remain.
+## V23 upgrades
+- Multi-candidate BUY/SELL zone ranking instead of stopping at the first plausible level.
+- Deeper-zone awareness using deterministic FVG, order-block and swing candidates.
+- Repeated-touch degradation and a zone consumption score.
+- Body-penetration/acceptance penalties.
+- Separate current reaction quality from historical zone quality.
+- Failed-reaction/retest state so a temporary bounce is not treated as confirmation.
+- Approach-aware lifecycle logic: old candles from before a zone approach no longer falsely invalidate a newly mapped zone.
+- Candidate map is visible in the scan output for transparency.
+- Existing V22 lifecycle/timing, V21 confluence, V20 Testing Lab, V19 shock protection and M5/M15/H1 OHLC architecture remain.
 
-## Important
-This is an analysis/testing aid, not an automatic trading system and not a profitability guarantee. Automatic economic-calendar integration is still not included. Manual event-risk mode and deterministic volatility-shock protection remain.
-
-For deterministic lifecycle/timing, configure `TWELVE_DATA_API_KEY`. Gemini screenshot analysis requires `GEMINI_API_KEY`.
+Important: zones are analysis locations, not guaranteed reversals or automatic entries. Demo-test and compare many outcomes before judging performance.

@@ -6,7 +6,7 @@ from google.genai import types
 app = Flask(__name__, static_folder='.', static_url_path='')
 
 PROMPT = r'''
-You are Gold Scanner V22, a conservative XAUUSD M5 HYBRID PULLBACK + CONFIRMATION ANALYST.
+You are Gold Scanner V23, a conservative XAUUSD M5 HYBRID PULLBACK + CONFIRMATION ANALYST.
 You receive ONE current M5 screenshot plus optional deterministic M5 market-data metrics and optional SAVED H1/M15 context. Use saved higher-timeframe context internally as confluence/context, but M5 remains the execution timeframe. H1/M15 must NOT automatically veto a valid M5 setup.
 Never issue BUY NOW / SELL NOW. Never promise profit, accuracy, or a reversal.
 
@@ -82,6 +82,17 @@ V21 PRICE-ACTION CONFLUENCE RULES:
 - If no zone is currently confirming, say NO_ACTIVE_SETUP even when future BUY/SELL locations are mapped.
 - inducement is only a POSSIBLE label when a clear minor internal swing sits between current price and a more important external liquidity/HTF objective. If uncertain say NONE.
 - Keep the final zone map uncluttered: these concepts improve zone selection/confirmation, not the number of zones shown.
+
+V23 MULTI-CANDIDATE + ZONE-STRENGTH RULES:
+- Do NOT stop at the first plausible support/resistance. deterministic candidate_zones may contain several BUY areas below price and SELL areas above price. Compare them before selecting the displayed primary zone.
+- Prefer the strongest confluence cluster, not simply the nearest zone. A nearby internal M5 area can be weaker than a deeper M15/H1 demand area.
+- If a meaningful deeper same-side candidate exists, mention it in confluence_summary as a secondary/deeper candidate; never imply price must reach it.
+- Repeated touches degrade a zone. Use touch_count, consumption_score and acceptance state. A fourth/fifth test must not score like a fresh first test.
+- Separate ZONE QUALITY from CURRENT REACTION QUALITY. A strong historical zone can have weak current confirmation.
+- If a BUY zone gets repeated body acceptance deeper into/below it while M5 pressure is bearish, downgrade it aggressively. Reverse for SELL.
+- A small wick bounce is REACTION only. CURRENT_CONFIRMATION requires follow-through plus a closed-candle local structure shift; if price returns and loses the reaction extreme, mark REACTION_FAILED / CONSUMED as appropriate.
+- Liquidity beyond a candidate zone is opposing context: if material sell-side liquidity sits below a BUY area, do not assume the first support is the final destination. Reverse for SELL.
+- Never move a zone lower/higher merely because a previous zone failed. Candidate selection must be based on information available in the supplied screenshot/OHLC, not hindsight.
 
 Return JSON only:
 {
@@ -356,7 +367,35 @@ def analytics(c):
     if pd=='PREMIUM': bear_factors.append('premium location')
     confluence={'bullish':bull_factors,'bearish':bear_factors,'bullish_count':len(bull_factors),'bearish_count':len(bear_factors),'sequence':sequence}
 
-    return {'closed_candle_engine':True,'reaction_quality':reaction_quality,'latest_wick_rejection':wick_reject,'recent_bull_candles':bull,'recent_bear_candles':bear,'data_current_price':round(last['c'],3),'atr14':round(atr,3),'structure':structure,'structure_event':event,'momentum':mom,'volatility':vol,'current_pressure':pressure,'market_phase':phase,'shock_detector':shock,'last_candle_range_atr':round(range_atr,2),'last_candle_body_atr':round(body_atr,2),'approach_speed':speed,'move_3bar_atr':round(move3_atr,2),'last_swing_highs':[round(x[1],2) for x in swings_hi[-3:]],'last_swing_lows':[round(x[1],2) for x in swings_lo[-3:]],'equal_highs':eqh[-2:],'equal_lows':eql[-2:],'recent_5bar_move':round(move,3),'avg_body_5':round(avg_body,3),'displacement':displacement,'recent_fvgs':fvgs[-4:],'session_utc':session,'extension_atr_5bar':extension_atr,'chase_risk':chase_risk,'fvg_quality':quality_fvgs[-6:],'order_blocks':obs,'premium_discount':{'state':pd,'range_low':round(range_lo,2),'equilibrium':round(equilibrium,2),'range_high':round(range_hi,2)},'external_liquidity':external_liq,'internal_liquidity':internal_liq,'liquidity_sweep':sweep,'body_acceptance':acceptance,'session_liquidity':session_liq,'price_action_sequence':sequence,'confluence_cluster':confluence,'latest_closed_candles':c[-12:]}
+    # V23 multi-candidate zone map. Deterministic candidates are ranked evidence locations, not signals.
+    cp=last['c']; candidates=[]; ztol=max(atr*0.18,0.25)
+    def add_candidate(side,lo,hi,kind,base,meta=None):
+        lo,hi=float(min(lo,hi)),float(max(lo,hi))
+        if side=='BUY' and hi>=cp: return
+        if side=='SELL' and lo<=cp: return
+        # Count recent interactions; repeated tests increase consumption.
+        recent60=c[-60:]; touches=sum(1 for x in recent60 if x['l']<=hi and x['h']>=lo)
+        bodies=sum(1 for x in recent60[-8:] if (side=='BUY' and x['c']<hi) or (side=='SELL' and x['c']>lo))
+        distance=(cp-hi) if side=='BUY' else (lo-cp)
+        score=base - min(24,max(0,touches-1)*6) - min(12,bodies*2) - min(12,int((distance/(atr or 1))*2))
+        score=max(0,min(100,int(score)))
+        consumption='HEAVY' if touches>=5 or bodies>=4 else 'MODERATE' if touches>=3 or bodies>=2 else 'LIGHT' if touches>=1 else 'UNTOUCHED'
+        candidates.append({'side':side,'low':round(lo,2),'high':round(hi,2),'source':kind,'rank_score':score,'touch_count':touches,'body_penetration_count':bodies,'consumption':consumption,'distance_atr':round(distance/(atr or 1),2),'meta':meta or {}})
+    for o in obs:
+        if o['state']=='BREAKER': continue
+        add_candidate('BUY' if o['type']=='BULLISH_OB' else 'SELL',o['low'],o['high'],o['type'],78 if o['state']=='FRESH' else 66,{'state':o['state']})
+    for g in quality_fvgs:
+        if g.get('fill_state')=='FILLED': continue
+        add_candidate('BUY' if g['type']=='BULLISH_FVG' else 'SELL',g['low'],g['high'],g['type'],72 if g.get('quality')=='HIGH' else 60,{'quality':g.get('quality'),'fill_state':g.get('fill_state')})
+    for _,v in swings_lo[-5:]: add_candidate('BUY',v-ztol,v+ztol,'SWING_DEMAND',62)
+    for _,v in swings_hi[-5:]: add_candidate('SELL',v-ztol,v+ztol,'SWING_SUPPLY',62)
+    # Deduplicate overlapping same-side candidates, preserving the stronger one.
+    ranked=[]
+    for q in sorted(candidates,key=lambda x:x['rank_score'],reverse=True):
+        if not any(r['side']==q['side'] and not (q['high']<r['low']-ztol or q['low']>r['high']+ztol) for r in ranked): ranked.append(q)
+    candidate_zones={'buy':[x for x in ranked if x['side']=='BUY'][:4],'sell':[x for x in ranked if x['side']=='SELL'][:4]}
+
+    return {'closed_candle_engine':True,'reaction_quality':reaction_quality,'latest_wick_rejection':wick_reject,'recent_bull_candles':bull,'recent_bear_candles':bear,'data_current_price':round(last['c'],3),'atr14':round(atr,3),'structure':structure,'structure_event':event,'momentum':mom,'volatility':vol,'current_pressure':pressure,'market_phase':phase,'shock_detector':shock,'last_candle_range_atr':round(range_atr,2),'last_candle_body_atr':round(body_atr,2),'approach_speed':speed,'move_3bar_atr':round(move3_atr,2),'last_swing_highs':[round(x[1],2) for x in swings_hi[-3:]],'last_swing_lows':[round(x[1],2) for x in swings_lo[-3:]],'equal_highs':eqh[-2:],'equal_lows':eql[-2:],'recent_5bar_move':round(move,3),'avg_body_5':round(avg_body,3),'displacement':displacement,'recent_fvgs':fvgs[-4:],'session_utc':session,'extension_atr_5bar':extension_atr,'chase_risk':chase_risk,'fvg_quality':quality_fvgs[-6:],'order_blocks':obs,'premium_discount':{'state':pd,'range_low':round(range_lo,2),'equilibrium':round(equilibrium,2),'range_high':round(range_hi,2)},'external_liquidity':external_liq,'internal_liquidity':internal_liq,'liquidity_sweep':sweep,'body_acceptance':acceptance,'session_liquidity':session_liq,'price_action_sequence':sequence,'confluence_cluster':confluence,'candidate_zones':candidate_zones,'latest_closed_candles':c[-12:]}
 
 def run_model(contents):
     client=genai.Client(api_key=os.environ['GEMINI_API_KEY'])
@@ -378,34 +417,39 @@ def zone_bounds(zone):
     return min(nums[0],nums[1]),max(nums[0],nums[1])
 
 def reconcile_zone_lifecycle(z,side,metrics,current_price):
-    """V22: deterministic closed-candle lifecycle/timing reconciliation."""
-    bounds=zone_bounds(z.get('zone'))
-    candles=(metrics.get('latest_closed_candles') or [])[-24:]
-    if not bounds or not candles:return z
+    """V23: closed-candle lifecycle with approach-aware touches and consumption."""
+    bounds=zone_bounds(z.get('zone')); candles=(metrics.get('latest_closed_candles') or [])[-12:]
+    if not bounds or len(candles)<2:return z
     lo,hi=bounds; atr=float(metrics.get('atr14') or max((hi-lo),1.0)); cp=float(current_price) if current_price is not None else float(candles[-1]['c'])
-    touched_idx=[i for i,x in enumerate(candles) if float(x['l'])<=hi and float(x['h'])>=lo]
-    close_beyond=[i for i,x in enumerate(candles) if (side=='buy' and float(x['c'])<lo) or (side=='sell' and float(x['c'])>hi)]
-    dist=0.0 if lo<=cp<=hi else (lo-cp if cp<lo else cp-hi)
-    z['distance_to_zone']=round(dist,3); z['distance_atr']=round(dist/atr,2) if atr else None
-    if close_beyond:
-        z['zone_lifecycle']='INVALIDATED'; z['freshness']='USED'; z['confirmation_state']='INVALIDATED'
-        z['timing_status']='INVALIDATED'; z['timing_note']='Closed M5 acceptance beyond the zone detected in recent OHLC.'
-        return z
-    if touched_idx:
-        last=touched_idx[-1]; bars_since=len(candles)-1-last
-        moved=(cp-hi) if side=='buy' else (lo-cp)
-        if bars_since==0 or dist<=0.20*atr:
-            z['zone_lifecycle']='TESTING'; z['freshness']='USED'; z['timing_status']='ACTIVE_TEST'
-            z['timing_note']='Price is currently at/near a previously touched zone; it is not fresh.'
-        elif moved>=0.35*atr:
-            z['zone_lifecycle']='REACTED'; z['freshness']='USED'; z['confirmation_state']='HISTORICAL_REACTION'
-            z['timing_status']='ALREADY_REACTED'; z['timing_note']='Recent OHLC shows price already touched this zone and moved away. Do not present it as a fresh first-touch setup.'
-        else:
-            z['zone_lifecycle']='RETESTED'; z['freshness']='USED'; z['timing_status']='RETEST_PENDING'
-            z['timing_note']='The zone has already been touched; any future visit is a retest, not a fresh test.'
+    dist=0.0 if lo<=cp<=hi else (lo-cp if cp<lo else cp-hi); z['distance_to_zone']=round(dist,3); z['distance_atr']=round(dist/atr,2) if atr else None
+    # Only start lifecycle after a genuine approach from the correct side. This avoids treating old pre-zone candles as invalidation.
+    approach=None
+    for i in range(1,len(candles)):
+        prev=float(candles[i-1]['c']); x=candles[i]
+        if side=='buy' and prev>hi and float(x['l'])<=hi: approach=i; break
+        if side=='sell' and prev<lo and float(x['h'])>=lo: approach=i; break
+    if approach is None:
+        z['zone_lifecycle']='FRESH'; z['freshness']='FRESH'; z['timing_status']='UNTESTED'; z['timing_note']='No completed-candle approach into this zone was found in the recent OHLC window.'; z['touch_count']=0; z['consumption_score']=0; z['reaction_quality_current']='NONE'; return z
+    after=candles[approach:]; touches=sum(1 for x in after if float(x['l'])<=hi and float(x['h'])>=lo)
+    body_deep=sum(1 for x in after if (side=='buy' and float(x['c'])<(lo+hi)/2) or (side=='sell' and float(x['c'])>(lo+hi)/2))
+    invalid=[x for x in after if (side=='buy' and float(x['c'])<lo) or (side=='sell' and float(x['c'])>hi)]
+    consumption=min(100,max(0,(touches-1)*18 + body_deep*12)); z['touch_count']=touches; z['consumption_score']=consumption
+    # Reaction is measured from zone to best favorable close after approach.
+    favorable=max(float(x['c'])-hi for x in after) if side=='buy' else max(lo-float(x['c']) for x in after)
+    rq='STRONG' if favorable>=0.8*atr else 'MODERATE' if favorable>=0.4*atr else 'WEAK' if favorable>0 else 'NONE'; z['reaction_quality_current']=rq
+    if invalid:
+        z['zone_lifecycle']='INVALIDATED'; z['freshness']='USED'; z['confirmation_state']='INVALIDATED'; z['timing_status']='INVALIDATED'; z['timing_note']=f'Closed M5 acceptance beyond the zone occurred after approach. Touches: {touches}; consumption {consumption}/100.'; return z
+    if consumption>=65:
+        z['zone_lifecycle']='CONSUMED'; z['freshness']='USED'; z['confirmation_state']='WAIT'; z['timing_status']='ZONE_WEAKENING'; z['timing_note']=f'Repeated interaction/body penetration is consuming this zone. Touches: {touches}; consumption {consumption}/100.'; return z
+    at_zone=(lo-0.15*atr)<=cp<=(hi+0.15*atr)
+    if at_zone:
+        z['zone_lifecycle']='TESTING'; z['freshness']='USED'; z['timing_status']='ACTIVE_TEST'; z['timing_note']=f'Price is testing a used zone. Touches: {touches}; consumption {consumption}/100; reaction quality {rq}.'
+    elif favorable>=0.35*atr:
+        # If it reacted but then returned close to the zone, flag failed reaction rather than confirmation.
+        returned=(side=='buy' and cp<=hi+0.25*atr) or (side=='sell' and cp>=lo-0.25*atr)
+        z['zone_lifecycle']='RETESTED' if returned else 'REACTED'; z['freshness']='USED'; z['confirmation_state']='WAIT' if returned else 'HISTORICAL_REACTION'; z['timing_status']='REACTION_FAILED_RETEST' if returned else 'ALREADY_REACTED'; z['timing_note']=f'Initial reaction quality {rq}; '+('price returned toward the zone, so the reaction is not confirmed.' if returned else 'price moved away; this is historical reaction, not a fresh setup.')
     else:
-        z['zone_lifecycle']='FRESH'; z['freshness']='FRESH'; z['timing_status']='UNTESTED'
-        z['timing_note']='No touch found in the recent closed-candle window.'
+        z['zone_lifecycle']='RETESTED'; z['freshness']='USED'; z['timing_status']='WEAK_REACTION'; z['timing_note']=f'Zone was touched but favorable follow-through was weak. Touches: {touches}; consumption {consumption}/100.'
     return z
 
 def norm(r,metrics,data_status,event_risk):
@@ -444,13 +488,14 @@ def norm(r,metrics,data_status,event_risk):
         z=r[side]
         if z.get('confirmation_state') in {'CURRENT_CONFIRMATION','CONFIRMATION_DEVELOPING','REJECTION_DETECTED'} and z.get('zone_lifecycle') not in {'REACTED','CONSUMED','INVALIDATED','EXPIRED'}: active.append(name)
     r['active_setup']=' + '.join(active) if active else 'NO_ACTIVE_SETUP'
-    r['timing_summary']='Mapped zones are locations to monitor. Lifecycle and current pressure determine whether anything is active now.'
+    r['candidate_zones']=metrics.get('candidate_zones',{}) if data_status=='LIVE_DATA' else {}
+    r['timing_summary']='Mapped zones are locations to monitor. V23 compares multiple candidates, consumption and reaction quality before treating a zone as strong.'
     act=str(r.get('action_state') or 'WAIT').upper(); allowed={'WAIT','OBSERVE_REACTION','CURRENT_CONFIRMATION_PRESENT','NO_VALID_SETUP','HIGH_RISK_EVENT','VOLATILITY_PAUSE'}
     if act not in allowed:act='WAIT'
     if bool(r.get('too_late')): act='NO_VALID_SETUP'; r['risk_filter']='BLOCK'; r['risk_reason']=r.get('too_late_reason') or 'Move is already extended; chase filter blocked the setup.'
     if event_risk=='HIGH':act='HIGH_RISK_EVENT';r['risk_filter']='BLOCK';r['risk_reason']='High-impact news/event mode is enabled; technical confirmation can be unstable.'
     elif metrics.get('shock_detector')=='TRIGGERED':
-        act='VOLATILITY_PAUSE'; r['risk_filter']='BLOCK'; r['risk_reason']='V22 volatility-shock detector triggered from closed-candle OHLC; normal zone logic is paused until structure stabilizes.'; r['htf_refresh_needed']=True; r['htf_refresh_reason']=r.get('htf_refresh_reason') or 'Extreme M5 displacement can make saved H1/M15 visual context stale; refresh after volatility settles.'
+        act='VOLATILITY_PAUSE'; r['risk_filter']='BLOCK'; r['risk_reason']='V23 volatility-shock detector triggered from closed-candle OHLC; normal zone logic is paused until structure stabilizes.'; r['htf_refresh_needed']=True; r['htf_refresh_reason']=r.get('htf_refresh_reason') or 'Extreme M5 displacement can make saved H1/M15 visual context stale; refresh after volatility settles.'
     elif act=='CURRENT_CONFIRMATION_PRESENT' and not any(r[s]['confirmation_state']=='CURRENT_CONFIRMATION' for s in ('buy_pullback','sell_pullback')):act='OBSERVE_REACTION'
     r['action_state']=act;r['data_status']=data_status;r['data_metrics']=metrics;r['event_risk']=event_risk
     r['note']='Analysis aid only. CURRENT_CONFIRMATION is not certainty or an automatic entry. Test on demo.'
