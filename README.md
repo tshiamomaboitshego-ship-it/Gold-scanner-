@@ -1,31 +1,35 @@
-# Gold Scanner V28 Market Intelligence
+# Gold Scanner V29 Intelligence+
 
-Screenshot-free XAU/USD analysis engine.
+Screenshot-free XAU/USD market scanner for Render.
 
 ## Core scan
-Press **SCAN LIVE MARKET**. V28 fetches Twelve Data H1/M15/M5 OHLC plus a separate XAU/USD reference price. Python creates all technical zones. Both setup families run every scan:
-- PULLBACK CONTINUATION
-- NEW MOVE ORIGIN
+- Twelve Data H1 + M15 + M5 OHLC and separate reference price
+- Deterministic Python structure: swings, HH/HL, LL/LH, BOS/CHoCH, FVG/imbalance, order blocks, supply/demand candidates, liquidity/sweeps, displacement, ATR/momentum, premium/discount, zone freshness/touches/consumption
+- Independent Pullback Continuation and New Move Origin engines
+- Allows NO QUALIFIED AREA instead of forcing a zone
 
-No screenshot or Gemini request is used by `/api/live-scan`.
+## V29 intelligence upgrades
+- Session intelligence: Asia, London, New York highs/lows and opening ranges
+- Previous-day high/low/open/close and previous-week high/low/open/close when present in the fetched sample
+- Nearest session/day/week liquidity levels and simple sweep/reclaim state
+- Historical M5 ATR percentile / volatility regime (LOW, NORMAL, HIGH, EXTREME)
+- Provider volume/tick-volume context when actually supplied; if absent, V29 says unavailable and does not invent volume
+- USD/DXY context where Twelve Data exposes it
+- FRED US 2Y, 10Y and 10Y real-yield context when `FRED_API_KEY` is configured
+- Optional gold-futures context via `GOLD_FUTURES_SYMBOL`; the scanner intentionally does not guess a provider symbol
+- Forward Test Lab remains on-device
 
-## V28 intelligence layers
-1. **Economic-calendar risk (optional):** Trading Economics US calendar. It can downgrade/caution zones around major releases, but never creates a price zone.
-2. **USD + rates context:** attempts DXY/USDX through Twelve Data; optional FRED daily US 2Y, 10Y and 10Y real yields.
-3. **Python confluence/regime engine:** existing structure, liquidity, FVG, order-block, displacement, ATR, market-phase, consumption and multi-timeframe logic plus modest macro-context ranking.
-4. **Forward Test Lab:** scans are frozen in browser localStorage and `/api/outcomes` grades later M5 zone behavior as NOT_TRIGGERED / TESTED / REACTED / INVALIDATED. These are not win-rate claims.
-
-## Render
-Build: `pip install -r requirements.txt`
-Start: `gunicorn server:app`
-
+## Environment variables
 Required:
 - `TWELVE_DATA_API_KEY`
 
-Optional intelligence keys:
-- `FRED_API_KEY` — FRED daily DGS2, DGS10, DFII10 observations.
-- `TRADING_ECONOMICS_KEY` — Trading Economics calendar credentials/key accepted by its `c` parameter.
+Optional:
+- `FRED_API_KEY`
+- `TRADING_ECONOMICS_KEY` (only if you want automatic calendar data)
+- `GOLD_FUTURES_SYMBOL` (only if you have verified a gold-futures symbol supported by your Twelve Data plan)
 
-If optional keys are absent or a provider does not expose a series on the current plan, V28 clearly shows that layer as unavailable and continues with technical analysis. It does not fabricate missing macro data.
+## Important design rule
+Technical XAU/USD price structure creates zones. Session, macro, volatility, volume and futures context may modestly adjust ranking/caution but never invent or move a zone. Evidence scores are not win probabilities.
 
-Candidate zones and evidence scores are analysis aids, not predictions, probabilities or automatic trade instructions.
+Render build: `pip install -r requirements.txt`
+Render start: `gunicorn server:app`

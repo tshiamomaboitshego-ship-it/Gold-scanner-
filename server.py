@@ -198,7 +198,7 @@ def fetch_tf(interval, outputsize):
             if len(vals)<25:
                 last_err=f'Not enough candles ({len(vals)})'
                 continue
-            candles=[{'t':v['datetime'],'o':float(v['open']),'h':float(v['high']),'l':float(v['low']),'c':float(v['close'])} for v in reversed(vals)]
+            candles=[{'t':v['datetime'],'o':float(v['open']),'h':float(v['high']),'l':float(v['low']),'c':float(v['close']), **({'v':float(v['volume'])} if v.get('volume') not in (None,'') else {})} for v in reversed(vals)]
             return candles,'LIVE_DATA',f'Twelve Data XAU/USD {interval}'
         except Exception as e:
             last_err=str(e)[:220]
@@ -833,8 +833,85 @@ def fetch_calendar_context():
         return {'status':'LIVE_DATA','risk':risk,'events':events[:12],'near_events':near[:6],'note':'US economic calendar context'}
     except Exception as e:return {'status':'UNAVAILABLE','risk':'UNKNOWN','events':[],'note':str(e)[:180]}
 
+def build_session_level_context(mtf):
+    """Deterministic session + previous day/week liquidity map from M5 OHLC."""
+    c=(mtf.get('M5') or {}).get('candles') or []
+    if not c:return {'status':'UNAVAILABLE'}
+    from collections import defaultdict
+    def dt(x):
+        try:return datetime.fromisoformat(str(x['t']).replace('T',' ')).replace(tzinfo=timezone.utc)
+        except:return None
+    rows=[(dt(x),x) for x in c]; rows=[x for x in rows if x[0]]
+    if not rows:return {'status':'UNAVAILABLE'}
+    byday=defaultdict(list)
+    for d,x in rows: byday[d.date()].append((d,x))
+    days=sorted(byday)
+    latest=days[-1]
+    prev=days[-2] if len(days)>=2 else None
+    def hilo(xs):
+        if not xs:return None
+        vals=[x for _,x in xs]
+        return {'high':round(max(x['h'] for x in vals),2),'low':round(min(x['l'] for x in vals),2),'open':round(vals[0]['o'],2),'close':round(vals[-1]['c'],2)}
+    def window(xs,a,b):return hilo([(d,x) for d,x in xs if a<=d.hour<b])
+    cur=byday[latest]
+    sessions={'asia':window(cur,0,7),'london':window(cur,7,12),'new_york':window(cur,12,21),'london_opening_range':window(cur,7,8),'new_york_opening_range':window(cur,12,13)}
+    previous_day=hilo(byday[prev]) if prev else None
+    latest_dt=rows[-1][0]; week_start=(latest_dt.date()-__import__('datetime').timedelta(days=latest_dt.weekday()))
+    prior_week_start=week_start-__import__('datetime').timedelta(days=7)
+    prior_week_end=week_start-__import__('datetime').timedelta(days=1)
+    prior_week=[(d,x) for d,x in rows if prior_week_start<=d.date()<=prior_week_end]
+    previous_week=hilo(prior_week)
+    cp=float((mtf.get('_price_meta') or {}).get('reference_price') or rows[-1][1]['c'])
+    levels=[]
+    def add(name,obj):
+        if not obj:return
+        for k in ('high','low','open','close'):
+            if k in obj and obj[k] is not None:levels.append({'name':name+'_'+k.upper(),'price':obj[k],'distance':round(abs(cp-obj[k]),2)})
+    add('PREV_DAY',previous_day); add('PREV_WEEK',previous_week)
+    for n,o in sessions.items():
+        if o:
+            for k in ('high','low'): levels.append({'name':n.upper()+'_'+k.upper(),'price':o[k],'distance':round(abs(cp-o[k]),2)})
+    levels.sort(key=lambda z:z['distance'])
+    # Session sweep/reclaim heuristic using last 3 closed candles around established session levels.
+    sweep='NONE'; recent=[x for _,x in rows[-3:]]
+    for n,o in sessions.items():
+        if not o or not recent:continue
+        hi,lo=o['high'],o['low']; last=recent[-1]
+        if any(x['h']>hi for x in recent[:-1]) and last['c']<hi:sweep=n.upper()+'_HIGH_SWEEP_RECLAIM_DOWN'
+        if any(x['l']<lo for x in recent[:-1]) and last['c']>lo:sweep=n.upper()+'_LOW_SWEEP_RECLAIM_UP'
+    return {'status':'LIVE_DATA','latest_utc_day':str(latest),'sessions':sessions,'previous_day':previous_day,'previous_week':previous_week,'nearest_levels':levels[:10],'session_sweep':sweep}
+
+def build_volatility_regime(mtf):
+    c=(mtf.get('M5') or {}).get('candles') or []
+    if len(c)<40:return {'status':'UNAVAILABLE'}
+    trs=[]
+    for i in range(1,len(c)):
+        prev=c[i-1]['c']; x=c[i]; trs.append(max(x['h']-x['l'],abs(x['h']-prev),abs(x['l']-prev)))
+    def atr_at(end,n=14):
+        xs=trs[max(0,end-n):end]; return sum(xs)/len(xs) if xs else 0
+    hist=[atr_at(i) for i in range(14,len(trs)+1)]; current=hist[-1]
+    pct=round(100*sum(1 for x in hist if x<=current)/len(hist),1)
+    state='EXTREME' if pct>=90 else 'HIGH' if pct>=70 else 'LOW' if pct<=30 else 'NORMAL'
+    return {'status':'LIVE_DATA','atr14':round(current,3),'atr_percentile':pct,'regime':state,'sample_count':len(hist)}
+
+def build_volume_context(mtf):
+    c=(mtf.get('M5') or {}).get('candles') or []
+    vols=[x.get('v') for x in c if isinstance(x.get('v'),(int,float))]
+    if len(vols)<20:return {'status':'UNAVAILABLE','note':'Provider did not supply reliable volume for XAU/USD. No synthetic volume is invented.'}
+    recent=vols[-20:]; avg=sum(recent[:-1])/max(1,len(recent)-1); ratio=recent[-1]/avg if avg else None
+    state='SURGE' if ratio and ratio>=1.8 else 'ABOVE_AVERAGE' if ratio and ratio>=1.2 else 'QUIET' if ratio and ratio<0.7 else 'NORMAL'
+    return {'status':'LIVE_DATA','latest_volume':recent[-1],'volume_ratio_20':round(ratio,2) if ratio else None,'state':state,'note':'Provider volume/tick-volume context; not centralized global spot-gold volume.'}
+
+def fetch_optional_gold_futures():
+    sym=os.environ.get('GOLD_FUTURES_SYMBOL','').strip()
+    if not sym:return {'status':'UNAVAILABLE','note':'Optional GOLD_FUTURES_SYMBOL not configured; no futures symbol is guessed.'}
+    c,st,note=fetch_twelve_symbol(sym,'15min',100)
+    if not c:return {'status':'UNAVAILABLE','symbol':sym,'note':note}
+    a=analytics(c)
+    return {'status':'LIVE_DATA','symbol':sym,'price':c[-1]['c'],'structure':a.get('structure'),'momentum':a.get('momentum'),'pressure':a.get('current_pressure'),'note':note}
+
 def build_market_context(mtf):
-    usd=fetch_usd_context(); rates=fetch_rates_context(); cal=fetch_calendar_context()
+    usd=fetch_usd_context(); rates=fetch_rates_context(); cal=fetch_calendar_context(); sessions=build_session_level_context(mtf); volreg=build_volatility_regime(mtf); volume=build_volume_context(mtf); futures=fetch_optional_gold_futures()
     m5=(mtf.get('M5') or {}).get('metrics') or {}; h1=(mtf.get('H1') or {}).get('metrics') or {}; m15=(mtf.get('M15') or {}).get('metrics') or {}
     bull=0; bear=0; reasons=[]
     um=str(usd.get('momentum') or '')
@@ -853,7 +930,7 @@ def build_market_context(mtf):
     if structs.count('HH_HL')>=2:tech='BULLISH'
     elif structs.count('LL_LH')>=2:tech='BEARISH'
     macro='BULLISH_GOLD' if bull>=bear+2 else 'BEARISH_GOLD' if bear>=bull+2 else 'MIXED'
-    return {'usd':usd,'rates':rates,'calendar':cal,'macro_bias':macro,'technical_alignment':tech,'bull_context_points':bull,'bear_context_points':bear,'reasons':reasons,'event_risk':cal.get('risk','UNKNOWN')}
+    return {'usd':usd,'rates':rates,'calendar':cal,'sessions':sessions,'volatility_regime':volreg,'volume_context':volume,'gold_futures':futures,'macro_bias':macro,'technical_alignment':tech,'bull_context_points':bull,'bear_context_points':bear,'reasons':reasons,'event_risk':cal.get('risk','UNKNOWN')}
 
 def apply_market_context(mtf,ctx):
     """Context may rank/downweight existing zones; it never creates or moves a price zone."""
@@ -865,6 +942,12 @@ def apply_market_context(mtf,ctx):
             elif macro=='BEARISH_GOLD': adj=5 if side=='sell' else -4; why.append('macro context '+('supports' if side=='sell' else 'opposes'))
             if event=='HIGH': adj-=8; why.append('high-impact event window')
             elif event=='ELEVATED': adj-=4; why.append('event-risk window')
+            # V29: nearby established session/previous-day/week levels add only modest confluence.
+            sess=ctx.get('sessions') or {}; atr=float(m5.get('atr14') or 1); zmid=(float(z.get('low'))+float(z.get('high')))/2
+            near=[q for q in (sess.get('nearest_levels') or []) if abs(float(q.get('price'))-zmid)<=max(0.35,0.25*atr)]
+            if near: adj+=3; why.append('near session/previous-day/week liquidity: '+str(near[0].get('name')))
+            vr=(ctx.get('volatility_regime') or {}).get('regime')
+            if vr=='EXTREME': adj-=4; why.append('extreme volatility regime')
             base=int(z.get('opportunity_score') or z.get('rank_score') or 0)
             z['pre_context_score']=base; z['context_adjustment']=adj; z['context_reasons']=why; z['opportunity_score']=max(0,min(100,base+adj))
         ((m5.get('candidate_zones') or {}).get(side) or []).sort(key=lambda x:(x.get('opportunity_score',0),x.get('rank_score',0)),reverse=True)
@@ -901,11 +984,11 @@ def live_scan():
         out=data_only_result(mtf,data_status,data_note,'NOT_USED_LIVE_DATA_MODE')
         out['mode']='LIVE_DATA_CONTEXT'
         out['gemini_status']='NOT_USED'
-        out['scanner_version']='V28 MARKET INTELLIGENCE'
+        out['scanner_version']='V29 MARKET INTELLIGENCE+'
         out['market_context']=market_context
         out['event_risk']=market_context.get('event_risk','UNKNOWN')
-        out['data_only_summary']=out['data_only_summary'].replace('V26 maps','V28 maps')
-        out['note']='Screenshot-free deterministic scan. Pullback Continuation and New Move Origin both run every scan. Macro/calendar data only adjusts context/ranking; it never invents or moves technical zones.'
+        out['data_only_summary']=out['data_only_summary'].replace('V26 maps','V29 maps')
+        out['note']='Screenshot-free deterministic scan. Pullback Continuation and New Move Origin both run every scan. Session/previous-day/week liquidity, volatility regime, available volume, USD/rates and optional futures context can adjust ranking; none can invent or move technical zones.'
         return jsonify(out)
     except Exception as e:
         return jsonify({'error':'live_scan_failed','detail':str(e)[:1200]}),500
