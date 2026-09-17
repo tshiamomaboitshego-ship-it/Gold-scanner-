@@ -1,16 +1,18 @@
-# Gold Scanner V23 — Candidate Ranking + Zone Strength Engine
+# Gold Scanner V24 — One Screenshot Hybrid
 
-V23 is built from V22 after the 4308–4313 live test showed an important weakness: a technically meaningful M5 area can react briefly yet still be too high/too weak to be the strongest demand area.
+Normal workflow: upload ONE fresh M5 screenshot. The backend automatically fetches XAU/USD H1, M15 and M5 OHLC from Twelve Data and runs the deterministic Python engine. Gemini receives only the M5 screenshot plus compact OHLC metrics as a visual second opinion.
 
-## V23 upgrades
-- Multi-candidate BUY/SELL zone ranking instead of stopping at the first plausible level.
-- Deeper-zone awareness using deterministic FVG, order-block and swing candidates.
-- Repeated-touch degradation and a zone consumption score.
-- Body-penetration/acceptance penalties.
-- Separate current reaction quality from historical zone quality.
-- Failed-reaction/retest state so a temporary bounce is not treated as confirmation.
-- Approach-aware lifecycle logic: old candles from before a zone approach no longer falsely invalidate a newly mapped zone.
-- Candidate map is visible in the scan output for transparency.
-- Existing V22 lifecycle/timing, V21 confluence, V20 Testing Lab, V19 shock protection and M5/M15/H1 OHLC architecture remain.
+## Render environment
+- `GEMINI_API_KEY`
+- `GEMINI_MODEL` optional, default `gemini-3.6-flash`
+- `TWELVE_DATA_API_KEY`
 
-Important: zones are analysis locations, not guaranteed reversals or automatic entries. Demo-test and compare many outcomes before judging performance.
+## V24 changes
+- H1/M15 screenshot uploads removed from normal UI.
+- `/api/ohlc-test` tests H1/M15/M5 Twelve Data without using Gemini quota.
+- H1/M15/M5 exact OHLC analyzed automatically.
+- Existing deterministic structure, BOS/CHoCH, ATR, momentum, liquidity, FVG quality, premium/discount, order-block heuristics, session context, candidate-zone ranking and consumption logic retained.
+- If Gemini returns a quota 429 but OHLC is available, scanner falls back to DATA-ONLY mode rather than becoming unusable.
+- Hybrid scan uses one Gemini request per M5 scan under normal operation.
+
+This is an analysis/testing aid, not an automated trading system or guarantee of profitable outcomes.

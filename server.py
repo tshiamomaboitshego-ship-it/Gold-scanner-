@@ -6,8 +6,8 @@ from google.genai import types
 app = Flask(__name__, static_folder='.', static_url_path='')
 
 PROMPT = r'''
-You are Gold Scanner V23, a conservative XAUUSD M5 HYBRID PULLBACK + CONFIRMATION ANALYST.
-You receive ONE current M5 screenshot plus optional deterministic M5 market-data metrics and optional SAVED H1/M15 context. Use saved higher-timeframe context internally as confluence/context, but M5 remains the execution timeframe. H1/M15 must NOT automatically veto a valid M5 setup.
+You are Gold Scanner V24, a conservative XAUUSD M5 HYBRID PULLBACK + CONFIRMATION ANALYST.
+You receive ONE current M5 screenshot plus deterministic H1/M15/M5 market-data metrics fetched automatically from Twelve Data. Use H1/M15 OHLC context internally as confluence/context, but M5 remains the execution timeframe. H1/M15 must NOT automatically veto a valid M5 setup.
 Never issue BUY NOW / SELL NOW. Never promise profit, accuracy, or a reversal.
 
 CRITICAL CONFIRMATION RULE (fixes V14 weakness):
@@ -527,17 +527,56 @@ def context_scan():
         text=str(e); low=text.lower(); quota=('429' in text or 'resource_exhausted' in low or 'quota' in low)
         return jsonify({'error':'quota' if quota else 'context_failed','detail':text[:1200]}),429 if quota else 500
 
+@app.get('/api/ohlc-test')
+def ohlc_test():
+    """Quota-free Twelve Data connectivity + deterministic HTF engine test."""
+    try:
+        mtf,status,note=fetch_multitimeframe()
+        details={}
+        for tf,v in mtf.items():
+            c=v.get('candles') or []; m=v.get('metrics') or {}
+            details[tf]={
+                'status':v.get('status'),'candles_received':len(c),'latest_time':c[-1]['t'] if c else None,
+                'latest_close':c[-1]['c'] if c else None,'structure':m.get('structure'),'structure_event':m.get('structure_event'),
+                'momentum':m.get('momentum'),'atr14':m.get('atr14'),'candidate_zones':m.get('candidate_zones',{})
+            }
+        return jsonify({'status':status,'gemini_used':False,'symbol':'XAU/USD','timeframes':details,'note':note})
+    except Exception as e:return jsonify({'error':'ohlc_test_failed','detail':str(e)[:900]}),500
+
+def data_only_result(mtf,data_status,data_note,why='Gemini visual check unavailable'):
+    m5=mtf.get('M5',{}).get('metrics',{}); m15=mtf.get('M15',{}).get('metrics',{}); h1=mtf.get('H1',{}).get('metrics',{})
+    def top(side):
+        arr=(m5.get('candidate_zones') or {}).get(side,[])
+        return arr[0] if arr else None
+    return {
+      'mode':'DATA_ONLY','data_status':data_status,'data_note':data_note,'gemini_status':why,
+      'current_price':m5.get('data_current_price'),'current_pressure':m5.get('current_pressure','UNCLEAR'),
+      'market_phase':m5.get('market_phase','UNCLEAR'),'shock_detector':m5.get('shock_detector','NORMAL'),
+      'approach_speed':m5.get('approach_speed','UNCLEAR'),'m5_state':'BULLISH' if str(m5.get('momentum','')).startswith('BULLISH') else 'BEARISH' if str(m5.get('momentum','')).startswith('BEARISH') else 'UNCLEAR',
+      'structure':m5.get('structure','UNCLEAR'),'structure_event':m5.get('structure_event','NONE'),'volatility':m5.get('volatility','NORMAL'),'momentum':m5.get('momentum','UNCLEAR'),
+      'multi_timeframe_metrics':{'H1':h1,'M15':m15,'M5':m5},'candidate_zones':m5.get('candidate_zones',{}),
+      'data_only_summary':f"H1 {h1.get('structure','—')} · M15 {m15.get('structure','—')} · M5 {m5.get('structure','—')}. Exact OHLC engine active; Gemini visual confirmation unavailable.",
+      'buy_candidate':top('buy'),'sell_candidate':top('sell'),
+      'note':'Data-only analysis aid. Candidate zones and structure are deterministic evidence, not guaranteed reversal points.'
+    }
+
 @app.post('/api/scan')
 def scan():
     try:
         d=request.get_json(force=True)
-        if not d.get('m5'):return jsonify({'error':'missing_image','detail':'M5 screenshot is required.'}),400
+        if not d.get('m5'):return jsonify({'error':'missing_image','detail':'One fresh M5 screenshot is required for hybrid mode.'}),400
         event_risk='HIGH' if d.get('event_risk') else 'NORMAL'
         mtf,data_status,data_note=fetch_multitimeframe(); metrics=mtf.get('M5',{}).get('metrics',{})
         mtf_metrics={tf:v.get('metrics',{}) for tf,v in mtf.items()}
-        context={'data_status':data_status,'data_note':data_note,'deterministic_metrics':metrics,'multi_timeframe_metrics':mtf_metrics,'event_risk':event_risk,'risk_budget':d.get('risk_budget'),'spread_cost':d.get('spread_cost'),'broker_specs':d.get('broker_specs'),'saved_htf_context':d.get('htf_context'),'setup_memory':d.get('setup_memory'),'automatic_event_status':'UNKNOWN_NO_CALENDAR_FEED','input_guidance':'H1/M15 visual context is preferably landscape; fresh M5 execution screenshot is preferably portrait. Evaluate BUY and SELL cases independently; H1/M15 are context, M5 is execution.'}
-        result=run_model([PROMPT,'SERVER CONTEXT JSON:\n'+json.dumps(context,separators=(',',':')),image_part(d['m5'])])
-        out=norm(result,metrics,data_status,event_risk); out['multi_timeframe_metrics']=mtf_metrics; return jsonify(out)
+        context={'data_status':data_status,'data_note':data_note,'deterministic_metrics':metrics,'multi_timeframe_metrics':mtf_metrics,'event_risk':event_risk,'risk_budget':d.get('risk_budget'),'spread_cost':d.get('spread_cost'),'broker_specs':d.get('broker_specs'),'setup_memory':d.get('setup_memory'),'automatic_event_status':'UNKNOWN_NO_CALENDAR_FEED','input_guidance':'H1/M15/M5 are fetched automatically from OHLC. The user supplies only one fresh M5 screenshot. Evaluate BUY and SELL cases independently; H1/M15 are context, M5 is execution.'}
+        try:
+            result=run_model([PROMPT,'SERVER CONTEXT JSON:\n'+json.dumps(context,separators=(',',':')),image_part(d['m5'])])
+            out=norm(result,metrics,data_status,event_risk); out['multi_timeframe_metrics']=mtf_metrics; out['mode']='HYBRID_OHLC_VISUAL'; out['gemini_status']='AVAILABLE'; return jsonify(out)
+        except Exception as ge:
+            text=str(ge); low=text.lower(); quota=('429' in text or 'resource_exhausted' in low or 'quota' in low)
+            if quota and data_status in ('LIVE_DATA','PARTIAL_DATA'):
+                return jsonify(data_only_result(mtf,data_status,data_note,'QUOTA_EXHAUSTED'))
+            raise
     except Exception as e:
         text=str(e);low=text.lower();quota=('429' in text or 'resource_exhausted' in low or 'quota' in low)
         return jsonify({'error':'quota' if quota else 'scan_failed','detail':text[:1200]}),429 if quota else 500
