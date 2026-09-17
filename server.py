@@ -1,4 +1,4 @@
-import os, json, base64, urllib.parse, urllib.request, statistics
+import os, json, base64, urllib.parse, urllib.request, statistics, time, csv, io
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify, send_from_directory
 from google import genai
@@ -181,41 +181,60 @@ def image_part(data_url):
     mime = header.split(';', 1)[0].replace('data:', '')
     return types.Part.from_bytes(data=base64.b64decode(body), mime_type=mime)
 
+# V30 FINAL: provider-rate protection. Cache is per Render worker and intentionally conservative.
+_DATA_CACHE = {}
+_CACHE_TTLS = {'5min':240, '15min':720, '1h':3000, 'price':60, 'DXY':720, 'FRED':21600, 'CFTC':43200, 'futures':720}
+
+def _cache_get(key, allow_stale=False):
+    item=_DATA_CACHE.get(key)
+    if not item:return None, None
+    age=max(0,time.time()-item['ts'])
+    if allow_stale or age<=item['ttl']:
+        return item['value'], round(age,1)
+    return None, round(age,1)
+
+def _cache_put(key, value, ttl):
+    _DATA_CACHE[key]={'value':value,'ts':time.time(),'ttl':ttl}
+    return value
+
+def _is_rate_error(text):
+    t=str(text).lower(); return '429' in t or 'too many requests' in t or 'rate limit' in t or 'credits' in t
+
 def fetch_tf(interval, outputsize):
     key=os.environ.get('TWELVE_DATA_API_KEY','').strip()
-    if not key: return None, 'SCREENSHOT_ONLY', 'TWELVE_DATA_API_KEY not configured'
+    if not key: return None, 'DATA_UNAVAILABLE', 'TWELVE_DATA_API_KEY not configured'
+    ck=f'xau:{interval}:{outputsize}'; cached,age=_cache_get(ck)
+    if cached is not None:return cached,'CACHED_DATA',f'Cached Twelve Data XAU/USD {interval} · cache age {age}s'
     q=urllib.parse.urlencode({'symbol':'XAU/USD','interval':interval,'outputsize':outputsize,'timezone':'UTC','apikey':key})
-    last_err=''
-    # One retry is allowed here because this is Twelve Data, not Gemini; it cannot consume Gemini quota.
-    for attempt in range(2):
-        try:
-            with urllib.request.urlopen('https://api.twelvedata.com/time_series?'+q, timeout=10) as resp:
-                d=json.loads(resp.read().decode())
-            vals=d.get('values') or []
-            if d.get('status')=='error':
-                last_err=d.get('message','Twelve Data error')
-                continue
-            if len(vals)<25:
-                last_err=f'Not enough candles ({len(vals)})'
-                continue
-            candles=[{'t':v['datetime'],'o':float(v['open']),'h':float(v['high']),'l':float(v['low']),'c':float(v['close']), **({'v':float(v['volume'])} if v.get('volume') not in (None,'') else {})} for v in reversed(vals)]
-            return candles,'LIVE_DATA',f'Twelve Data XAU/USD {interval}'
-        except Exception as e:
-            last_err=str(e)[:220]
-    return None,'DATA_UNAVAILABLE',last_err or 'Twelve Data request failed'
+    try:
+        with urllib.request.urlopen('https://api.twelvedata.com/time_series?'+q, timeout=10) as resp:d=json.loads(resp.read().decode())
+        if d.get('status')=='error':raise RuntimeError(d.get('message','Twelve Data error'))
+        vals=d.get('values') or []
+        if len(vals)<25:raise RuntimeError(f'Not enough candles ({len(vals)})')
+        candles=[{'t':v['datetime'],'o':float(v['open']),'h':float(v['high']),'l':float(v['low']),'c':float(v['close']), **({'v':float(v['volume'])} if v.get('volume') not in (None,'') else {})} for v in reversed(vals)]
+        _cache_put(ck,candles,_CACHE_TTLS.get(interval,300))
+        return candles,'LIVE_DATA',f'Twelve Data XAU/USD {interval}'
+    except Exception as e:
+        stale,stale_age=_cache_get(ck,allow_stale=True)
+        if stale is not None:return stale,'STALE_CACHE',f'Provider unavailable/rate-limited; using cached {interval} data · age {stale_age}s · {str(e)[:120]}'
+        return None,'DATA_UNAVAILABLE',str(e)[:220]
 
 def fetch_reference_price():
-    """Fetch a fresh provider reference price separately from M5 candle closes. This is not a broker execution quote."""
+    """Fresh provider reference when affordable; cached fallback prevents 429 storms."""
     key=os.environ.get('TWELVE_DATA_API_KEY','').strip()
     if not key:return None,'UNAVAILABLE','TWELVE_DATA_API_KEY not configured'
+    cached,age=_cache_get('xau:price')
+    if cached is not None:return cached,'CACHED_REFERENCE',f'Cached reference · age {age}s'
     q=urllib.parse.urlencode({'symbol':'XAU/USD','apikey':key})
     try:
-        with urllib.request.urlopen('https://api.twelvedata.com/price?'+q, timeout=10) as resp:
-            d=json.loads(resp.read().decode())
-        if d.get('status')=='error':return None,'UNAVAILABLE',d.get('message','Twelve Data price error')
-        price=float(d.get('price'))
+        with urllib.request.urlopen('https://api.twelvedata.com/price?'+q, timeout=10) as resp:d=json.loads(resp.read().decode())
+        if d.get('status')=='error':raise RuntimeError(d.get('message','Twelve Data price error'))
+        price=float(d.get('price')); _cache_put('xau:price',price,_CACHE_TTLS['price'])
         return price,'LIVE_REFERENCE','Twelve Data /price reference'
-    except Exception as e:return None,'UNAVAILABLE',str(e)[:220]
+    except Exception as e:
+        stale,stale_age=_cache_get('xau:price',allow_stale=True)
+        if stale is not None:return stale,'STALE_REFERENCE',f'Using cached reference · age {stale_age}s · {str(e)[:100]}'
+        return None,'UNAVAILABLE',str(e)[:220]
 
 def candle_age_minutes(candles):
     if not candles:return None
@@ -251,13 +270,13 @@ def fetch_multitimeframe():
     out={}; statuses=[]; notes=[]
     for tf,(interval,n) in specs.items():
         c,st,note=fetch_tf(interval,n); out[tf]={'candles':c,'status':st,'note':note,'metrics':analytics(c) if c else {}}; statuses.append(st); notes.append(tf+': '+note)
-    overall='LIVE_DATA' if all(x=='LIVE_DATA' for x in statuses) else 'PARTIAL_DATA' if any(x=='LIVE_DATA' for x in statuses) else statuses[0] if statuses else 'DATA_UNAVAILABLE'
-    if any(x=='LIVE_DATA' for x in statuses): enrich_mtf_candidates(out)
+    overall='LIVE_DATA' if all(x in ('LIVE_DATA','CACHED_DATA') for x in statuses) else 'PARTIAL_DATA' if any(x in ('LIVE_DATA','CACHED_DATA','STALE_CACHE') for x in statuses) else statuses[0] if statuses else 'DATA_UNAVAILABLE'
+    if any(x in ('LIVE_DATA','CACHED_DATA','STALE_CACHE') for x in statuses): enrich_mtf_candidates(out)
     ref,ref_status,ref_note=fetch_reference_price()
     if ref is not None: reanchor_candidates(out,ref)
     m5c=(out.get('M5') or {}).get('candles') or []
     age=candle_age_minutes(m5c)
-    out['_price_meta']={'reference_price':round(ref,3) if ref is not None else None,'reference_status':ref_status,'reference_note':ref_note,'latest_m5_time':m5c[-1]['t'] if m5c else None,'m5_feed_age_minutes':age,'m5_feed_stale':bool(age is not None and age>8)}
+    out['_price_meta']={'reference_price':round(ref,3) if ref is not None else None,'reference_status':ref_status,'reference_note':ref_note,'latest_m5_time':m5c[-1]['t'] if m5c else None,'m5_feed_age_minutes':age,'m5_feed_stale':bool(age is not None and age>8),'market_data_inactive':bool(age is not None and age>12),'market_data_note':'MARKET / DATA FEED INACTIVE — analysis uses last available closed candles; lifecycle resumes with fresh M5 data.' if age is not None and age>12 else 'Fresh M5 data available.'}
     return out,overall,' | '.join(notes)+' | PRICE: '+ref_note
 
 def analytics(c):
@@ -757,15 +776,21 @@ def _get_json(url, timeout=10):
 def fetch_twelve_symbol(symbol, interval='15min', outputsize=80):
     key=os.environ.get('TWELVE_DATA_API_KEY','').strip()
     if not key:return None,'UNAVAILABLE','TWELVE_DATA_API_KEY not configured'
+    ck=f'other:{symbol}:{interval}:{outputsize}'; cached,age=_cache_get(ck)
+    if cached is not None:return cached,'CACHED_DATA',f'Cached {symbol} {interval} · age {age}s'
     q=urllib.parse.urlencode({'symbol':symbol,'interval':interval,'outputsize':outputsize,'timezone':'UTC','apikey':key})
     try:
         d=_get_json('https://api.twelvedata.com/time_series?'+q)
-        if d.get('status')=='error':return None,'UNAVAILABLE',d.get('message','Twelve Data error')
+        if d.get('status')=='error':raise RuntimeError(d.get('message','Twelve Data error'))
         vals=d.get('values') or []
-        if len(vals)<12:return None,'UNAVAILABLE','Not enough observations'
-        c=[{'t':v['datetime'],'o':float(v['open']),'h':float(v['high']),'l':float(v['low']),'c':float(v['close'])} for v in reversed(vals)]
+        if len(vals)<12:raise RuntimeError('Not enough observations')
+        c=[{'t':v['datetime'],'o':float(v['open']),'h':float(v['high']),'l':float(v['low']),'c':float(v['close']), **({'v':float(v['volume'])} if v.get('volume') not in (None,'') else {})} for v in reversed(vals)]
+        _cache_put(ck,c,_CACHE_TTLS.get('futures' if symbol==os.environ.get('GOLD_FUTURES_SYMBOL','') else 'DXY',720))
         return c,'LIVE_DATA',f'Twelve Data {symbol} {interval}'
-    except Exception as e:return None,'UNAVAILABLE',str(e)[:180]
+    except Exception as e:
+        stale,sa=_cache_get(ck,allow_stale=True)
+        if stale is not None:return stale,'STALE_CACHE',f'Cached fallback {symbol} · age {sa}s'
+        return None,'UNAVAILABLE',str(e)[:180]
 
 def fetch_usd_context():
     # DXY is context only. If the provider/plan does not expose it, the scanner continues without it.
@@ -778,6 +803,8 @@ def fetch_usd_context():
     return {'status':'UNAVAILABLE','note':' | '.join(errors)}
 
 def fetch_fred_series(series_id):
+    cached,age=_cache_get('fred:'+series_id)
+    if cached is not None:return cached,None
     key=os.environ.get('FRED_API_KEY','').strip()
     if not key:return None,'FRED_API_KEY not configured'
     q=urllib.parse.urlencode({'series_id':series_id,'api_key':key,'file_type':'json','sort_order':'desc','limit':8})
@@ -787,8 +814,10 @@ def fetch_fred_series(series_id):
         for x in d.get('observations') or []:
             if x.get('value') not in (None,'.'):
                 obs.append({'date':x.get('date'),'value':float(x['value'])})
-        return obs,None
-    except Exception as e:return None,str(e)[:180]
+        _cache_put('fred:'+series_id,obs,_CACHE_TTLS['FRED']); return obs,None
+    except Exception as e:
+        stale,_=_cache_get('fred:'+series_id,allow_stale=True)
+        return (stale,None) if stale is not None else (None,str(e)[:180])
 
 def fetch_rates_context():
     # Daily macro context, not an intraday trigger. DGS2/DGS10 = nominal Treasury yields; DFII10 = 10Y real yield.
@@ -910,8 +939,34 @@ def fetch_optional_gold_futures():
     a=analytics(c)
     return {'status':'LIVE_DATA','symbol':sym,'price':c[-1]['c'],'structure':a.get('structure'),'momentum':a.get('momentum'),'pressure':a.get('current_pressure'),'note':note}
 
+def fetch_cftc_gold_positioning():
+    """Weekly CFTC disaggregated futures positioning. Context only; never an M5 trigger."""
+    cached,age=_cache_get('cftc:gold')
+    if cached is not None:return cached
+    url='https://www.cftc.gov/dea/newcot/f_disagg.txt'
+    try:
+        req=urllib.request.Request(url,headers={'User-Agent':'GoldScannerV30/1.0'})
+        with urllib.request.urlopen(req,timeout=12) as resp:text=resp.read().decode('utf-8-sig','replace')
+        rows=list(csv.DictReader(io.StringIO(text)))
+        row=next((r for r in rows if 'GOLD' in str(r.get('Market_and_Exchange_Names','')).upper() and ('COMMODITY EXCHANGE' in str(r.get('Market_and_Exchange_Names','')).upper() or str(r.get('CFTC_Contract_Market_Code','')).strip()=='088691')),None)
+        if not row:raise RuntimeError('Gold row not found in weekly CFTC report')
+        def num(*keys):
+            for k in keys:
+                if k in row and str(row[k]).strip():
+                    try:return float(str(row[k]).replace(',',''))
+                    except:pass
+            return None
+        long=num('M_Money_Positions_Long_All','M_Money_Positions_Long_Old')
+        short=num('M_Money_Positions_Short_All','M_Money_Positions_Short_Old')
+        net=(long-short) if long is not None and short is not None else None
+        out={'status':'LIVE_DATA','report_date':row.get('Report_Date_as_YYYY-MM-DD') or row.get('As_of_Date_In_Form_YYMMDD'),'managed_money_long':long,'managed_money_short':short,'managed_money_net':net,'bias':'NET_LONG' if net is not None and net>0 else 'NET_SHORT' if net is not None and net<0 else 'UNCLEAR','note':'Weekly CFTC positioning context; not an intraday trigger.'}
+        _cache_put('cftc:gold',out,_CACHE_TTLS['CFTC']); return out
+    except Exception as e:
+        stale,_=_cache_get('cftc:gold',allow_stale=True)
+        return stale if stale is not None else {'status':'UNAVAILABLE','note':str(e)[:180]}
+
 def build_market_context(mtf):
-    usd=fetch_usd_context(); rates=fetch_rates_context(); cal=fetch_calendar_context(); sessions=build_session_level_context(mtf); volreg=build_volatility_regime(mtf); volume=build_volume_context(mtf); futures=fetch_optional_gold_futures()
+    usd=fetch_usd_context(); rates=fetch_rates_context(); cal=fetch_calendar_context(); sessions=build_session_level_context(mtf); volreg=build_volatility_regime(mtf); volume=build_volume_context(mtf); futures=fetch_optional_gold_futures(); cftc=fetch_cftc_gold_positioning()
     m5=(mtf.get('M5') or {}).get('metrics') or {}; h1=(mtf.get('H1') or {}).get('metrics') or {}; m15=(mtf.get('M15') or {}).get('metrics') or {}
     bull=0; bear=0; reasons=[]
     um=str(usd.get('momentum') or '')
@@ -930,7 +985,7 @@ def build_market_context(mtf):
     if structs.count('HH_HL')>=2:tech='BULLISH'
     elif structs.count('LL_LH')>=2:tech='BEARISH'
     macro='BULLISH_GOLD' if bull>=bear+2 else 'BEARISH_GOLD' if bear>=bull+2 else 'MIXED'
-    return {'usd':usd,'rates':rates,'calendar':cal,'sessions':sessions,'volatility_regime':volreg,'volume_context':volume,'gold_futures':futures,'macro_bias':macro,'technical_alignment':tech,'bull_context_points':bull,'bear_context_points':bear,'reasons':reasons,'event_risk':cal.get('risk','UNKNOWN')}
+    return {'usd':usd,'rates':rates,'calendar':cal,'sessions':sessions,'volatility_regime':volreg,'volume_context':volume,'gold_futures':futures,'cftc_positioning':cftc,'macro_bias':macro,'technical_alignment':tech,'bull_context_points':bull,'bear_context_points':bear,'reasons':reasons,'event_risk':cal.get('risk','UNKNOWN')}
 
 def apply_market_context(mtf,ctx):
     """Context may rank/downweight existing zones; it never creates or moves a price zone."""
@@ -942,7 +997,7 @@ def apply_market_context(mtf,ctx):
             elif macro=='BEARISH_GOLD': adj=5 if side=='sell' else -4; why.append('macro context '+('supports' if side=='sell' else 'opposes'))
             if event=='HIGH': adj-=8; why.append('high-impact event window')
             elif event=='ELEVATED': adj-=4; why.append('event-risk window')
-            # V29: nearby established session/previous-day/week levels add only modest confluence.
+            # V30: nearby established session/previous-day/week levels add only modest confluence.
             sess=ctx.get('sessions') or {}; atr=float(m5.get('atr14') or 1); zmid=(float(z.get('low'))+float(z.get('high')))/2
             near=[q for q in (sess.get('nearest_levels') or []) if abs(float(q.get('price'))-zmid)<=max(0.35,0.25*atr)]
             if near: adj+=3; why.append('near session/previous-day/week liquidity: '+str(near[0].get('name')))
@@ -984,10 +1039,10 @@ def live_scan():
         out=data_only_result(mtf,data_status,data_note,'NOT_USED_LIVE_DATA_MODE')
         out['mode']='LIVE_DATA_CONTEXT'
         out['gemini_status']='NOT_USED'
-        out['scanner_version']='V29 MARKET INTELLIGENCE+'
+        out['scanner_version']='V30 FINAL TEST BUILD'
         out['market_context']=market_context
         out['event_risk']=market_context.get('event_risk','UNKNOWN')
-        out['data_only_summary']=out['data_only_summary'].replace('V26 maps','V29 maps')
+        out['data_only_summary']=out['data_only_summary'].replace('V26 maps','V30 maps')
         out['note']='Screenshot-free deterministic scan. Pullback Continuation and New Move Origin both run every scan. Session/previous-day/week liquidity, volatility regime, available volume, USD/rates and optional futures context can adjust ranking; none can invent or move technical zones.'
         return jsonify(out)
     except Exception as e:
@@ -1026,22 +1081,22 @@ def parse_zone(zone):
     return (min(nums[0],nums[1]),max(nums[0],nums[1]))
 
 def evaluate_setup(setup,candles):
-    """Deterministic journal outcome. This measures zone behavior, not profitability."""
-    out={'time':setup.get('time'),'price':setup.get('price'),'buy':'NO_ZONE','sell':'NO_ZONE'}
+    """Forward-test zone behavior including MFE/MAE. No profitability claim."""
+    out={'time':setup.get('time'),'price':setup.get('price'),'market_phase':setup.get('market_phase'),'volatility_regime':setup.get('volatility_regime'),'session':setup.get('session'),'buy':'NO_ZONE','sell':'NO_ZONE'}
     if not candles:return out
     for side in ('buy','sell'):
         z=setup.get(side) or {}; bounds=parse_zone(z.get('zone')) if isinstance(z,dict) else None
         if not bounds:continue
-        lo,hi=bounds; touched=any(x['l']<=hi and x['h']>=lo for x in candles)
-        if not touched:out[side]='NOT_TRIGGERED';continue
+        out[side+'_setup_type']=z.get('setup_type'); out[side+'_score']=z.get('score')
+        lo,hi=bounds; touch_i=next((i for i,x in enumerate(candles) if x['l']<=hi and x['h']>=lo),None)
+        if touch_i is None:out[side]='NOT_TRIGGERED';continue
+        post=candles[touch_i:]; mid=(lo+hi)/2
         if side=='buy':
-            invalid=any(x['c']<lo for x in candles); favorable=max(x['h']-hi for x in candles)
+            invalid=any(x['c']<lo for x in post); mfe=max(x['h']-mid for x in post); mae=max(mid-x['l'] for x in post)
         else:
-            invalid=any(x['c']>hi for x in candles); favorable=max(lo-x['l'] for x in candles)
-        if invalid: state='INVALIDATED'
-        elif favorable>0: state='REACTED'
-        else: state='TESTED'
-        out[side]=state; out[side+'_favorable_move']=round(max(0,favorable),2)
+            invalid=any(x['c']>hi for x in post); mfe=max(mid-x['l'] for x in post); mae=max(x['h']-mid for x in post)
+        out[side]='INVALIDATED' if invalid else 'REACTED' if mfe>0 else 'TESTED'
+        out[side+'_mfe']=round(max(0,mfe),3); out[side+'_mae']=round(max(0,mae),3)
     return out
 
 @app.post('/api/outcomes')
@@ -1060,7 +1115,23 @@ def outcomes():
         for r in results:
             for side in ('buy','sell'):
                 k=side.upper()+'_'+r[side];counts[k]=counts.get(k,0)+1
-        return jsonify({'status':'LIVE_DATA','note':'Deterministic M5 outcome tracking; zone behavior only, not win rate.','counts':counts,'outcomes':results})
+        
+        groups={}
+        for r in results:
+            for side in ('buy','sell'):
+                typ=r.get(side+'_setup_type')
+                if not typ:continue
+                g=groups.setdefault(typ,{'samples':0,'triggered':0,'reacted':0,'invalidated':0,'mfe':[],'mae':[]})
+                g['samples']+=1; state=r.get(side)
+                if state!='NOT_TRIGGERED':g['triggered']+=1
+                if state=='REACTED':g['reacted']+=1
+                if state=='INVALIDATED':g['invalidated']+=1
+                if r.get(side+'_mfe') is not None:g['mfe'].append(r[side+'_mfe'])
+                if r.get(side+'_mae') is not None:g['mae'].append(r[side+'_mae'])
+        summary={}
+        for k,g in groups.items():
+            summary[k]={'samples':g['samples'],'triggered':g['triggered'],'reacted':g['reacted'],'invalidated':g['invalidated'],'reaction_rate_of_triggered':round(100*g['reacted']/g['triggered'],1) if g['triggered'] else None,'avg_mfe':round(sum(g['mfe'])/len(g['mfe']),3) if g['mfe'] else None,'avg_mae':round(sum(g['mae'])/len(g['mae']),3) if g['mae'] else None}
+        return jsonify({'status':'LIVE_DATA','note':'Forward statistics measure zone behavior only; sample size matters and this is not a guaranteed win rate.','counts':counts,'by_setup_type':summary,'outcomes':results})
     except Exception as e:return jsonify({'error':'outcome_failed','detail':str(e)[:800]}),500
 
 @app.get('/api/replay')

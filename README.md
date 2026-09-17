@@ -1,35 +1,27 @@
-# Gold Scanner V29 Intelligence+
+# Gold Scanner V30 — Final Test Build
 
-Screenshot-free XAU/USD market scanner for Render.
+Final feature-frozen test build. Screenshot-free normal scanning.
 
-## Core scan
-- Twelve Data H1 + M15 + M5 OHLC and separate reference price
-- Deterministic Python structure: swings, HH/HL, LL/LH, BOS/CHoCH, FVG/imbalance, order blocks, supply/demand candidates, liquidity/sweeps, displacement, ATR/momentum, premium/discount, zone freshness/touches/consumption
-- Independent Pullback Continuation and New Move Origin engines
-- Allows NO QUALIFIED AREA instead of forcing a zone
+## Core
+- H1/M15/M5 deterministic XAU/USD structure, BOS/CHoCH, liquidity, sweeps, FVG/imbalance, OB/breakers, supply/demand, displacement, premium/discount, role flips, fake breaks/reclaims.
+- Independent Pullback Continuation and New Move Origin engines; no forced BUY/SELL area.
+- Session liquidity, previous day/week levels, volatility regime and provider volume when genuinely supplied.
+- Optional DXY, FRED Treasury/real-yield context and GOLD_FUTURES_SYMBOL.
+- Weekly CFTC managed-money positioning is fetched as slow context only; never an M5 trigger.
+- Manual high-impact event switch remains the preferred event workflow if no calendar key is configured.
 
-## V29 intelligence upgrades
-- Session intelligence: Asia, London, New York highs/lows and opening ranges
-- Previous-day high/low/open/close and previous-week high/low/open/close when present in the fetched sample
-- Nearest session/day/week liquidity levels and simple sweep/reclaim state
-- Historical M5 ATR percentile / volatility regime (LOW, NORMAL, HIGH, EXTREME)
-- Provider volume/tick-volume context when actually supplied; if absent, V29 says unavailable and does not invent volume
-- USD/DXY context where Twelve Data exposes it
-- FRED US 2Y, 10Y and 10Y real-yield context when `FRED_API_KEY` is configured
-- Optional gold-futures context via `GOLD_FUTURES_SYMBOL`; the scanner intentionally does not guess a provider symbol
-- Forward Test Lab remains on-device
+## V30 engineering / testing
+- Rate-limit protection: H1 ~50 min cache, M15 ~12 min, M5 ~4 min, reference price ~1 min; stale-cache fallback on provider errors/429.
+- DXY/futures/FRED/CFTC are cached separately to avoid wasting free API credits.
+- Market/data-feed inactive detection prevents old closed candles from looking live.
+- Forward-test lab stores frozen zones on-device and grades later zone behavior with NOT_TRIGGERED/TESTED/REACTED/INVALIDATED plus MFE/MAE and setup-type summaries.
+- Evidence score remains evidence/ranking, not probability.
 
-## Environment variables
-Required:
-- `TWELVE_DATA_API_KEY`
+## Render env vars
+Required: `TWELVE_DATA_API_KEY`
+Optional: `FRED_API_KEY`, `GOLD_FUTURES_SYMBOL`, `TRADING_ECONOMICS_KEY`, `GEMINI_API_KEY` (hybrid legacy endpoint only).
 
-Optional:
-- `FRED_API_KEY`
-- `TRADING_ECONOMICS_KEY` (only if you want automatic calendar data)
-- `GOLD_FUTURES_SYMBOL` (only if you have verified a gold-futures symbol supported by your Twelve Data plan)
+Build: `pip install -r requirements.txt`
+Start: `gunicorn server:app`
 
-## Important design rule
-Technical XAU/USD price structure creates zones. Session, macro, volatility, volume and futures context may modestly adjust ranking/caution but never invent or move a zone. Evidence scores are not win probabilities.
-
-Render build: `pip install -r requirements.txt`
-Render start: `gunicorn server:app`
+This is an analysis/forward-testing aid, not automated execution or a guarantee of profit.
