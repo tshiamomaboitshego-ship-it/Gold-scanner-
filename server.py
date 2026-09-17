@@ -747,6 +747,130 @@ def ohlc_test():
         return jsonify({'status':status,'gemini_used':False,'symbol':'XAU/USD','price_meta':mtf.get('_price_meta',{}),'timeframes':details,'note':note})
     except Exception as e:return jsonify({'error':'ohlc_test_failed','detail':str(e)[:900]}),500
 
+
+
+def _get_json(url, timeout=10):
+    req=urllib.request.Request(url, headers={'User-Agent':'GoldScannerV28/1.0'})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode())
+
+def fetch_twelve_symbol(symbol, interval='15min', outputsize=80):
+    key=os.environ.get('TWELVE_DATA_API_KEY','').strip()
+    if not key:return None,'UNAVAILABLE','TWELVE_DATA_API_KEY not configured'
+    q=urllib.parse.urlencode({'symbol':symbol,'interval':interval,'outputsize':outputsize,'timezone':'UTC','apikey':key})
+    try:
+        d=_get_json('https://api.twelvedata.com/time_series?'+q)
+        if d.get('status')=='error':return None,'UNAVAILABLE',d.get('message','Twelve Data error')
+        vals=d.get('values') or []
+        if len(vals)<12:return None,'UNAVAILABLE','Not enough observations'
+        c=[{'t':v['datetime'],'o':float(v['open']),'h':float(v['high']),'l':float(v['low']),'c':float(v['close'])} for v in reversed(vals)]
+        return c,'LIVE_DATA',f'Twelve Data {symbol} {interval}'
+    except Exception as e:return None,'UNAVAILABLE',str(e)[:180]
+
+def fetch_usd_context():
+    # DXY is context only. If the provider/plan does not expose it, the scanner continues without it.
+    errors=[]
+    for sym in ('DXY','USDX'):
+        c,st,note=fetch_twelve_symbol(sym,'15min',80)
+        if c:
+            a=analytics(c); return {'status':'LIVE_DATA','symbol':sym,'price':c[-1]['c'],'structure':a.get('structure'),'momentum':a.get('momentum'),'pressure':a.get('current_pressure'),'move_5':a.get('recent_5bar_move'),'note':note}
+        errors.append(sym+': '+note)
+    return {'status':'UNAVAILABLE','note':' | '.join(errors)}
+
+def fetch_fred_series(series_id):
+    key=os.environ.get('FRED_API_KEY','').strip()
+    if not key:return None,'FRED_API_KEY not configured'
+    q=urllib.parse.urlencode({'series_id':series_id,'api_key':key,'file_type':'json','sort_order':'desc','limit':8})
+    try:
+        d=_get_json('https://api.stlouisfed.org/fred/series/observations?'+q)
+        obs=[]
+        for x in d.get('observations') or []:
+            if x.get('value') not in (None,'.'):
+                obs.append({'date':x.get('date'),'value':float(x['value'])})
+        return obs,None
+    except Exception as e:return None,str(e)[:180]
+
+def fetch_rates_context():
+    # Daily macro context, not an intraday trigger. DGS2/DGS10 = nominal Treasury yields; DFII10 = 10Y real yield.
+    out={'status':'UNAVAILABLE','series':{}}
+    if not os.environ.get('FRED_API_KEY','').strip():
+        out['note']='Optional FRED_API_KEY not configured'; return out
+    for sid,label in [('DGS2','US_2Y'),('DGS10','US_10Y'),('DFII10','US_10Y_REAL')]:
+        obs,err=fetch_fred_series(sid)
+        if obs:
+            latest=obs[0]; prior=obs[min(1,len(obs)-1)]
+            out['series'][label]={'value':latest['value'],'date':latest['date'],'change':round(latest['value']-prior['value'],4)}
+        else: out['series'][label]={'error':err}
+    if any('value' in x for x in out['series'].values()):out['status']='LIVE_DATA'
+    out['note']='FRED daily macro context; not an intraday execution quote.'
+    return out
+
+def fetch_calendar_context():
+    key=os.environ.get('TRADING_ECONOMICS_KEY','').strip()
+    if not key:return {'status':'UNAVAILABLE','risk':'UNKNOWN','events':[],'note':'Optional TRADING_ECONOMICS_KEY not configured'}
+    now=datetime.now(timezone.utc); start=now.strftime('%Y-%m-%d'); end=(now+__import__('datetime').timedelta(days=1)).strftime('%Y-%m-%d')
+    # Trading Economics documents /calendar/country/{country}/{from}/{to}. c accepts account credentials/key.
+    url='https://api.tradingeconomics.com/calendar/country/united%20states/'+start+'/'+end+'?'+urllib.parse.urlencode({'c':key})
+    try:
+        d=_get_json(url)
+        if not isinstance(d,list):return {'status':'UNAVAILABLE','risk':'UNKNOWN','events':[],'note':'Unexpected calendar response'}
+        events=[]
+        for e in d:
+            imp=int(e.get('Importance') or 0)
+            name=str(e.get('Event') or e.get('Category') or '')
+            # Keep high-impact plus the most gold-sensitive medium events.
+            important=imp>=3 or any(k in name.lower() for k in ('fed','fomc','powell','inflation','cpi','pce','payroll','non farm','unemployment','ppi','gdp','retail sales'))
+            if not important:continue
+            raw=e.get('Date') or e.get('date')
+            try:
+                dt=datetime.fromisoformat(str(raw).replace('Z','+00:00'))
+                if dt.tzinfo is None:dt=dt.replace(tzinfo=timezone.utc)
+                mins=round((dt-now).total_seconds()/60)
+            except Exception:mins=None
+            events.append({'event':name,'importance':imp,'time':raw,'minutes_from_now':mins,'actual':e.get('Actual'),'forecast':e.get('Forecast'),'previous':e.get('Previous')})
+        near=[x for x in events if x['minutes_from_now'] is not None and -30<=x['minutes_from_now']<=60]
+        risk='HIGH' if any(x['importance']>=3 for x in near) else 'ELEVATED' if near else 'NORMAL'
+        return {'status':'LIVE_DATA','risk':risk,'events':events[:12],'near_events':near[:6],'note':'US economic calendar context'}
+    except Exception as e:return {'status':'UNAVAILABLE','risk':'UNKNOWN','events':[],'note':str(e)[:180]}
+
+def build_market_context(mtf):
+    usd=fetch_usd_context(); rates=fetch_rates_context(); cal=fetch_calendar_context()
+    m5=(mtf.get('M5') or {}).get('metrics') or {}; h1=(mtf.get('H1') or {}).get('metrics') or {}; m15=(mtf.get('M15') or {}).get('metrics') or {}
+    bull=0; bear=0; reasons=[]
+    um=str(usd.get('momentum') or '')
+    if um.startswith('BULLISH'): bear+=2; reasons.append('USD momentum is firm (gold headwind context)')
+    elif um.startswith('BEARISH'): bull+=2; reasons.append('USD momentum is soft (gold tailwind context)')
+    r10=(rates.get('series') or {}).get('US_10Y',{}).get('change')
+    rr=(rates.get('series') or {}).get('US_10Y_REAL',{}).get('change')
+    if isinstance(r10,(int,float)):
+        if r10>0:bear+=1; reasons.append('10Y yield latest daily observation increased')
+        elif r10<0:bull+=1; reasons.append('10Y yield latest daily observation decreased')
+    if isinstance(rr,(int,float)):
+        if rr>0:bear+=1; reasons.append('10Y real yield latest daily observation increased')
+        elif rr<0:bull+=1; reasons.append('10Y real yield latest daily observation decreased')
+    tech='MIXED'
+    structs=[h1.get('structure'),m15.get('structure'),m5.get('structure')]
+    if structs.count('HH_HL')>=2:tech='BULLISH'
+    elif structs.count('LL_LH')>=2:tech='BEARISH'
+    macro='BULLISH_GOLD' if bull>=bear+2 else 'BEARISH_GOLD' if bear>=bull+2 else 'MIXED'
+    return {'usd':usd,'rates':rates,'calendar':cal,'macro_bias':macro,'technical_alignment':tech,'bull_context_points':bull,'bear_context_points':bear,'reasons':reasons,'event_risk':cal.get('risk','UNKNOWN')}
+
+def apply_market_context(mtf,ctx):
+    """Context may rank/downweight existing zones; it never creates or moves a price zone."""
+    m5=(mtf.get('M5') or {}).get('metrics') or {}; macro=ctx.get('macro_bias','MIXED'); event=ctx.get('event_risk','UNKNOWN')
+    for side in ('buy','sell'):
+        for z in ((m5.get('candidate_zones') or {}).get(side) or []):
+            adj=0; why=[]
+            if macro=='BULLISH_GOLD': adj=5 if side=='buy' else -4; why.append('macro context '+('supports' if side=='buy' else 'opposes'))
+            elif macro=='BEARISH_GOLD': adj=5 if side=='sell' else -4; why.append('macro context '+('supports' if side=='sell' else 'opposes'))
+            if event=='HIGH': adj-=8; why.append('high-impact event window')
+            elif event=='ELEVATED': adj-=4; why.append('event-risk window')
+            base=int(z.get('opportunity_score') or z.get('rank_score') or 0)
+            z['pre_context_score']=base; z['context_adjustment']=adj; z['context_reasons']=why; z['opportunity_score']=max(0,min(100,base+adj))
+        ((m5.get('candidate_zones') or {}).get(side) or []).sort(key=lambda x:(x.get('opportunity_score',0),x.get('rank_score',0)),reverse=True)
+    m5['market_context']=ctx
+
+
 def data_only_result(mtf,data_status,data_note,why='Gemini visual check unavailable'):
     m5=mtf.get('M5',{}).get('metrics',{}); m15=mtf.get('M15',{}).get('metrics',{}); h1=mtf.get('H1',{}).get('metrics',{})
     def top(side):
@@ -772,12 +896,16 @@ def live_scan():
         mtf,data_status,data_note=fetch_multitimeframe()
         if data_status not in ('LIVE_DATA','PARTIAL_DATA'):
             return jsonify({'error':'market_data_unavailable','detail':data_note}),503
+        market_context=build_market_context(mtf)
+        apply_market_context(mtf,market_context)
         out=data_only_result(mtf,data_status,data_note,'NOT_USED_LIVE_DATA_MODE')
-        out['mode']='LIVE_DATA_ONLY'
+        out['mode']='LIVE_DATA_CONTEXT'
         out['gemini_status']='NOT_USED'
-        out['scanner_version']='V27 LIVE'
-        out['data_only_summary']=out['data_only_summary'].replace('V26 maps','V27 LIVE maps')
-        out['note']='Screenshot-free deterministic scan. Pullback continuation and new-move-origin engines both run on every scan; no zone is forced when evidence is insufficient.'
+        out['scanner_version']='V28 MARKET INTELLIGENCE'
+        out['market_context']=market_context
+        out['event_risk']=market_context.get('event_risk','UNKNOWN')
+        out['data_only_summary']=out['data_only_summary'].replace('V26 maps','V28 maps')
+        out['note']='Screenshot-free deterministic scan. Pullback Continuation and New Move Origin both run every scan. Macro/calendar data only adjusts context/ranking; it never invents or moves technical zones.'
         return jsonify(out)
     except Exception as e:
         return jsonify({'error':'live_scan_failed','detail':str(e)[:1200]}),500
