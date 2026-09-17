@@ -1,23 +1,23 @@
-# Gold Scanner V20 — Testing & State Engine
+# Gold Scanner V21 — Price-Action Confluence Engine
 
-V20 keeps V19 protection and adds a measurement layer instead of piling on indicators.
+V21 keeps V20 testing/protection and adds deterministic price-action confluence:
 
-## New in V20
-- Closed-candle deterministic diagnostics.
-- Reaction-quality and wick-rejection metrics.
-- Persistent setup memory/journal (last 100 scans).
-- Deterministic zone outcome tracker: NOT_TRIGGERED / TESTED / REACTED / INVALIDATED.
-- Outcome tracking filters OHLC to candles after each saved prediction timestamp.
-- Quota-free recent M5 replay diagnostics for pressure, phase, structure and shock states.
-- Phone testing-lab controls in the UI.
-- Existing V19 shock, approach-speed, chase, HTF refresh, AI/data conflict, zone lifecycle and evidence decomposition retained.
+- order-block / breaker-block heuristic
+- FVG quality + fill-state tracking
+- liquidity sweep → structure → FVG sequence recognition
+- premium / equilibrium / discount context
+- internal vs external liquidity
+- cautious inducement context through Gemini (only when clear)
+- session highs/lows + simple London/New York opening ranges from OHLC
+- closed-candle body acceptance vs wick sweep/reclaim
+- confluence clustering with supporting and opposing evidence
+- V20 setup tracking, outcome checks and deterministic replay retained
 
-## Important limitations
-- Outcome tracking measures zone behavior, not trade profitability or win probability.
-- Replay currently validates deterministic market-state logic; it is not yet a full historical Gemini screenshot replay or a profit backtest.
-- Automatic economic-calendar integration is NOT included. Manual event mode + volatility-shock protection remain.
-- Deep OHLC and testing lab require `TWELVE_DATA_API_KEY`.
-- Gemini analysis requires `GEMINI_API_KEY`.
+These are evidence features, not guaranteed signals. V21 deliberately avoids treating a single FVG, order block, liquidity level, premium/discount state, or session level as an automatic BUY/SELL rule.
 
-## Deploy
-Put all files at the GitHub repository root. Render build: `pip install -r requirements.txt`. Start: `gunicorn server:app`.
+## Environment
+- GEMINI_API_KEY required for screenshot analysis.
+- GEMINI_MODEL optional; defaults to gemini-3.6-flash.
+- TWELVE_DATA_API_KEY strongly recommended for deterministic M5/M15/H1 OHLC features.
+
+Automatic economic-calendar integration is still not included; use the manual high-impact-event switch. Volatility-shock protection remains active when OHLC is connected.

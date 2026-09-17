@@ -6,7 +6,7 @@ from google.genai import types
 app = Flask(__name__, static_folder='.', static_url_path='')
 
 PROMPT = r'''
-You are Gold Scanner V20, a conservative XAUUSD M5 HYBRID PULLBACK + CONFIRMATION ANALYST.
+You are Gold Scanner V21, a conservative XAUUSD M5 HYBRID PULLBACK + CONFIRMATION ANALYST.
 You receive ONE current M5 screenshot plus optional deterministic M5 market-data metrics and optional SAVED H1/M15 context. Use saved higher-timeframe context internally as confluence/context, but M5 remains the execution timeframe. H1/M15 must NOT automatically veto a valid M5 setup.
 Never issue BUY NOW / SELL NOW. Never promise profit, accuracy, or a reversal.
 
@@ -68,6 +68,18 @@ V18 MULTI-TIMEFRAME ARCHITECTURE:
 - H1 and M15 screenshots are preferably LANDSCAPE to maximize broad historical context. The fresh M5 screenshot is preferably PORTRAIT so newest execution candles, wicks, rejection and local structure are larger and easier to inspect. Do not penalize other orientations; deep OHLC data should reduce dependence on screenshot field-of-view.
 - Saved H1/M15 screenshot context is supplementary. If live higher-timeframe OHLC materially conflicts with saved screenshot context, reduce reliance on saved context and request refresh in m5_description, but still complete the M5 analysis.
 
+V21 PRICE-ACTION CONFLUENCE RULES:
+- Use deterministic order_blocks as evidence only. FRESH/MITIGATED blocks can support a zone; BREAKER means the original block failed and may act as flipped context. Never treat every opposite candle as an order block.
+- Use fvg_quality rather than raw FVG presence. Prefer fresh/unfilled, displacement-aligned imbalances; filled/old FVGs carry little weight.
+- Recognize sequences, not isolated labels: liquidity sweep/reclaim -> displacement -> BOS/CHoCH -> FVG -> retracement is stronger evidence than any single component.
+- premium_discount is location context only. Discount is not automatically bullish and premium is not automatically bearish.
+- Distinguish external_liquidity from internal_liquidity. Liquidity levels are objectives/context, not guaranteed stop hunts.
+- Use session_liquidity/opening ranges descriptively. Session levels never force a direction.
+- body_acceptance is more important than a single wick: repeated closed-candle acceptance through structure weakens/invalidate opposing zones; wick sweep + reclaim is different.
+- confluence_cluster must explain supporting AND opposing evidence. Do not inflate confidence by double-counting correlated concepts.
+- inducement is only a POSSIBLE label when a clear minor internal swing sits between current price and a more important external liquidity/HTF objective. If uncertain say NONE.
+- Keep the final zone map uncluttered: these concepts improve zone selection/confirmation, not the number of zones shown.
+
 Return JSON only:
 {
  "current_price": null,
@@ -88,6 +100,14 @@ Return JSON only:
  "m5_description":"short factual description",
  "buy_pullback":{"zone":null,"freshness":"FRESH|NONE","zone_lifecycle":"FRESH|TESTING|REACTED|RETESTED|CONSUMED|INVALIDATED|EXPIRED|NONE","score":0,"score_components":{"freshness":0,"move_away":0,"structure":0,"touches":0,"proximity":0,"invalidation":0,"momentum":0,"data_agreement":0},"quality":"WEAK|MODERATE|STRONG|VERY_STRONG|NONE","reason":"","confirmation_state":"NO_ZONE|WAIT|TESTING|REJECTION_DETECTED|CONFIRMATION_DEVELOPING|CURRENT_CONFIRMATION|HISTORICAL_REACTION|INVALIDATED","confirmation":"","invalidation":""},
  "sell_pullback":{"zone":null,"freshness":"FRESH|NONE","zone_lifecycle":"FRESH|TESTING|REACTED|RETESTED|CONSUMED|INVALIDATED|EXPIRED|NONE","score":0,"score_components":{"freshness":0,"move_away":0,"structure":0,"touches":0,"proximity":0,"invalidation":0,"momentum":0,"data_agreement":0},"quality":"WEAK|MODERATE|STRONG|VERY_STRONG|NONE","reason":"","confirmation_state":"NO_ZONE|WAIT|TESTING|REJECTION_DETECTED|CONFIRMATION_DEVELOPING|CURRENT_CONFIRMATION|HISTORICAL_REACTION|INVALIDATED","confirmation":"","invalidation":""},
+ "confluence_summary":"short sequence-based summary including supporting and opposing evidence",
+ "order_block_context":"short factual note or none",
+ "fvg_quality_context":"short factual note or none",
+ "premium_discount_context":"PREMIUM|EQUILIBRIUM|DISCOUNT|UNCLEAR plus short note",
+ "liquidity_sweep_context":"short factual note or none",
+ "inducement_context":"possible minor inducement level or NONE",
+ "session_liquidity_context":"short factual note or none",
+ "body_acceptance_context":"short factual note or none",
  "liquidity_context":"short factual note or none",
  "break_retest_context":"short factual note or none",
  "role_flip_context":"short factual note or none",
@@ -105,7 +125,7 @@ Return JSON only:
 '''
 
 HTF_PROMPT = r'''
-You are Gold Scanner V20 higher-timeframe context extractor. You receive ONE XAUUSD chart screenshot whose timeframe is explicitly H1 or M15. Extract compact context for later M5 analysis. Do not give entries, trade directions, targets, or predictions. Newest/right-edge candles matter most.
+You are Gold Scanner V21 higher-timeframe context extractor. You receive ONE XAUUSD chart screenshot whose timeframe is explicitly H1 or M15. Extract compact context for later M5 analysis. Do not give entries, trade directions, targets, or predictions. Newest/right-edge candles matter most.
 V18 MULTI-TIMEFRAME ARCHITECTURE:
 - multi_timeframe_metrics contains deterministic M5, M15 and H1 calculations from deeper OHLC history when LIVE/PARTIAL data is available. Use it even if screenshot zoom hides older structure.
 - H1 = broad context and major zones; M15 = intermediate context; M5 = execution. Higher timeframes add evidence but never automatically force direction.
@@ -232,7 +252,108 @@ def analytics(c):
     bull=sum(1 for x in recent if x['c']>x['o']); bear=sum(1 for x in recent if x['c']<x['o'])
     wick_reject='LOWER' if (last['c']-last['l']) > 1.4*abs(last['c']-last['o']) else 'UPPER' if (last['h']-last['c']) > 1.4*abs(last['c']-last['o']) else 'NONE'
     reaction_quality='STRONG' if abs(move3_atr)>=1.8 and max(bull,bear)>=4 else 'MODERATE' if abs(move3_atr)>=0.8 and max(bull,bear)>=3 else 'WEAK'
-    return {'closed_candle_engine':True,'reaction_quality':reaction_quality,'latest_wick_rejection':wick_reject,'recent_bull_candles':bull,'recent_bear_candles':bear,'data_current_price':round(last['c'],3),'atr14':round(atr,3),'structure':structure,'structure_event':event,'momentum':mom,'volatility':vol,'current_pressure':pressure,'market_phase':phase,'shock_detector':shock,'last_candle_range_atr':round(range_atr,2),'last_candle_body_atr':round(body_atr,2),'approach_speed':speed,'move_3bar_atr':round(move3_atr,2),'last_swing_highs':[round(x[1],2) for x in swings_hi[-3:]],'last_swing_lows':[round(x[1],2) for x in swings_lo[-3:]],'equal_highs':eqh[-2:],'equal_lows':eql[-2:],'recent_5bar_move':round(move,3),'avg_body_5':round(avg_body,3),'displacement':displacement,'recent_fvgs':fvgs[-4:],'session_utc':session,'extension_atr_5bar':extension_atr,'chase_risk':chase_risk,'latest_closed_candles':c[-12:]}
+
+    # V21 price-action confluence engine. These are deterministic evidence features, not trade signals.
+    # FVG quality: freshness/fill state + displacement alignment.
+    quality_fvgs=[]
+    for g in fvgs[-8:]:
+        lo,hi=g['low'],g['high']; age=g['age_bars']; created_idx=max(0,len(c)-1-age)
+        after=c[created_idx+1:] if created_idx+1<len(c) else []
+        touched=any(x['l']<=hi and x['h']>=lo for x in after)
+        fully=any(x['l']<=lo and x['h']>=hi for x in after)
+        state='FILLED' if fully else 'PARTIAL_OR_TOUCHED' if touched else 'FRESH'
+        aligned=(g['type']=='BULLISH_FVG' and displacement=='BULLISH') or (g['type']=='BEARISH_FVG' and displacement=='BEARISH')
+        q='HIGH' if state=='FRESH' and aligned and age<=12 else 'MEDIUM' if state!='FILLED' and age<=24 else 'LOW'
+        quality_fvgs.append({**g,'fill_state':state,'quality':q})
+
+    # Order-block heuristic: last opposite candle before a >=1.5 ATR 3-candle displacement.
+    order_blocks=[]
+    start=max(3,len(c)-45)
+    for i in range(start,len(c)-2):
+        end=c[i+2]; move_seq=end['c']-c[i]['o']
+        if abs(move_seq) < 1.5*(atr or 1): continue
+        direction_ob='BULLISH_OB' if move_seq>0 else 'BEARISH_OB'
+        for j in range(i-1,max(-1,i-5),-1):
+            x=c[j]; opposite=(direction_ob=='BULLISH_OB' and x['c']<x['o']) or (direction_ob=='BEARISH_OB' and x['c']>x['o'])
+            if opposite:
+                lo=min(x['o'],x['c'],x['l']); hi=max(x['o'],x['c'],x['h'])
+                later=c[j+1:]
+                invalid=any(y['c']<lo for y in later) if direction_ob=='BULLISH_OB' else any(y['c']>hi for y in later)
+                touches=sum(1 for y in later if y['l']<=hi and y['h']>=lo)
+                state='BREAKER' if invalid else 'FRESH' if touches<=1 else 'MITIGATED'
+                order_blocks.append({'type':direction_ob,'low':round(lo,2),'high':round(hi,2),'state':state,'touches':touches,'age_bars':len(c)-1-j})
+                break
+    # Deduplicate nearby blocks and keep recent ones.
+    obs=[]
+    for ob in reversed(order_blocks):
+        if not any(x['type']==ob['type'] and abs(x['low']-ob['low'])<=max(.2,atr*.12) for x in obs): obs.append(ob)
+        if len(obs)>=4: break
+    obs=list(reversed(obs))
+
+    # Premium/discount from latest meaningful swing range.
+    range_hi=swings_hi[-1][1] if swings_hi else max(x['h'] for x in c[-40:])
+    range_lo=swings_lo[-1][1] if swings_lo else min(x['l'] for x in c[-40:])
+    if range_hi<=range_lo:
+        range_hi=max(x['h'] for x in c[-40:]); range_lo=min(x['l'] for x in c[-40:])
+    equilibrium=(range_hi+range_lo)/2
+    pd='PREMIUM' if last['c']>equilibrium+0.1*(range_hi-range_lo) else 'DISCOUNT' if last['c']<equilibrium-0.1*(range_hi-range_lo) else 'EQUILIBRIUM'
+
+    # External liquidity = latest major swing extremes; internal liquidity = equal levels / minor recent swings inside range.
+    external_liq={'above':round(range_hi,2),'below':round(range_lo,2)}
+    internal_liq={'equal_highs':eqh[-2:],'equal_lows':eql[-2:],'minor_highs':[round(x[1],2) for x in swings_hi[-3:-1]],'minor_lows':[round(x[1],2) for x in swings_lo[-3:-1]]}
+
+    # Sweep/reclaim classification on closed candles.
+    sweep='NONE'
+    if len(c)>=3:
+        prior_h=max(x['h'] for x in c[-12:-1]); prior_l=min(x['l'] for x in c[-12:-1])
+        if last['h']>prior_h and last['c']<prior_h: sweep='BUY_SIDE_SWEEP_RECLAIM_DOWN'
+        elif last['l']<prior_l and last['c']>prior_l: sweep='SELL_SIDE_SWEEP_RECLAIM_UP'
+
+    # Candle-body acceptance versus wick rejection around the latest swing boundary.
+    acceptance='NONE'
+    if swings_hi and sum(1 for x in c[-3:] if x['c']>swings_hi[-1][1])>=2: acceptance='ACCEPTED_ABOVE_SWING'
+    elif swings_lo and sum(1 for x in c[-3:] if x['c']<swings_lo[-1][1])>=2: acceptance='ACCEPTED_BELOW_SWING'
+    elif sweep!='NONE': acceptance='WICK_SWEEP_RECLAIM'
+
+    # Session liquidity and simple opening ranges from the latest UTC date in the feed.
+    def hour_of(x):
+        try:return int(str(x['t']).split(' ')[1].split(':')[0])
+        except:return None
+    latest_day=str(last['t']).split(' ')[0]
+    day=[x for x in c if str(x['t']).startswith(latest_day)]
+    def window(a,b):
+        xs=[x for x in day if hour_of(x) is not None and a<=hour_of(x)<b]
+        return {'high':round(max(x['h'] for x in xs),2),'low':round(min(x['l'] for x in xs),2)} if xs else None
+    session_liq={'asia':window(0,7),'london':window(7,12),'new_york':window(12,21),'london_opening_range':window(7,8),'ny_opening_range':window(12,13)}
+
+    # Sequence recognition: sweep -> displacement/structure event -> nearby FVG.
+    sequence='NONE'
+    recent_high_q=any(g['type']=='BULLISH_FVG' and g.get('quality') in ('HIGH','MEDIUM') for g in quality_fvgs[-4:])
+    recent_low_q=any(g['type']=='BEARISH_FVG' and g.get('quality') in ('HIGH','MEDIUM') for g in quality_fvgs[-4:])
+    if sweep=='SELL_SIDE_SWEEP_RECLAIM_UP' and event in ('BULLISH_BOS','BULLISH_CHOCH') and recent_high_q: sequence='BULLISH_SWEEP_STRUCTURE_FVG'
+    elif sweep=='BUY_SIDE_SWEEP_RECLAIM_DOWN' and event in ('BEARISH_BOS','BEARISH_CHOCH') and recent_low_q: sequence='BEARISH_SWEEP_STRUCTURE_FVG'
+    elif event in ('BULLISH_BOS','BULLISH_CHOCH') and recent_high_q: sequence='BULLISH_STRUCTURE_FVG'
+    elif event in ('BEARISH_BOS','BEARISH_CHOCH') and recent_low_q: sequence='BEARISH_STRUCTURE_FVG'
+
+    # Confluence clustering: transparent evidence count, not probability.
+    bull_factors=[]; bear_factors=[]
+    if structure=='HH_HL': bull_factors.append('HH/HL structure')
+    if structure=='LL_LH': bear_factors.append('LL/LH structure')
+    if event in ('BULLISH_BOS','BULLISH_CHOCH'): bull_factors.append(event)
+    if event in ('BEARISH_BOS','BEARISH_CHOCH'): bear_factors.append(event)
+    if mom.startswith('BULLISH'): bull_factors.append('bullish momentum')
+    if mom.startswith('BEARISH'): bear_factors.append('bearish momentum')
+    if sweep=='SELL_SIDE_SWEEP_RECLAIM_UP': bull_factors.append('sell-side sweep/reclaim')
+    if sweep=='BUY_SIDE_SWEEP_RECLAIM_DOWN': bear_factors.append('buy-side sweep/reclaim')
+    if any(g['type']=='BULLISH_FVG' and g['quality']=='HIGH' for g in quality_fvgs): bull_factors.append('high-quality bullish FVG')
+    if any(g['type']=='BEARISH_FVG' and g['quality']=='HIGH' for g in quality_fvgs): bear_factors.append('high-quality bearish FVG')
+    if any(o['type']=='BULLISH_OB' and o['state']!='BREAKER' for o in obs): bull_factors.append('active bullish order block')
+    if any(o['type']=='BEARISH_OB' and o['state']!='BREAKER' for o in obs): bear_factors.append('active bearish order block')
+    if pd=='DISCOUNT': bull_factors.append('discount location')
+    if pd=='PREMIUM': bear_factors.append('premium location')
+    confluence={'bullish':bull_factors,'bearish':bear_factors,'bullish_count':len(bull_factors),'bearish_count':len(bear_factors),'sequence':sequence}
+
+    return {'closed_candle_engine':True,'reaction_quality':reaction_quality,'latest_wick_rejection':wick_reject,'recent_bull_candles':bull,'recent_bear_candles':bear,'data_current_price':round(last['c'],3),'atr14':round(atr,3),'structure':structure,'structure_event':event,'momentum':mom,'volatility':vol,'current_pressure':pressure,'market_phase':phase,'shock_detector':shock,'last_candle_range_atr':round(range_atr,2),'last_candle_body_atr':round(body_atr,2),'approach_speed':speed,'move_3bar_atr':round(move3_atr,2),'last_swing_highs':[round(x[1],2) for x in swings_hi[-3:]],'last_swing_lows':[round(x[1],2) for x in swings_lo[-3:]],'equal_highs':eqh[-2:],'equal_lows':eql[-2:],'recent_5bar_move':round(move,3),'avg_body_5':round(avg_body,3),'displacement':displacement,'recent_fvgs':fvgs[-4:],'session_utc':session,'extension_atr_5bar':extension_atr,'chase_risk':chase_risk,'fvg_quality':quality_fvgs[-6:],'order_blocks':obs,'premium_discount':{'state':pd,'range_low':round(range_lo,2),'equilibrium':round(equilibrium,2),'range_high':round(range_hi,2)},'external_liquidity':external_liq,'internal_liquidity':internal_liq,'liquidity_sweep':sweep,'body_acceptance':acceptance,'session_liquidity':session_liq,'price_action_sequence':sequence,'confluence_cluster':confluence,'latest_closed_candles':c[-12:]}
 
 def run_model(contents):
     client=genai.Client(api_key=os.environ['GEMINI_API_KEY'])
