@@ -764,6 +764,24 @@ def data_only_result(mtf,data_status,data_note,why='Gemini visual check unavaila
       'note':'Data-only analysis aid. Ahead-of-price watch areas are deterministic evidence locations, not predictions or guaranteed reversal points.'
     }
 
+
+@app.route('/api/live-scan', methods=['GET','POST'])
+def live_scan():
+    """Screenshot-free live XAU/USD scan. Twelve Data + deterministic Python only; zero Gemini calls."""
+    try:
+        mtf,data_status,data_note=fetch_multitimeframe()
+        if data_status not in ('LIVE_DATA','PARTIAL_DATA'):
+            return jsonify({'error':'market_data_unavailable','detail':data_note}),503
+        out=data_only_result(mtf,data_status,data_note,'NOT_USED_LIVE_DATA_MODE')
+        out['mode']='LIVE_DATA_ONLY'
+        out['gemini_status']='NOT_USED'
+        out['scanner_version']='V27 LIVE'
+        out['data_only_summary']=out['data_only_summary'].replace('V26 maps','V27 LIVE maps')
+        out['note']='Screenshot-free deterministic scan. Pullback continuation and new-move-origin engines both run on every scan; no zone is forced when evidence is insufficient.'
+        return jsonify(out)
+    except Exception as e:
+        return jsonify({'error':'live_scan_failed','detail':str(e)[:1200]}),500
+
 @app.post('/api/scan')
 def scan():
     try:

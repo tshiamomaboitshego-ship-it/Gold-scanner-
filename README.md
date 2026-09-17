@@ -1,13 +1,20 @@
-# Gold Scanner V26.2 — Dual Opportunity Engine
+# Gold Scanner V27 Live
 
-V26.2 keeps the V26.1 reference-price sync and makes PULLBACK CONTINUATION and NEW MOVE ORIGIN independent candidate families.
+Screenshot-free XAU/USD scanner.
 
-Changes:
-- Adds recent/local M5 swing and local-range origin candidates near price.
-- Current price ranks relevance only after structural candidates are generated.
-- Pullback continuation and new-move-origin receive separate scores.
-- New-move-origin score exposes liquidity/location, structure transition, displacement, freshness, and HTF-context components.
-- Distance influence is reduced so a farther continuation target does not automatically hide a strong nearby origin.
-- Existing H1/M15/M5 OHLC, lifecycle, Gemini visual cross-check, quota-safe data-only mode, testing lab, and V26.1 price-sync behavior remain.
+## Normal workflow
+Press **SCAN LIVE MARKET**. The server fetches Twelve Data H1, M15 and M5 OHLC plus a separate reference price, then the deterministic Python engine maps candidate zones.
 
-Important: zones are watch areas, not predictions or automatic entries. Validate with forward/demo testing.
+Both setup families run every scan:
+- PULLBACK CONTINUATION
+- NEW MOVE ORIGIN
+
+No screenshot or Gemini request is used by `/api/live-scan`. Existing hybrid `/api/scan` remains in the server for compatibility, but the V27 UI does not use it.
+
+## Render
+Build: `pip install -r requirements.txt`
+Start: `gunicorn server:app`
+Required env: `TWELVE_DATA_API_KEY`
+`GEMINI_API_KEY` is not required for normal V27 live scanning.
+
+The scanner is an analysis aid. Candidate zones and scores are not predictions or win probabilities.
