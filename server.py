@@ -363,12 +363,12 @@ def analytics(c):
         q='HIGH' if state=='FRESH' and aligned and age<=12 else 'MEDIUM' if state!='FILLED' and age<=24 else 'LOW'
         quality_fvgs.append({**g,'fill_state':state,'quality':q})
 
-    # Order-block heuristic: last opposite candle before a >=1.5 ATR 3-candle displacement.
+    # V34.2 balanced order-block heuristic: last opposite candle before a >=1.25 ATR 3-candle displacement.
     order_blocks=[]
     start=max(3,len(c)-45)
     for i in range(start,len(c)-2):
         end=c[i+2]; move_seq=end['c']-c[i]['o']
-        if abs(move_seq) < 1.5*(atr or 1): continue
+        if abs(move_seq) < 1.25*(atr or 1): continue
         direction_ob='BULLISH_OB' if move_seq>0 else 'BEARISH_OB'
         for j in range(i-1,max(-1,i-5),-1):
             x=c[j]; opposite=(direction_ob=='BULLISH_OB' and x['c']<x['o']) or (direction_ob=='BEARISH_OB' and x['c']>x['o'])
@@ -527,8 +527,8 @@ def analytics(c):
         # A true retracement must be materially smaller than the impulse. If price has
         # retraced >85% of an old leg, that old leg cannot label the current pullback.
         # 0.20 ATR allows early detection without calling every tiny opposite candle a pullback.
-        bear_active=(bearish_context and bear_imp>=1.5 and bear_retrace>=0.20 and bear_ratio<=0.85 and low_idx<=len(c)-2 and bear_start<low_idx)
-        bull_active=(bullish_context and bull_imp>=1.5 and bull_retrace>=0.20 and bull_ratio<=0.85 and high_idx<=len(c)-2 and bull_start<high_idx)
+        bear_active=(bearish_context and bear_imp>=1.25 and bear_retrace>=0.18 and bear_ratio<=0.85 and low_idx<=len(c)-2 and bear_start<low_idx)
+        bull_active=(bullish_context and bull_imp>=1.25 and bull_retrace>=0.18 and bull_ratio<=0.85 and high_idx<=len(c)-2 and bull_start<high_idx)
 
         # Recency wins first: the newest completed impulse extreme is the execution leg.
         # Strength is only a tie-breaker; an older giant move cannot override a newer break.
@@ -562,7 +562,7 @@ def analytics(c):
             dynamic={'state':'PULLBACK_STARTING' if bear_retrace<0.45 else 'PULLBACK_IN_PROGRESS','direction':'BEARISH_CONTINUATION','impulse_atr':round(bear_imp,2),'retracement_atr':round(bear_retrace,2),'retracement_ratio':round(bear_ratio,2),'fresh_continuation_found':False,'market_state_detected':True,'setup_qualified':False,'note':'Latest dominant M5 impulse is bearish; an upward retracement is developing. Searching for a fresh first-retest SELL continuation level.'}
             for si,sv in reversed(swings_lo):
                 if si>=low_idx or si<max(0,low_idx-35): continue
-                breaks=[j for j in range(si+1,low_idx+1) if c[j]['c'] < sv-0.05*atr]
+                breaks=[j for j in range(si+1,low_idx+1) if c[j]['c'] < sv-0.03*atr]
                 if not breaks: continue
                 bi=breaks[0]; lo,hi=sv-ztol,sv+ztol
                 post=c[bi+1:]
@@ -578,7 +578,7 @@ def analytics(c):
             dynamic={'state':'PULLBACK_STARTING' if bull_retrace<0.45 else 'PULLBACK_IN_PROGRESS','direction':'BULLISH_CONTINUATION','impulse_atr':round(bull_imp,2),'retracement_atr':round(bull_retrace,2),'retracement_ratio':round(bull_ratio,2),'fresh_continuation_found':False,'market_state_detected':True,'setup_qualified':False,'note':'Latest dominant M5 impulse is bullish; a downward retracement is developing. Searching for a fresh first-retest BUY continuation level.'}
             for si,sv in reversed(swings_hi):
                 if si>=high_idx or si<max(0,high_idx-35): continue
-                breaks=[j for j in range(si+1,high_idx+1) if c[j]['c'] > sv+0.05*atr]
+                breaks=[j for j in range(si+1,high_idx+1) if c[j]['c'] > sv+0.03*atr]
                 if not breaks: continue
                 bi=breaks[0]; lo,hi=sv-ztol,sv+ztol
                 post=c[bi+1:]
@@ -594,7 +594,7 @@ def analytics(c):
     ranked=[]
     for q in sorted(candidates,key=lambda x:x['rank_score'],reverse=True):
         if not any(r['side']==q['side'] and not (q['high']<r['low']-ztol or q['low']>r['high']+ztol) for r in ranked): ranked.append(q)
-    candidate_zones={'buy':[x for x in ranked if x['side']=='BUY'][:4],'sell':[x for x in ranked if x['side']=='SELL'][:4]}
+    candidate_zones={'buy':[x for x in ranked if x['side']=='BUY'][:10],'sell':[x for x in ranked if x['side']=='SELL'][:10]}  # V34.2: preserve a wider candidate pool until freshness filtering
 
     # V32 TRANSITION ENGINE: detect a developing change of control before a full trend label is obvious.
     # This is state intelligence only; it never creates a BUY/SELL zone or an entry signal.
@@ -1185,7 +1185,7 @@ def build_m1_precision_engine(mtf):
     # M5 carries most weight; M15/H1 add context rather than acting as hard vetoes.
     bull_gate=b5 + int(b15*0.45) + int(b1h*0.20)
     bear_gate=s5 + int(s15*0.45) + int(s1h*0.20)
-    direction='BULLISH' if bull_gate>=55 and bull_gate>=bear_gate+8 else 'BEARISH' if bear_gate>=55 and bear_gate>=bull_gate+8 else 'NONE'
+    direction='BULLISH' if bull_gate>=50 and bull_gate>=bear_gate+6 else 'BEARISH' if bear_gate>=50 and bear_gate>=bull_gate+6 else 'NONE'
     gate=max(bull_gate,bear_gate)
     if str(m5.get('shock_detector') or '')=='TRIGGERED':
         return {'state':'LOCKED_VOLATILITY_SHOCK','direction':direction,'gate_score':gate,'candidates':[],'note':'M1 point generation is locked during an M5 volatility shock; wait for closed-candle structure to stabilize.'}
@@ -1207,16 +1207,16 @@ def build_m1_precision_engine(mtf):
         ahead=(hi < cp) if bull else (lo > cp)
         if not ahead or touches>1 or cons not in ('','UNTOUCHED','LIGHT'): continue
         dist=max(0,cp-hi) if bull else max(0,lo-cp); datr=dist/atr if atr else 99
-        if datr>4.5: continue
+        if datr>5.5: continue
         base=int(z.get('rank_score') or 0)
         source_bonus=12 if src.startswith('DYNAMIC_BROKEN_') else 10 if src.endswith('_FVG') else 8 if src.endswith('_OB') else 5
         micro_bonus=12 if micro_align else 2
         proximity=max(0,12-int(datr*3))
         score=max(0,min(100,base+source_bonus+micro_bonus+proximity))
-        if score<72: continue
-        rows.append({'side':side.upper(),'low':round(lo,2),'high':round(hi,2),'source':src,'score':score,'gate_score':gate,'distance_m1_atr':round(datr,2),'m1_structure':m1st,'m1_momentum':m1mom,'m1_event':m1ev,'status':'QUALIFIED_PRECISION_POINT','point_class':'M1_PRECISION_CONTINUATION','note':'Qualified M1 precision continuation point generated only after H1/M15/M5 directional permission. It is a watch area, not an automatic entry.'})
+        if score<68: continue
+        rows.append({'side':side.upper(),'low':round(lo,2),'high':round(hi,2),'source':src,'score':score,'gate_score':gate,'distance_m1_atr':round(datr,2),'m1_structure':m1st,'m1_momentum':m1mom,'m1_event':m1ev,'status':'QUALIFIED_PRECISION_POINT','point_class':'M1_PRECISION_CONTINUATION','note':'Qualified fresh M1 precision continuation point. Core M1 structure remains required; higher-timeframe context is weighted evidence rather than a perfection test. It is a watch area, not an automatic entry.'})
     rows.sort(key=lambda x:(x['score'],-x['distance_m1_atr']),reverse=True)
-    return {'state':'QUALIFIED_PRECISION_POINTS' if rows else 'UNLOCKED_NO_QUALIFIED_M1_POINT','direction':direction+'_CONTINUATION','gate_score':gate,'bull_gate':bull_gate,'bear_gate':bear_gate,'candidates':rows[:3],'m5_structure':m5.get('structure'),'m5_momentum':m5.get('momentum'),'m5_pressure':m5.get('current_pressure'),'m15_structure':m15.get('structure'),'h1_structure':h1.get('structure'),'m1_structure':m1st,'m1_momentum':m1mom,'note':'V34: H1/M15/M5 are the market-intelligence gate; M5 still produces major zones, while M1 may generate smaller qualified precision continuation points when unlocked.'}
+    return {'state':'QUALIFIED_PRECISION_POINTS' if rows else 'UNLOCKED_NO_QUALIFIED_M1_POINT','direction':direction+'_CONTINUATION','gate_score':gate,'bull_gate':bull_gate,'bear_gate':bear_gate,'candidates':rows[:3],'m5_structure':m5.get('structure'),'m5_momentum':m5.get('momentum'),'m5_pressure':m5.get('current_pressure'),'m15_structure':m15.get('structure'),'h1_structure':h1.get('structure'),'m1_structure':m1st,'m1_momentum':m1mom,'note':'V34.2 balanced qualification: H1/M15/M5 remain the market-intelligence gate, but secondary confluence is less restrictive. M5 still produces major zones and M1 may generate fresh precision continuation points when core evidence qualifies.'}
 
 def build_reaction_engine(m5):
     """V32 deterministic closed-M5 reaction state for zones currently being tracked.
@@ -1279,9 +1279,10 @@ def filter_fresh_candidates(mtf):
                 q=dict(z); q['hidden_reason']='Previously interacted with / reacted / consumed; retained internally as market evidence.'
                 hidden[side].append(q)
     m5['all_candidate_zones']=cz
+    fresh['buy']=fresh['buy'][:6]; fresh['sell']=fresh['sell'][:6]
     m5['candidate_zones']=fresh
     m5['hidden_used_zones']=hidden
-    m5['opportunity_map']={'current_price':(m5.get('opportunity_map') or {}).get('current_price',m5.get('data_current_price')),'market_phase':m5.get('market_phase','UNCLEAR'),'buy_watch_areas':fresh['buy'],'sell_watch_areas':fresh['sell'],'purpose':'V30.1 fresh-only ahead-of-price candidates. Used zones remain internal evidence, not new opportunities.'}
+    m5['opportunity_map']={'current_price':(m5.get('opportunity_map') or {}).get('current_price',m5.get('data_current_price')),'market_phase':m5.get('market_phase','UNCLEAR'),'buy_watch_areas':fresh['buy'],'sell_watch_areas':fresh['sell'],'purpose':'V34.2 fresh-only ahead-of-price candidates. A wider structural pool is filtered for freshness before display, so used high-ranked zones cannot crowd out valid fresh points.'}
     return mtf
 
 def data_only_result(mtf,data_status,data_note,why='Gemini visual check unavailable'):
@@ -1337,11 +1338,11 @@ def live_scan():
         out=data_only_result(mtf,data_status,data_note,'NOT_USED_LIVE_DATA_MODE')
         out['mode']='LIVE_DATA_CONTEXT'
         out['gemini_status']='NOT_USED'
-        out['scanner_version']='V34.1 FRESH M1 POINTS'
+        out['scanner_version']='V34.2 BALANCED FRESH POINTS'
         out['market_context']=market_context
         out['event_risk']=market_context.get('event_risk','UNKNOWN')
         out['data_only_summary']=out['data_only_summary'].replace('V26 maps','V30 maps')
-        out['note']='V34 keeps all V33/V32/V31 logic and upgrades M1 into a gated precision point generator. H1/M15/M5 establish directional permission; M5 remains the major-zone engine; M1 may surface smaller qualified continuation points only when that gate is unlocked. M1 cannot independently reverse the primary direction. Fresh-only qualification remains intact.'
+        out['note']='V34.2 rebalances qualification without weakening freshness. M5 keeps a wider structural candidate pool and applies fresh-only filtering before display; M1 keeps core structure/freshness requirements while secondary confluence and gate thresholds are less restrictive. Used/retested zones remain hidden and no point is forced.'
         return jsonify(out)
     except Exception as e:
         return jsonify({'error':'live_scan_failed','detail':str(e)[:1200]}),500

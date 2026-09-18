@@ -1,7 +1,13 @@
-# Gold Scanner V33 — M1 Precision Layer
+# Gold Scanner V34.2 — Balanced Fresh Points
 
-V33 keeps the V32 H1/M15/M5 scanner, fresh-zone filtering, persistent pullback tracking, Transition Engine, Reaction/Confirmation Engine, context/caching and forward-test behavior.
+Targeted rebalance built from V34.1. Fresh-only behavior is preserved.
 
-New: M1 Precision Layer. M1 is fetched with a short cache and is allowed to surface micro continuation watch areas only when M5 direction/transition is already established. M1 never replaces M5, never overrides H1/M15/M5, and never creates the primary direction by itself.
+Changes:
+- M5/M1 structural candidate pool widened before freshness filtering, preventing used high-ranked zones from crowding out valid fresh zones.
+- Fresh/untested rules remain intact; used/retested zones are still hidden.
+- M5 dynamic pullback and order-block detection are modestly less restrictive, while first-retest logic remains.
+- M1 directional gate and final evidence threshold are modestly rebalanced; core M1 structure and freshness are still required.
+- No forced BUY/SELL point. If nothing qualifies, scanner still reports no fresh qualified area.
+- Existing transition, reaction, persistent tracking, macro/session context, API caching and forward-test features are retained.
 
-Render: `pip install -r requirements.txt` then `gunicorn server:app`.
+Evidence/precision scores are not win probabilities and zones are analysis/watch areas, not automatic entries.
