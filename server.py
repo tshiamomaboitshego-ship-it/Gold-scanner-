@@ -571,7 +571,8 @@ def analytics(c):
                     add_candidate('SELL',lo,hi,'DYNAMIC_BROKEN_SUPPORT_RETEST',82,{'dynamic_pullback':True,'broken_swing':round(sv,2),'break_index':bi,'impulse_extreme_index':low_idx},touch_from=bi+1)
                     dynamic['fresh_continuation_found']=True
                     dynamic['setup_qualified']=True
-                    dynamic['note']='Bearish pullback active; a fresh broken-support first-retest SELL area was found ahead of price.'
+                    dynamic['candidate_zone']={'side':'SELL','low':round(lo,2),'high':round(hi,2),'source':'DYNAMIC_BROKEN_SUPPORT_RETEST','detected_at':c[-1].get('t'),'status':'DYNAMIC_QUALIFIED'}
+                    dynamic['note']='Bearish pullback active; a fresh broken-support first-retest SELL candidate was detected. Final fresh-zone display qualification is checked separately.'
                     break
         elif choose=='BULL':
             dynamic={'state':'PULLBACK_STARTING' if bull_retrace<0.45 else 'PULLBACK_IN_PROGRESS','direction':'BULLISH_CONTINUATION','impulse_atr':round(bull_imp,2),'retracement_atr':round(bull_retrace,2),'retracement_ratio':round(bull_ratio,2),'fresh_continuation_found':False,'market_state_detected':True,'setup_qualified':False,'note':'Latest dominant M5 impulse is bullish; a downward retracement is developing. Searching for a fresh first-retest BUY continuation level.'}
@@ -586,7 +587,8 @@ def analytics(c):
                     add_candidate('BUY',lo,hi,'DYNAMIC_BROKEN_RESISTANCE_RETEST',82,{'dynamic_pullback':True,'broken_swing':round(sv,2),'break_index':bi,'impulse_extreme_index':high_idx},touch_from=bi+1)
                     dynamic['fresh_continuation_found']=True
                     dynamic['setup_qualified']=True
-                    dynamic['note']='Bullish pullback active; a fresh broken-resistance first-retest BUY area was found below price.'
+                    dynamic['candidate_zone']={'side':'BUY','low':round(lo,2),'high':round(hi,2),'source':'DYNAMIC_BROKEN_RESISTANCE_RETEST','detected_at':c[-1].get('t'),'status':'DYNAMIC_QUALIFIED'}
+                    dynamic['note']='Bullish pullback active; a fresh broken-resistance first-retest BUY candidate was detected. Final fresh-zone display qualification is checked separately.'
                     break
     # Deduplicate overlapping same-side candidates, preserving the stronger one.
     ranked=[]
@@ -1162,10 +1164,30 @@ def live_scan():
         market_context=build_market_context(mtf)
         apply_market_context(mtf,market_context)
         filter_fresh_candidates(mtf)
+        # V31: keep pullback state/candidate discovery separate from final display qualification.
+        # This prevents a detected setup from silently disappearing between scans.
+        m5=(mtf.get('M5') or {}).get('metrics') or {}
+        dp=m5.get('dynamic_pullback') or {}
+        dz=dp.get('candidate_zone') or {}
+        if dz:
+            side='buy' if str(dz.get('side')).upper()=='BUY' else 'sell'
+            shown=False
+            for z in ((m5.get('candidate_zones') or {}).get(side) or []):
+                if z.get('source')==dz.get('source') and not (float(z.get('high',0)) < float(dz.get('low',0)) or float(z.get('low',0)) > float(dz.get('high',0))):
+                    shown=True; break
+            dp['final_display_qualified']=shown
+            dp['candidate_status']='QUALIFIED_AND_DISPLAYED' if shown else 'DETECTED_NOT_FINAL_DISPLAY_QUALIFIED'
+            if not shown:
+                dp['note']=('Pullback state is active and a dynamic '+str(dz.get('side','')).upper()+
+                            ' candidate was detected, but it did not pass the final fresh-zone display filter. It is tracked for this scan, not shown as a new point.')
+        else:
+            dp['final_display_qualified']=False
+            dp['candidate_status']='NO_DYNAMIC_CANDIDATE'
+        m5['dynamic_pullback']=dp
         out=data_only_result(mtf,data_status,data_note,'NOT_USED_LIVE_DATA_MODE')
         out['mode']='LIVE_DATA_CONTEXT'
         out['gemini_status']='NOT_USED'
-        out['scanner_version']='V30.1 FRESH-ZONE TEST BUILD'
+        out['scanner_version']='V31 PERSISTENT PULLBACK TRACKER'
         out['market_context']=market_context
         out['event_risk']=market_context.get('event_risk','UNKNOWN')
         out['data_only_summary']=out['data_only_summary'].replace('V26 maps','V30 maps')
