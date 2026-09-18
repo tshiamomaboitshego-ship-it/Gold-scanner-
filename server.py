@@ -596,7 +596,48 @@ def analytics(c):
         if not any(r['side']==q['side'] and not (q['high']<r['low']-ztol or q['low']>r['high']+ztol) for r in ranked): ranked.append(q)
     candidate_zones={'buy':[x for x in ranked if x['side']=='BUY'][:4],'sell':[x for x in ranked if x['side']=='SELL'][:4]}
 
-    return {'closed_candle_engine':True,'reaction_quality':reaction_quality,'latest_wick_rejection':wick_reject,'recent_bull_candles':bull,'recent_bear_candles':bear,'data_current_price':round(last['c'],3),'atr14':round(atr,3),'structure':structure,'structure_event':event,'momentum':mom,'volatility':vol,'current_pressure':pressure,'market_phase':phase,'shock_detector':shock,'last_candle_range_atr':round(range_atr,2),'last_candle_body_atr':round(body_atr,2),'approach_speed':speed,'move_3bar_atr':round(move3_atr,2),'last_swing_highs':[round(x[1],2) for x in swings_hi[-3:]],'last_swing_lows':[round(x[1],2) for x in swings_lo[-3:]],'equal_highs':eqh[-2:],'equal_lows':eql[-2:],'recent_5bar_move':round(move,3),'avg_body_5':round(avg_body,3),'displacement':displacement,'recent_fvgs':fvgs[-4:],'session_utc':session,'extension_atr_5bar':extension_atr,'chase_risk':chase_risk,'fvg_quality':quality_fvgs[-6:],'order_blocks':obs,'premium_discount':{'state':pd,'range_low':round(range_lo,2),'equilibrium':round(equilibrium,2),'range_high':round(range_hi,2)},'external_liquidity':external_liq,'internal_liquidity':internal_liq,'liquidity_sweep':sweep,'body_acceptance':acceptance,'session_liquidity':session_liq,'price_action_sequence':sequence,'confluence_cluster':confluence,'candidate_zones':candidate_zones,'dynamic_pullback':dynamic,'latest_closed_candles':c[-12:]}
+    # V32 TRANSITION ENGINE: detect a developing change of control before a full trend label is obvious.
+    # This is state intelligence only; it never creates a BUY/SELL zone or an entry signal.
+    bull_score=0; bear_score=0; bull_ev=[]; bear_ev=[]
+    if sweep=='SELL_SIDE_SWEEP_RECLAIM_UP': bull_score+=18; bull_ev.append('sell-side sweep + reclaim')
+    if sweep=='BUY_SIDE_SWEEP_RECLAIM_DOWN': bear_score+=18; bear_ev.append('buy-side sweep + reclaim')
+    if event=='BULLISH_CHOCH': bull_score+=26; bull_ev.append('bullish CHoCH')
+    elif event=='BULLISH_BOS': bull_score+=18; bull_ev.append('bullish BOS')
+    if event=='BEARISH_CHOCH': bear_score+=26; bear_ev.append('bearish CHoCH')
+    elif event=='BEARISH_BOS': bear_score+=18; bear_ev.append('bearish BOS')
+    if displacement=='BULLISH': bull_score+=18; bull_ev.append('bullish displacement')
+    elif displacement=='BEARISH': bear_score+=18; bear_ev.append('bearish displacement')
+    if mom in ('BULLISH','BULLISH_STRONG'): bull_score+=14 if mom=='BULLISH' else 20; bull_ev.append('bullish momentum')
+    if mom in ('BEARISH','BEARISH_STRONG'): bear_score+=14 if mom=='BEARISH' else 20; bear_ev.append('bearish momentum')
+    if pressure in ('BULLISH','EXTREME_BULLISH'): bull_score+=10; bull_ev.append('bullish pressure')
+    if pressure in ('BEARISH','EXTREME_BEARISH'): bear_score+=10; bear_ev.append('bearish pressure')
+    if structure=='HH_HL': bull_score+=18; bull_ev.append('HH/HL structure')
+    elif structure=='LL_LH': bear_score+=18; bear_ev.append('LL/LH structure')
+    if acceptance=='ACCEPTED_ABOVE_SWING': bull_score+=16; bull_ev.append('closed-candle acceptance above swing')
+    elif acceptance=='ACCEPTED_BELOW_SWING': bear_score+=16; bear_ev.append('closed-candle acceptance below swing')
+    if sequence=='BULLISH_SWEEP_STRUCTURE_FVG': bull_score+=18; bull_ev.append('sweep → structure → FVG sequence')
+    elif sequence=='BEARISH_SWEEP_STRUCTURE_FVG': bear_score+=18; bear_ev.append('sweep → structure → FVG sequence')
+    # Counter-structure evidence is the important transition clue: do not call a reversal from green/red candles alone.
+    prior_bias='BEARISH' if len(swings_hi)>=2 and swings_hi[-1][1] < swings_hi[-2][1] else 'BULLISH' if len(swings_lo)>=2 and swings_lo[-1][1] > swings_lo[-2][1] else 'MIXED'
+    dominant='BULLISH' if bull_score>=bear_score+12 else 'BEARISH' if bear_score>=bull_score+12 else 'MIXED'
+    dom_score=max(bull_score,bear_score)
+    if dominant=='BULLISH':
+        if structure=='HH_HL' and bull_score>=58: tstate='BULLISH_STRUCTURE_ESTABLISHED'
+        elif bull_score>=44 and any(x in bull_ev for x in ('bullish CHoCH','closed-candle acceptance above swing')): tstate='BULLISH_TRANSITION_DEVELOPING'
+        elif bull_score>=28: tstate='POTENTIAL_BULLISH_TRANSITION'
+        else: tstate='NO_CLEAR_TRANSITION'
+        tev=bull_ev
+    elif dominant=='BEARISH':
+        if structure=='LL_LH' and bear_score>=58: tstate='BEARISH_STRUCTURE_ESTABLISHED'
+        elif bear_score>=44 and any(x in bear_ev for x in ('bearish CHoCH','closed-candle acceptance below swing')): tstate='BEARISH_TRANSITION_DEVELOPING'
+        elif bear_score>=28: tstate='POTENTIAL_BEARISH_TRANSITION'
+        else: tstate='NO_CLEAR_TRANSITION'
+        tev=bear_ev
+    else:
+        tstate='TRANSITION_CONFLICT' if max(bull_score,bear_score)>=30 else 'NO_CLEAR_TRANSITION'; tev=[]
+    transition_engine={'state':tstate,'dominant_side':dominant,'evidence_score':min(100,dom_score),'bullish_score':min(100,bull_score),'bearish_score':min(100,bear_score),'evidence':tev[-6:],'prior_structure_bias':prior_bias,'note':'Closed-candle transition state only. It does not create a trade point; fresh-zone qualification remains separate.'}
+
+    return {'closed_candle_engine':True,'reaction_quality':reaction_quality,'latest_wick_rejection':wick_reject,'recent_bull_candles':bull,'recent_bear_candles':bear,'data_current_price':round(last['c'],3),'atr14':round(atr,3),'structure':structure,'structure_event':event,'momentum':mom,'volatility':vol,'current_pressure':pressure,'market_phase':phase,'shock_detector':shock,'last_candle_range_atr':round(range_atr,2),'last_candle_body_atr':round(body_atr,2),'approach_speed':speed,'move_3bar_atr':round(move3_atr,2),'last_swing_highs':[round(x[1],2) for x in swings_hi[-3:]],'last_swing_lows':[round(x[1],2) for x in swings_lo[-3:]],'equal_highs':eqh[-2:],'equal_lows':eql[-2:],'recent_5bar_move':round(move,3),'avg_body_5':round(avg_body,3),'displacement':displacement,'recent_fvgs':fvgs[-4:],'session_utc':session,'extension_atr_5bar':extension_atr,'chase_risk':chase_risk,'fvg_quality':quality_fvgs[-6:],'order_blocks':obs,'premium_discount':{'state':pd,'range_low':round(range_lo,2),'equilibrium':round(equilibrium,2),'range_high':round(range_hi,2)},'external_liquidity':external_liq,'internal_liquidity':internal_liq,'liquidity_sweep':sweep,'body_acceptance':acceptance,'session_liquidity':session_liq,'price_action_sequence':sequence,'confluence_cluster':confluence,'candidate_zones':candidate_zones,'dynamic_pullback':dynamic,'transition_engine':transition_engine,'latest_closed_candles':c[-12:]}
 
 
 
@@ -1109,6 +1150,45 @@ def apply_market_context(mtf,ctx):
     m5['market_context']=ctx
 
 
+def build_reaction_engine(m5):
+    """V32 deterministic closed-M5 reaction state for zones currently being tracked.
+    Rejection alone is not confirmation; follow-through/structure evidence is required.
+    """
+    candles=m5.get('latest_closed_candles') or []
+    atr=float(m5.get('atr14') or 1)
+    cp=float(m5.get('data_current_price') or 0)
+    allz=m5.get('all_candidate_zones') or m5.get('candidate_zones') or {}
+    rows=[]
+    for side in ('buy','sell'):
+        for z in (allz.get(side) or [])[:8]:
+            lo=float(z.get('low')); hi=float(z.get('high'))
+            touched=[x for x in candles if x.get('l',1e99)<=hi and x.get('h',-1e99)>=lo]
+            if not touched:
+                state='WAIT'; ev=['zone not tested by recent closed M5 candles']
+            else:
+                last=candles[-1] if candles else {}; body=abs(float(last.get('c',0))-float(last.get('o',0))); rng=max(1e-9,float(last.get('h',0))-float(last.get('l',0)))
+                if side=='buy':
+                    invalid=sum(1 for x in candles[-2:] if float(x.get('c',0))<lo)>=2
+                    reclaim=float(last.get('c',0))>=lo
+                    wick=(float(last.get('c',0))-float(last.get('l',0)))>max(body*1.2,atr*.12)
+                    follow=len(candles)>=2 and candles[-1]['c']>candles[-2]['c'] and candles[-1]['c']>candles[-1]['o']
+                    struct=m5.get('structure_event') in ('BULLISH_CHOCH','BULLISH_BOS') or m5.get('structure')=='HH_HL'
+                else:
+                    invalid=sum(1 for x in candles[-2:] if float(x.get('c',0))>hi)>=2
+                    reclaim=float(last.get('c',0))<=hi
+                    wick=(float(last.get('h',0))-float(last.get('c',0)))>max(body*1.2,atr*.12)
+                    follow=len(candles)>=2 and candles[-1]['c']<candles[-2]['c'] and candles[-1]['c']<candles[-1]['o']
+                    struct=m5.get('structure_event') in ('BEARISH_CHOCH','BEARISH_BOS') or m5.get('structure')=='LL_LH'
+                if invalid: state='INVALIDATED'; ev=['repeated closed-candle acceptance beyond zone']
+                elif reclaim and wick and follow and struct: state='STRUCTURE_CONFIRMED'; ev=['rejection/reclaim','follow-through','structure confirmation']
+                elif reclaim and follow: state='FOLLOW_THROUGH'; ev=['zone reclaimed/held','directional follow-through']
+                elif reclaim and wick: state='REJECTION_RECLAIM'; ev=['wick rejection','closed-candle reclaim']
+                else: state='TESTING'; ev=['recent closed candles interacting with zone']
+            rows.append({'side':side.upper(),'low':round(lo,2),'high':round(hi,2),'source':z.get('source'),'state':state,'evidence':ev,'distance_atr':round((lo-cp)/atr,2) if side=='sell' else round((cp-hi)/atr,2)})
+    priority={'STRUCTURE_CONFIRMED':6,'FOLLOW_THROUGH':5,'REJECTION_RECLAIM':4,'TESTING':3,'INVALIDATED':2,'WAIT':1}
+    rows.sort(key=lambda x:priority.get(x['state'],0),reverse=True)
+    return {'state':rows[0]['state'] if rows else 'NO_TRACKED_ZONE','active':rows[:6],'note':'Closed-M5 reaction states. A wick/rejection alone is not a confirmed setup.'}
+
 def filter_fresh_candidates(mtf):
     """V30.1 presentation filter: only genuinely ahead-of-price, not-yet-used zones are new candidates.
     Historical/used zones remain in the underlying metrics for structure/context, but are not surfaced as new opportunities.
@@ -1148,7 +1228,7 @@ def data_only_result(mtf,data_status,data_note,why='Gemini visual check unavaila
       'approach_speed':m5.get('approach_speed','UNCLEAR'),'m5_state':'BULLISH' if str(m5.get('momentum','')).startswith('BULLISH') else 'BEARISH' if str(m5.get('momentum','')).startswith('BEARISH') else 'UNCLEAR',
       'structure':m5.get('structure','UNCLEAR'),'structure_event':m5.get('structure_event','NONE'),'volatility':m5.get('volatility','NORMAL'),'momentum':m5.get('momentum','UNCLEAR'),
       'multi_timeframe_metrics':{'H1':h1,'M15':m15,'M5':m5},'candidate_zones':m5.get('candidate_zones',{}),'opportunity_map':m5.get('opportunity_map',{}),
-      'dynamic_pullback':m5.get('dynamic_pullback',{}),'data_only_summary':f"H1 {h1.get('structure','—')} · M15 {m15.get('structure','—')} · M5 {m5.get('structure','—')}. V26 maps ahead-of-price pullback and new-move-origin candidates with H1/M15 confluence; Gemini visual confirmation unavailable.",
+      'dynamic_pullback':m5.get('dynamic_pullback',{}),'transition_engine':m5.get('transition_engine',{}),'reaction_engine':m5.get('reaction_engine',{}),'data_only_summary':f"H1 {h1.get('structure','—')} · M15 {m15.get('structure','—')} · M5 {m5.get('structure','—')}. V26 maps ahead-of-price pullback and new-move-origin candidates with H1/M15 confluence; Gemini visual confirmation unavailable.",
       'buy_candidate':top('buy'),'sell_candidate':top('sell'),
       'note':'Data-only analysis aid. Ahead-of-price watch areas are deterministic evidence locations, not predictions or guaranteed reversal points.'
     }
@@ -1164,6 +1244,7 @@ def live_scan():
         market_context=build_market_context(mtf)
         apply_market_context(mtf,market_context)
         filter_fresh_candidates(mtf)
+        mtf['M5']['metrics']['reaction_engine']=build_reaction_engine(mtf['M5']['metrics'])
         # V31: keep pullback state/candidate discovery separate from final display qualification.
         # This prevents a detected setup from silently disappearing between scans.
         m5=(mtf.get('M5') or {}).get('metrics') or {}
@@ -1187,11 +1268,11 @@ def live_scan():
         out=data_only_result(mtf,data_status,data_note,'NOT_USED_LIVE_DATA_MODE')
         out['mode']='LIVE_DATA_CONTEXT'
         out['gemini_status']='NOT_USED'
-        out['scanner_version']='V31 PERSISTENT PULLBACK TRACKER'
+        out['scanner_version']='V32 TRANSITION + REACTION ENGINE'
         out['market_context']=market_context
         out['event_risk']=market_context.get('event_risk','UNKNOWN')
         out['data_only_summary']=out['data_only_summary'].replace('V26 maps','V30 maps')
-        out['note']='Fresh-zone deterministic scan. Only fresh/untested qualified zones are surfaced as NEW candidates. Used/rejected zones remain internal market evidence. Previously saved fresh zones are tracked separately through testing, follow-through or invalidation.'
+        out['note']='V32 adds closed-candle Transition and Reaction/Confirmation engines without loosening fresh-zone qualification. Fresh-zone deterministic scan. Only fresh/untested qualified zones are surfaced as NEW candidates. Used/rejected zones remain internal market evidence. Previously saved fresh zones are tracked separately through testing, follow-through or invalidation.'
         return jsonify(out)
     except Exception as e:
         return jsonify({'error':'live_scan_failed','detail':str(e)[:1200]}),500

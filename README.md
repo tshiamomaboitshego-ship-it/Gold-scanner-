@@ -1,12 +1,10 @@
-# Gold Scanner V30.4 — Pullback State Separation
+# Gold Scanner V32 — Transition + Reaction Engine
 
-Targeted test build.
+Phone-first screenshot-free XAU/USD scanner.
 
-Changes from V30.3:
-- Pullback market-state detection is now separate from continuation-zone qualification.
-- An obvious early M5 retracement can display as PULLBACK_STARTING / PULLBACK_IN_PROGRESS even when no fresh continuation zone qualifies yet.
-- State detection cannot manufacture a BUY/SELL zone. Fresh-zone rules remain strict.
-- Latest significant impulse/extreme remains recency-first and works symmetrically for bullish and bearish moves.
-- Dynamic state now exposes market_state_detected and setup_qualified separately.
+V32 keeps V31 fresh-zone and persistent-pullback behavior and adds two deterministic closed-M5 intelligence layers:
 
-All V30.3 fresh-only, caching, macro/session, tracked-setup and forward-test logic is retained.
+- Transition Engine: tracks potential bullish/bearish change of control through sweep/reclaim, displacement, CHoCH/BOS, momentum/pressure, acceptance and HH/HL or LL/LH structure. It does not manufacture trade points.
+- Reaction / Confirmation Engine: tracks WAIT, TESTING, REJECTION_RECLAIM, FOLLOW_THROUGH, STRUCTURE_CONFIRMED and INVALIDATED around zones using closed M5 candles. A wick alone is never confirmation.
+
+Fresh BUY/SELL candidate qualification remains separate and unchanged in principle. Evidence scores are not win probabilities.
