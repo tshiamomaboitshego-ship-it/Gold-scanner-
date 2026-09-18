@@ -1,13 +1,14 @@
-# Gold Scanner V34.2 — Balanced Fresh Points
+# Gold Scanner V34.3 — Always-On M1
 
-Targeted rebalance built from V34.1. Fresh-only behavior is preserved.
+V34.3 is a targeted update to V34.2.
 
-Changes:
-- M5/M1 structural candidate pool widened before freshness filtering, preventing used high-ranked zones from crowding out valid fresh zones.
-- Fresh/untested rules remain intact; used/retested zones are still hidden.
-- M5 dynamic pullback and order-block detection are modestly less restrictive, while first-retest logic remains.
-- M1 directional gate and final evidence threshold are modestly rebalanced; core M1 structure and freshness are still required.
-- No forced BUY/SELL point. If nothing qualifies, scanner still reports no fresh qualified area.
-- Existing transition, reaction, persistent tracking, macro/session context, API caching and forward-test features are retained.
+- M5 remains the major-zone generator.
+- H1/M15/M5 remain weighted market context, but no longer hard-lock M1 point generation.
+- M1 always searches both BUY and SELL precision structures.
+- M1 points aligned with higher-timeframe context use normal qualification.
+- Counter-context M1 points are classified as TRANSITION points and require stronger M1 structure/evidence.
+- Fresh-only M1 memory remains: tested points and substantially overlapping rediscoveries stay hidden.
+- M5 balanced/fresh-only behavior is unchanged from V34.2.
+- No point is forced when no fresh structure qualifies.
 
-Evidence/precision scores are not win probabilities and zones are analysis/watch areas, not automatic entries.
+Precision/evidence scores are not win probabilities. Zones are watch areas, not automatic entries.

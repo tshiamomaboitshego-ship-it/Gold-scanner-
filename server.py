@@ -1152,16 +1152,17 @@ def apply_market_context(mtf,ctx):
 
 
 def build_m1_precision_engine(mtf):
-    """V34 gated M1 point generator.
-    H1/M15/M5 establish permission and directional context; M1 may then generate
-    a qualified precision continuation point. M1 never independently flips direction.
+    """V34.3 always-on M1 precision generator.
+    H1/M15/M5 provide weighted context, but no longer hard-lock M1 direction.
+    M1 may qualify aligned continuation points or stronger counter-context transition points.
+    M5 remains the major-zone generator; M1 remains a precision layer.
     """
     m1=(mtf.get('M1') or {}).get('metrics') or {}
     m5=(mtf.get('M5') or {}).get('metrics') or {}
     m15=(mtf.get('M15') or {}).get('metrics') or {}
     h1=(mtf.get('H1') or {}).get('metrics') or {}
     if not m1 or not m5:
-        return {'state':'UNAVAILABLE','direction':'NONE','gate_score':0,'candidates':[],'note':'M1 or M5 data unavailable.'}
+        return {'state':'UNAVAILABLE','direction':'NONE','context_score':0,'candidates':[],'note':'M1 or M5 data unavailable.'}
 
     def side_bias(m):
         st=str(m.get('structure') or 'UNCLEAR'); mom=str(m.get('momentum') or 'NEUTRAL'); pr=str(m.get('current_pressure') or 'NEUTRAL')
@@ -1177,46 +1178,66 @@ def build_m1_precision_engine(mtf):
         elif 'BEARISH' in ev: s+=12
         return b,s
 
-    b5,s5=side_bias(m5); b15,s15=side_bias(m15); b1h,s1h=side_bias(h1)
+    b5,s5=side_bias(m5); b15,s15=side_bias(m15); b1h,s1h=side_bias(h1); bm1,sm1=side_bias(m1)
     trans=m5.get('transition_engine') or {}; tstate=str(trans.get('state') or '')
     if 'BULLISH' in tstate: b5+=min(22,int(trans.get('bullish_score') or 0)//4)
     if 'BEARISH' in tstate: s5+=min(22,int(trans.get('bearish_score') or 0)//4)
 
-    # M5 carries most weight; M15/H1 add context rather than acting as hard vetoes.
-    bull_gate=b5 + int(b15*0.45) + int(b1h*0.20)
-    bear_gate=s5 + int(s15*0.45) + int(s1h*0.20)
-    direction='BULLISH' if bull_gate>=50 and bull_gate>=bear_gate+6 else 'BEARISH' if bear_gate>=50 and bear_gate>=bull_gate+6 else 'NONE'
-    gate=max(bull_gate,bear_gate)
-    if str(m5.get('shock_detector') or '')=='TRIGGERED':
-        return {'state':'LOCKED_VOLATILITY_SHOCK','direction':direction,'gate_score':gate,'candidates':[],'note':'M1 point generation is locked during an M5 volatility shock; wait for closed-candle structure to stabilize.'}
-    if direction=='NONE':
-        return {'state':'LOCKED','direction':'NONE','gate_score':gate,'bull_gate':bull_gate,'bear_gate':bear_gate,'candidates':[],'note':'H1/M15/M5 have not established enough directional permission for M1 point generation.'}
+    # Higher timeframes are context, not a lock. M5 has the strongest contextual weight.
+    bull_context=b5 + int(b15*0.45) + int(b1h*0.20)
+    bear_context=s5 + int(s15*0.45) + int(s1h*0.20)
+    context_direction='BULLISH' if bull_context>=50 and bull_context>=bear_context+6 else 'BEARISH' if bear_context>=50 and bear_context>=bull_context+6 else 'MIXED'
+    shock=str(m5.get('shock_detector') or '')=='TRIGGERED'
 
-    bull=direction=='BULLISH'; side='buy' if bull else 'sell'
     cp=float(m1.get('data_current_price') or m5.get('data_current_price') or 0); atr=float(m1.get('atr14') or 1)
-    allowed_buy={'BULLISH_FVG','BULLISH_OB','SWING_DEMAND','DYNAMIC_BROKEN_RESISTANCE_RETEST'}
-    allowed_sell={'BEARISH_FVG','BEARISH_OB','SWING_SUPPLY','DYNAMIC_BROKEN_SUPPORT_RETEST'}
-    allowed=allowed_buy if bull else allowed_sell
+    allowed_by_side={
+        'buy':{'BULLISH_FVG','BULLISH_OB','SWING_DEMAND','DYNAMIC_BROKEN_RESISTANCE_RETEST'},
+        'sell':{'BEARISH_FVG','BEARISH_OB','SWING_SUPPLY','DYNAMIC_BROKEN_SUPPORT_RETEST'}
+    }
     m1st=str(m1.get('structure') or 'UNCLEAR'); m1mom=str(m1.get('momentum') or 'NEUTRAL'); m1ev=str(m1.get('structure_event') or '')
-    micro_align=(bull and (m1st=='HH_HL' or m1mom.startswith('BULLISH') or 'BULLISH' in m1ev)) or ((not bull) and (m1st=='LL_LH' or m1mom.startswith('BEARISH') or 'BEARISH' in m1ev))
     rows=[]
-    for z in ((m1.get('candidate_zones') or {}).get(side) or []):
-        src=str(z.get('source') or '')
-        if src not in allowed: continue
-        lo=float(z.get('low')); hi=float(z.get('high')); touches=int(z.get('touch_count') or 0); cons=str(z.get('consumption') or '').upper()
-        ahead=(hi < cp) if bull else (lo > cp)
-        if not ahead or touches>1 or cons not in ('','UNTOUCHED','LIGHT'): continue
-        dist=max(0,cp-hi) if bull else max(0,lo-cp); datr=dist/atr if atr else 99
-        if datr>5.5: continue
-        base=int(z.get('rank_score') or 0)
-        source_bonus=12 if src.startswith('DYNAMIC_BROKEN_') else 10 if src.endswith('_FVG') else 8 if src.endswith('_OB') else 5
-        micro_bonus=12 if micro_align else 2
-        proximity=max(0,12-int(datr*3))
-        score=max(0,min(100,base+source_bonus+micro_bonus+proximity))
-        if score<68: continue
-        rows.append({'side':side.upper(),'low':round(lo,2),'high':round(hi,2),'source':src,'score':score,'gate_score':gate,'distance_m1_atr':round(datr,2),'m1_structure':m1st,'m1_momentum':m1mom,'m1_event':m1ev,'status':'QUALIFIED_PRECISION_POINT','point_class':'M1_PRECISION_CONTINUATION','note':'Qualified fresh M1 precision continuation point. Core M1 structure remains required; higher-timeframe context is weighted evidence rather than a perfection test. It is a watch area, not an automatic entry.'})
+    for side in ('buy','sell'):
+        bull=side=='buy'; own_bias=bm1 if bull else sm1; opp_bias=sm1 if bull else bm1
+        micro_align=(bull and (m1st=='HH_HL' or m1mom.startswith('BULLISH') or 'BULLISH' in m1ev)) or ((not bull) and (m1st=='LL_LH' or m1mom.startswith('BEARISH') or 'BEARISH' in m1ev))
+        event_align=(bull and 'BULLISH' in m1ev) or ((not bull) and 'BEARISH' in m1ev)
+        momentum_align=(bull and m1mom.startswith('BULLISH')) or ((not bull) and m1mom.startswith('BEARISH'))
+        strong_micro = micro_align and (event_align or 'STRONG' in m1mom or own_bias>=36)
+        context_aligned=(context_direction=='BULLISH' and bull) or (context_direction=='BEARISH' and not bull)
+        point_class='M1_PRECISION_CONTINUATION' if context_aligned else 'M1_PRECISION_TRANSITION'
+        # Counter-context points are allowed, but M1 must prove itself more strongly.
+        min_score=66 if context_aligned else 76
+        if context_direction=='MIXED': min_score=70
+        if shock: min_score+=6
+        if not micro_align: continue
+        if not context_aligned and context_direction!='MIXED' and not strong_micro: continue
+
+        for z in ((m1.get('candidate_zones') or {}).get(side) or []):
+            src=str(z.get('source') or '')
+            if src not in allowed_by_side[side]: continue
+            lo=float(z.get('low')); hi=float(z.get('high')); touches=int(z.get('touch_count') or 0); cons=str(z.get('consumption') or '').upper()
+            ahead=(hi < cp) if bull else (lo > cp)
+            if not ahead or touches>1 or cons not in ('','UNTOUCHED','LIGHT'): continue
+            dist=max(0,cp-hi) if bull else max(0,lo-cp); datr=dist/atr if atr else 99
+            if datr>5.5: continue
+            base=int(z.get('rank_score') or 0)
+            source_bonus=12 if src.startswith('DYNAMIC_BROKEN_') else 10 if src.endswith('_FVG') else 8 if src.endswith('_OB') else 5
+            micro_bonus=14 if strong_micro else 10
+            proximity=max(0,12-int(datr*3))
+            context_bonus=8 if context_aligned else 2 if context_direction=='MIXED' else -4
+            score=max(0,min(100,base+source_bonus+micro_bonus+proximity+context_bonus))
+            if score<min_score: continue
+            mode='CONTINUATION' if point_class.endswith('CONTINUATION') else 'TRANSITION'
+            rows.append({'side':side.upper(),'low':round(lo,2),'high':round(hi,2),'source':src,'score':score,'gate_score':max(bull_context,bear_context),'context_score':bull_context if bull else bear_context,'distance_m1_atr':round(datr,2),'m1_structure':m1st,'m1_momentum':m1mom,'m1_event':m1ev,'status':'QUALIFIED_PRECISION_POINT','point_class':point_class,'mode':mode,'context_direction':context_direction,'note':f'Qualified fresh M1 {mode.lower()} precision point. H1/M15/M5 are context rather than a hard lock; counter-context points require stronger M1 evidence. It is a watch area, not an automatic entry.'})
+
     rows.sort(key=lambda x:(x['score'],-x['distance_m1_atr']),reverse=True)
-    return {'state':'QUALIFIED_PRECISION_POINTS' if rows else 'UNLOCKED_NO_QUALIFIED_M1_POINT','direction':direction+'_CONTINUATION','gate_score':gate,'bull_gate':bull_gate,'bear_gate':bear_gate,'candidates':rows[:3],'m5_structure':m5.get('structure'),'m5_momentum':m5.get('momentum'),'m5_pressure':m5.get('current_pressure'),'m15_structure':m15.get('structure'),'h1_structure':h1.get('structure'),'m1_structure':m1st,'m1_momentum':m1mom,'note':'V34.2 balanced qualification: H1/M15/M5 remain the market-intelligence gate, but secondary confluence is less restrictive. M5 still produces major zones and M1 may generate fresh precision continuation points when core evidence qualifies.'}
+    if rows:
+        dirs=sorted(set(x['side'] for x in rows))
+        direction=(dirs[0] if len(dirs)==1 else 'BOTH')
+        state='QUALIFIED_PRECISION_POINTS'
+    else:
+        direction='SEARCHING_BOTH' if context_direction=='MIXED' else context_direction+'_CONTEXT'
+        state='NO_FRESH_QUALIFIED_M1_POINT'
+    return {'state':state,'direction':direction,'context_direction':context_direction,'gate_score':max(bull_context,bear_context),'bull_gate':bull_context,'bear_gate':bear_context,'candidates':rows[:4],'m5_structure':m5.get('structure'),'m5_momentum':m5.get('momentum'),'m5_pressure':m5.get('current_pressure'),'m15_structure':m15.get('structure'),'h1_structure':h1.get('structure'),'m1_structure':m1st,'m1_momentum':m1mom,'shock_caution':shock,'note':'V34.3 always-on M1 search: H1/M15/M5 provide weighted context but do not hard-lock M1. Aligned continuation points use normal qualification; counter-context transition points require stronger M1 structure. Freshness and used-zone suppression remain unchanged.'}
 
 def build_reaction_engine(m5):
     """V32 deterministic closed-M5 reaction state for zones currently being tracked.
