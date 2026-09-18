@@ -1,27 +1,16 @@
-# Gold Scanner V30 — Final Test Build
+# Gold Scanner V30.1 Fresh-Zone Test Build
 
-Final feature-frozen test build. Screenshot-free normal scanning.
+Targeted update to V30. No new market concepts were added.
 
-## Core
-- H1/M15/M5 deterministic XAU/USD structure, BOS/CHoCH, liquidity, sweeps, FVG/imbalance, OB/breakers, supply/demand, displacement, premium/discount, role flips, fake breaks/reclaims.
-- Independent Pullback Continuation and New Move Origin engines; no forced BUY/SELL area.
-- Session liquidity, previous day/week levels, volatility regime and provider volume when genuinely supplied.
-- Optional DXY, FRED Treasury/real-yield context and GOLD_FUTURES_SYMBOL.
-- Weekly CFTC managed-money positioning is fetched as slow context only; never an M5 trigger.
-- Manual high-impact event switch remains the preferred event workflow if no calendar key is configured.
+## What changed
+- Main BUY/SELL candidate lists now surface only fresh, ahead-of-price zones.
+- Zones with repeated interaction, an already-detected rejection/follow-through, or meaningful consumption are hidden as NEW opportunities.
+- Hidden used zones remain inside the market engine as historical structure/context; they are not deleted from analysis.
+- Fresh zones saved by an earlier scan continue to be graded separately after price reaches them.
+- Forward-test lifecycle can report TESTED, REACTED, FOLLOW_THROUGH, or INVALIDATED.
+- If nothing fresh qualifies, UI says NO FRESH QUALIFIED AREA.
 
-## V30 engineering / testing
-- Rate-limit protection: H1 ~50 min cache, M15 ~12 min, M5 ~4 min, reference price ~1 min; stale-cache fallback on provider errors/429.
-- DXY/futures/FRED/CFTC are cached separately to avoid wasting free API credits.
-- Market/data-feed inactive detection prevents old closed candles from looking live.
-- Forward-test lab stores frozen zones on-device and grades later zone behavior with NOT_TRIGGERED/TESTED/REACTED/INVALIDATED plus MFE/MAE and setup-type summaries.
-- Evidence score remains evidence/ranking, not probability.
+## Unchanged
+H1/M15/M5 structure, Pullback Continuation, New Move Origin, BOS/CHoCH, FVG/OB/liquidity logic, session/day/week intelligence, volatility regime, USD/FRED/CFTC context, API caching and stale-feed protection remain intact.
 
-## Render env vars
-Required: `TWELVE_DATA_API_KEY`
-Optional: `FRED_API_KEY`, `GOLD_FUTURES_SYMBOL`, `TRADING_ECONOMICS_KEY`, `GEMINI_API_KEY` (hybrid legacy endpoint only).
-
-Build: `pip install -r requirements.txt`
-Start: `gunicorn server:app`
-
-This is an analysis/forward-testing aid, not automated execution or a guarantee of profit.
+This is an analysis/testing tool, not an automatic trade instruction or guarantee.

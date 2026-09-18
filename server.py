@@ -1009,6 +1009,33 @@ def apply_market_context(mtf,ctx):
     m5['market_context']=ctx
 
 
+def filter_fresh_candidates(mtf):
+    """V30.1 presentation filter: only genuinely ahead-of-price, not-yet-used zones are new candidates.
+    Historical/used zones remain in the underlying metrics for structure/context, but are not surfaced as new opportunities.
+    """
+    m5=(mtf.get('M5') or {}).get('metrics') or {}
+    cz=m5.get('candidate_zones') or {}
+    hidden={'buy':[],'sell':[]}; fresh={'buy':[],'sell':[]}
+    for side in ('buy','sell'):
+        for z in (cz.get(side) or []):
+            stage=str(z.get('confirmation_stage') or 'WAIT').upper()
+            touches=int(z.get('touch_count') or 0)
+            consumption=str(z.get('consumption') or '').upper()
+            # One interaction is allowed for the candle/structure that created an OB/FVG/origin.
+            # Any recent test/rejection/follow-through or repeated interaction makes it USED for display.
+            is_fresh=(stage=='WAIT' and touches<=1 and consumption in ('','UNTOUCHED','LIGHT'))
+            z['display_fresh']=bool(is_fresh)
+            z['freshness']='FRESH' if is_fresh else 'USED'
+            if is_fresh: fresh[side].append(z)
+            else:
+                q=dict(z); q['hidden_reason']='Previously interacted with / reacted / consumed; retained internally as market evidence.'
+                hidden[side].append(q)
+    m5['all_candidate_zones']=cz
+    m5['candidate_zones']=fresh
+    m5['hidden_used_zones']=hidden
+    m5['opportunity_map']={'current_price':(m5.get('opportunity_map') or {}).get('current_price',m5.get('data_current_price')),'market_phase':m5.get('market_phase','UNCLEAR'),'buy_watch_areas':fresh['buy'],'sell_watch_areas':fresh['sell'],'purpose':'V30.1 fresh-only ahead-of-price candidates. Used zones remain internal evidence, not new opportunities.'}
+    return mtf
+
 def data_only_result(mtf,data_status,data_note,why='Gemini visual check unavailable'):
     m5=mtf.get('M5',{}).get('metrics',{}); m15=mtf.get('M15',{}).get('metrics',{}); h1=mtf.get('H1',{}).get('metrics',{})
     def top(side):
@@ -1036,14 +1063,15 @@ def live_scan():
             return jsonify({'error':'market_data_unavailable','detail':data_note}),503
         market_context=build_market_context(mtf)
         apply_market_context(mtf,market_context)
+        filter_fresh_candidates(mtf)
         out=data_only_result(mtf,data_status,data_note,'NOT_USED_LIVE_DATA_MODE')
         out['mode']='LIVE_DATA_CONTEXT'
         out['gemini_status']='NOT_USED'
-        out['scanner_version']='V30 FINAL TEST BUILD'
+        out['scanner_version']='V30.1 FRESH-ZONE TEST BUILD'
         out['market_context']=market_context
         out['event_risk']=market_context.get('event_risk','UNKNOWN')
         out['data_only_summary']=out['data_only_summary'].replace('V26 maps','V30 maps')
-        out['note']='Screenshot-free deterministic scan. Pullback Continuation and New Move Origin both run every scan. Session/previous-day/week liquidity, volatility regime, available volume, USD/rates and optional futures context can adjust ranking; none can invent or move technical zones.'
+        out['note']='Fresh-zone deterministic scan. Only fresh/untested qualified zones are surfaced as NEW candidates. Used/rejected zones remain internal market evidence. Previously saved fresh zones are tracked separately through testing, follow-through or invalidation.'
         return jsonify(out)
     except Exception as e:
         return jsonify({'error':'live_scan_failed','detail':str(e)[:1200]}),500
@@ -1095,7 +1123,14 @@ def evaluate_setup(setup,candles):
             invalid=any(x['c']<lo for x in post); mfe=max(x['h']-mid for x in post); mae=max(mid-x['l'] for x in post)
         else:
             invalid=any(x['c']>hi for x in post); mfe=max(mid-x['l'] for x in post); mae=max(x['h']-mid for x in post)
-        out[side]='INVALIDATED' if invalid else 'REACTED' if mfe>0 else 'TESTED'
+        # FOLLOW_THROUGH requires favorable movement after the first touch, not merely a wick/reaction.
+        follow=False
+        if len(post)>=2:
+            if side=='buy':
+                follow=any(post[i]['c']>hi and post[i]['c']>post[i-1]['c'] for i in range(1,len(post)))
+            else:
+                follow=any(post[i]['c']<lo and post[i]['c']<post[i-1]['c'] for i in range(1,len(post)))
+        out[side]='INVALIDATED' if invalid else 'FOLLOW_THROUGH' if follow else 'REACTED' if mfe>0 else 'TESTED'
         out[side+'_mfe']=round(max(0,mfe),3); out[side+'_mae']=round(max(0,mae),3)
     return out
 
@@ -1124,7 +1159,7 @@ def outcomes():
                 g=groups.setdefault(typ,{'samples':0,'triggered':0,'reacted':0,'invalidated':0,'mfe':[],'mae':[]})
                 g['samples']+=1; state=r.get(side)
                 if state!='NOT_TRIGGERED':g['triggered']+=1
-                if state=='REACTED':g['reacted']+=1
+                if state in ('REACTED','FOLLOW_THROUGH'):g['reacted']+=1
                 if state=='INVALIDATED':g['invalidated']+=1
                 if r.get(side+'_mfe') is not None:g['mfe'].append(r[side+'_mfe'])
                 if r.get(side+'_mae') is not None:g['mae'].append(r[side+'_mae'])
