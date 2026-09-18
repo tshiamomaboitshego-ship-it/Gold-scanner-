@@ -452,13 +452,17 @@ def analytics(c):
 
     # V26 multi-candidate opportunity map. Deterministic candidates are ranked evidence locations, not signals.
     cp=last['c']; candidates=[]; ztol=max(atr*0.18,0.25)
-    def add_candidate(side,lo,hi,kind,base,meta=None):
+    def add_candidate(side,lo,hi,kind,base,meta=None,touch_from=None):
         lo,hi=float(min(lo,hi)),float(max(lo,hi))
         if side=='BUY' and hi>=cp: return
         if side=='SELL' and lo<=cp: return
-        # Count recent interactions; repeated tests increase consumption.
-        recent60=c[-60:]; touches=sum(1 for x in recent60 if x['l']<=hi and x['h']>=lo)
-        bodies=sum(1 for x in recent60[-8:] if (side=='BUY' and x['c']<hi) or (side=='SELL' and x['c']>lo))
+        # Count interactions. Dynamic break/retest candidates only count candles AFTER
+        # the structural break, so the old swing that created the level is not falsely
+        # treated as a prior retest.
+        recent60=c[-60:] if touch_from is None else c[max(0,int(touch_from)):]
+        touches=sum(1 for x in recent60 if x['l']<=hi and x['h']>=lo)
+        body_window=recent60[-8:]
+        bodies=sum(1 for x in body_window if (side=='BUY' and x['c']<hi) or (side=='SELL' and x['c']>lo))
         distance=(cp-hi) if side=='BUY' else (lo-cp)
         score=base - min(24,max(0,touches-1)*6) - min(12,bodies*2) - min(12,int((distance/(atr or 1))*2))
         score=max(0,min(100,int(score)))
@@ -490,13 +494,72 @@ def analytics(c):
     add_candidate('SELL',range_hi-ztol,range_hi+ztol,'RANGE_HIGH_ORIGIN',70,{'market_phase':phase,'liquidity':'external_above'})
     for v in eql[-2:]: add_candidate('BUY',v-ztol,v+ztol,'EQUAL_LOW_LIQUIDITY',68,{'liquidity_pool':True})
     for v in eqh[-2:]: add_candidate('SELL',v-ztol,v+ztol,'EQUAL_HIGH_LIQUIDITY',68,{'liquidity_pool':True})
+
+    # V30.2 DYNAMIC PULLBACK ENGINE.
+    # Detect an active retracement after a meaningful impulse, then look for a fresh
+    # first retest of structure that was broken by that impulse. This does NOT turn
+    # every bounce into a setup and it does not recycle an already-tested level.
+    dynamic={'state':'NONE','direction':'NONE','impulse_atr':0.0,'retracement_atr':0.0,'fresh_continuation_found':False,'note':'No active qualified pullback detected.'}
+    lookback=max(0,len(c)-28)
+    recent_seg=c[lookback:]
+    if len(recent_seg)>=8:
+        # Bearish impulse -> current bounce from a recent low.
+        low_rel=min(range(len(recent_seg)), key=lambda k: recent_seg[k]['l'])
+        low_idx=lookback+low_rel; low_px=recent_seg[low_rel]['l']
+        pre_high=max(x['h'] for x in c[max(0,low_idx-12):low_idx+1]) if low_idx>=lookback else low_px
+        bear_imp=(pre_high-low_px)/(atr or 1)
+        bear_retrace=(cp-low_px)/(atr or 1)
+        bearish_context=(structure=='LL_LH' or pressure in ('BEARISH','EXTREME_BEARISH') or mom.startswith('BEARISH'))
+        bear_active=bearish_context and bear_imp>=1.8 and bear_retrace>=0.45 and low_idx<=len(c)-2
+
+        # Bullish impulse -> current dip from a recent high.
+        high_rel=max(range(len(recent_seg)), key=lambda k: recent_seg[k]['h'])
+        high_idx=lookback+high_rel; high_px=recent_seg[high_rel]['h']
+        pre_low=min(x['l'] for x in c[max(0,high_idx-12):high_idx+1]) if high_idx>=lookback else high_px
+        bull_imp=(high_px-pre_low)/(atr or 1)
+        bull_retrace=(high_px-cp)/(atr or 1)
+        bullish_context=(structure=='HH_HL' or pressure in ('BULLISH','EXTREME_BULLISH') or mom.startswith('BULLISH'))
+        bull_active=bullish_context and bull_imp>=1.8 and bull_retrace>=0.45 and high_idx<=len(c)-2
+
+        if bear_active and (not bull_active or bear_imp>=bull_imp):
+            dynamic={'state':'PULLBACK_IN_PROGRESS','direction':'BEARISH_CONTINUATION','impulse_atr':round(bear_imp,2),'retracement_atr':round(bear_retrace,2),'fresh_continuation_found':False,'note':'Bearish impulse followed by an upward M5 retracement. Searching for a fresh first-retest continuation level.'}
+            # A prior swing low that closed below during the impulse can become fresh resistance.
+            for si,sv in reversed(swings_lo):
+                if si>=low_idx or si<max(0,low_idx-35): continue
+                breaks=[j for j in range(si+1,low_idx+1) if c[j]['c'] < sv-0.05*atr]
+                if not breaks: continue
+                bi=breaks[0]
+                lo,hi=sv-ztol,sv+ztol
+                # Must still be ahead of price and untested after the break.
+                post=c[bi+1:]
+                tested=any(x['l']<=hi and x['h']>=lo for x in post)
+                if lo>cp and not tested:
+                    add_candidate('SELL',lo,hi,'DYNAMIC_BROKEN_SUPPORT_RETEST',82,{'dynamic_pullback':True,'broken_swing':round(sv,2),'break_index':bi},touch_from=bi+1)
+                    dynamic['fresh_continuation_found']=True
+                    dynamic['note']='Bearish pullback active; a fresh broken-support first-retest area was found ahead of price.'
+                    break
+        elif bull_active:
+            dynamic={'state':'PULLBACK_IN_PROGRESS','direction':'BULLISH_CONTINUATION','impulse_atr':round(bull_imp,2),'retracement_atr':round(bull_retrace,2),'fresh_continuation_found':False,'note':'Bullish impulse followed by a downward M5 retracement. Searching for a fresh first-retest continuation level.'}
+            for si,sv in reversed(swings_hi):
+                if si>=high_idx or si<max(0,high_idx-35): continue
+                breaks=[j for j in range(si+1,high_idx+1) if c[j]['c'] > sv+0.05*atr]
+                if not breaks: continue
+                bi=breaks[0]
+                lo,hi=sv-ztol,sv+ztol
+                post=c[bi+1:]
+                tested=any(x['l']<=hi and x['h']>=lo for x in post)
+                if hi<cp and not tested:
+                    add_candidate('BUY',lo,hi,'DYNAMIC_BROKEN_RESISTANCE_RETEST',82,{'dynamic_pullback':True,'broken_swing':round(sv,2),'break_index':bi},touch_from=bi+1)
+                    dynamic['fresh_continuation_found']=True
+                    dynamic['note']='Bullish pullback active; a fresh broken-resistance first-retest area was found below price.'
+                    break
     # Deduplicate overlapping same-side candidates, preserving the stronger one.
     ranked=[]
     for q in sorted(candidates,key=lambda x:x['rank_score'],reverse=True):
         if not any(r['side']==q['side'] and not (q['high']<r['low']-ztol or q['low']>r['high']+ztol) for r in ranked): ranked.append(q)
     candidate_zones={'buy':[x for x in ranked if x['side']=='BUY'][:4],'sell':[x for x in ranked if x['side']=='SELL'][:4]}
 
-    return {'closed_candle_engine':True,'reaction_quality':reaction_quality,'latest_wick_rejection':wick_reject,'recent_bull_candles':bull,'recent_bear_candles':bear,'data_current_price':round(last['c'],3),'atr14':round(atr,3),'structure':structure,'structure_event':event,'momentum':mom,'volatility':vol,'current_pressure':pressure,'market_phase':phase,'shock_detector':shock,'last_candle_range_atr':round(range_atr,2),'last_candle_body_atr':round(body_atr,2),'approach_speed':speed,'move_3bar_atr':round(move3_atr,2),'last_swing_highs':[round(x[1],2) for x in swings_hi[-3:]],'last_swing_lows':[round(x[1],2) for x in swings_lo[-3:]],'equal_highs':eqh[-2:],'equal_lows':eql[-2:],'recent_5bar_move':round(move,3),'avg_body_5':round(avg_body,3),'displacement':displacement,'recent_fvgs':fvgs[-4:],'session_utc':session,'extension_atr_5bar':extension_atr,'chase_risk':chase_risk,'fvg_quality':quality_fvgs[-6:],'order_blocks':obs,'premium_discount':{'state':pd,'range_low':round(range_lo,2),'equilibrium':round(equilibrium,2),'range_high':round(range_hi,2)},'external_liquidity':external_liq,'internal_liquidity':internal_liq,'liquidity_sweep':sweep,'body_acceptance':acceptance,'session_liquidity':session_liq,'price_action_sequence':sequence,'confluence_cluster':confluence,'candidate_zones':candidate_zones,'latest_closed_candles':c[-12:]}
+    return {'closed_candle_engine':True,'reaction_quality':reaction_quality,'latest_wick_rejection':wick_reject,'recent_bull_candles':bull,'recent_bear_candles':bear,'data_current_price':round(last['c'],3),'atr14':round(atr,3),'structure':structure,'structure_event':event,'momentum':mom,'volatility':vol,'current_pressure':pressure,'market_phase':phase,'shock_detector':shock,'last_candle_range_atr':round(range_atr,2),'last_candle_body_atr':round(body_atr,2),'approach_speed':speed,'move_3bar_atr':round(move3_atr,2),'last_swing_highs':[round(x[1],2) for x in swings_hi[-3:]],'last_swing_lows':[round(x[1],2) for x in swings_lo[-3:]],'equal_highs':eqh[-2:],'equal_lows':eql[-2:],'recent_5bar_move':round(move,3),'avg_body_5':round(avg_body,3),'displacement':displacement,'recent_fvgs':fvgs[-4:],'session_utc':session,'extension_atr_5bar':extension_atr,'chase_risk':chase_risk,'fvg_quality':quality_fvgs[-6:],'order_blocks':obs,'premium_discount':{'state':pd,'range_low':round(range_lo,2),'equilibrium':round(equilibrium,2),'range_high':round(range_hi,2)},'external_liquidity':external_liq,'internal_liquidity':internal_liq,'liquidity_sweep':sweep,'body_acceptance':acceptance,'session_liquidity':session_liq,'price_action_sequence':sequence,'confluence_cluster':confluence,'candidate_zones':candidate_zones,'dynamic_pullback':dynamic,'latest_closed_candles':c[-12:]}
 
 
 
@@ -557,7 +620,7 @@ def enrich_mtf_candidates(mtf):
             seq_support=(bull and seq.startswith('BULLISH')) or ((not bull) and seq.startswith('BEARISH'))
             new_move=(origin_source and transition_phase) or local_origin
             if seq_support: new_move=True
-            pullback=trend_aligned and src in {'BULLISH_OB','BEARISH_OB','BULLISH_FVG','BEARISH_FVG','SWING_DEMAND','SWING_SUPPLY'}
+            pullback=trend_aligned and src in {'BULLISH_OB','BEARISH_OB','BULLISH_FVG','BEARISH_FVG','SWING_DEMAND','SWING_SUPPLY','DYNAMIC_BROKEN_SUPPORT_RETEST','DYNAMIC_BROKEN_RESISTANCE_RETEST'}
             z['setup_type']='BOTH' if new_move and pullback else 'NEW_MOVE_ORIGIN' if new_move else 'PULLBACK_CONTINUATION' if pullback else 'WATCH_AREA'
             # Current price ranks relevance AFTER structural candidates exist; it never creates direction.
             dist=float(z.get('distance_atr') or 0)
@@ -1048,7 +1111,7 @@ def data_only_result(mtf,data_status,data_note,why='Gemini visual check unavaila
       'approach_speed':m5.get('approach_speed','UNCLEAR'),'m5_state':'BULLISH' if str(m5.get('momentum','')).startswith('BULLISH') else 'BEARISH' if str(m5.get('momentum','')).startswith('BEARISH') else 'UNCLEAR',
       'structure':m5.get('structure','UNCLEAR'),'structure_event':m5.get('structure_event','NONE'),'volatility':m5.get('volatility','NORMAL'),'momentum':m5.get('momentum','UNCLEAR'),
       'multi_timeframe_metrics':{'H1':h1,'M15':m15,'M5':m5},'candidate_zones':m5.get('candidate_zones',{}),'opportunity_map':m5.get('opportunity_map',{}),
-      'data_only_summary':f"H1 {h1.get('structure','—')} · M15 {m15.get('structure','—')} · M5 {m5.get('structure','—')}. V26 maps ahead-of-price pullback and new-move-origin candidates with H1/M15 confluence; Gemini visual confirmation unavailable.",
+      'dynamic_pullback':m5.get('dynamic_pullback',{}),'data_only_summary':f"H1 {h1.get('structure','—')} · M15 {m15.get('structure','—')} · M5 {m5.get('structure','—')}. V26 maps ahead-of-price pullback and new-move-origin candidates with H1/M15 confluence; Gemini visual confirmation unavailable.",
       'buy_candidate':top('buy'),'sell_candidate':top('sell'),
       'note':'Data-only analysis aid. Ahead-of-price watch areas are deterministic evidence locations, not predictions or guaranteed reversal points.'
     }

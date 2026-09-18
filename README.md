@@ -1,16 +1,10 @@
-# Gold Scanner V30.1 Fresh-Zone Test Build
+# Gold Scanner V30.2 — Dynamic Pullback Test Build
 
-Targeted update to V30. No new market concepts were added.
+Adds a deterministic dynamic pullback engine to V30.1 while preserving fresh-only candidates.
 
-## What changed
-- Main BUY/SELL candidate lists now surface only fresh, ahead-of-price zones.
-- Zones with repeated interaction, an already-detected rejection/follow-through, or meaningful consumption are hidden as NEW opportunities.
-- Hidden used zones remain inside the market engine as historical structure/context; they are not deleted from analysis.
-- Fresh zones saved by an earlier scan continue to be graded separately after price reaches them.
-- Forward-test lifecycle can report TESTED, REACTED, FOLLOW_THROUGH, or INVALIDATED.
-- If nothing fresh qualifies, UI says NO FRESH QUALIFIED AREA.
-
-## Unchanged
-H1/M15/M5 structure, Pullback Continuation, New Move Origin, BOS/CHoCH, FVG/OB/liquidity logic, session/day/week intelligence, volatility regime, USD/FRED/CFTC context, API caching and stale-feed protection remain intact.
-
-This is an analysis/testing tool, not an automatic trade instruction or guarantee.
+- Detects a meaningful M5 impulse followed by an opposing retracement.
+- Shows PULLBACK IN PROGRESS even when no fresh continuation zone qualifies.
+- Searches for a fresh first retest of structure broken by the impulse (broken support for bearish continuation; broken resistance for bullish continuation).
+- Never recycles a level already retested after the break.
+- Existing H1/M15/M5, macro/session, caching, stale-feed protection, fresh-zone filtering, Pullback Continuation, New Move Origin, and forward-test logic remain.
+- Dynamic pullback state is analysis, not an automatic trade instruction.
