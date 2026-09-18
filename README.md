@@ -1,17 +1,11 @@
-# Gold Scanner V34.4 — M1 Pullback State + Always-On M1
+# Gold Scanner V34.6 — Inducement Context
 
-V34.4 is a targeted update to V34.2.
+Built from V34.4. Keeps balanced fresh-only M5 zones, always-on M1 precision, M1 pullback-state detection, transition/reaction engines, caching and context layers.
 
-- M5 remains the major-zone generator.
-- H1/M15/M5 remain weighted market context, but no longer hard-lock M1 point generation.
-- M1 always searches both BUY and SELL precision structures.
-- M1 points aligned with higher-timeframe context use normal qualification.
-- Counter-context M1 points are classified as TRANSITION points and require stronger M1 structure/evidence.
-- Fresh-only M1 memory remains: tested points and substantially overlapping rediscoveries stay hidden.
-- M5 balanced/fresh-only behavior is unchanged from V34.2.
-- No point is forced when no fresh structure qualifies.
+V34.6 adds a conservative inducement relationship layer. Minor internal liquidity sitting sensibly in front of an existing BUY/SELL candidate can add a small +4 evidence/ranking bonus. Inducement never creates a zone, never forces direction, never vetoes a valid zone, and is not mandatory. This avoids re-tightening the scanner while improving candidate ranking/selection.
 
-Precision/evidence scores are not win probabilities. Zones are watch areas, not automatic entries.
+Evidence scores are not win probabilities. Zones are watch areas, not automatic entries.
 
 
-V34.4 targeted fix: M1 pullback STATE detection is independent from M1 precision-point qualification. A meaningful recent M1 impulse plus opposite retracement can display PULLBACK_STARTING / PULLBACK_IN_PROGRESS without inventing a zone. Precision points still require fresh qualified structure, and used/overlapping M1 zones remain hidden.
+## V34.6 Sequence Intelligence
+Adds five supporting concepts without making them mandatory gates: Market Structure Shift (MSS), liquidity void / Balanced Price Range (BPR), failed-auction acceptance vs rejection, nested macro/micro dealing ranges, and draw-on-liquidity path context. These can add small relationship/ranking bonuses to existing fresh M5/M1 candidates; they never create a point by themselves and never veto an otherwise qualified point.

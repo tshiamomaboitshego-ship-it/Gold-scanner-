@@ -432,6 +432,49 @@ def analytics(c):
     elif event in ('BULLISH_BOS','BULLISH_CHOCH') and recent_high_q: sequence='BULLISH_STRUCTURE_FVG'
     elif event in ('BEARISH_BOS','BEARISH_CHOCH') and recent_low_q: sequence='BEARISH_STRUCTURE_FVG'
 
+    # V34.6 FIVE-CONCEPT SEQUENCE INTELLIGENCE. Supporting context only; these features
+    # do not manufacture a zone or become mandatory gates.
+    # 1) Market Structure Shift (MSS): a sweep/reclaim plus decisive displacement through structure.
+    mss='NONE'
+    if sweep=='SELL_SIDE_SWEEP_RECLAIM_UP' and displacement=='BULLISH' and event in ('BULLISH_CHOCH','BULLISH_BOS'):
+        mss='BULLISH_MSS'
+    elif sweep=='BUY_SIDE_SWEEP_RECLAIM_DOWN' and displacement=='BEARISH' and event in ('BEARISH_CHOCH','BEARISH_BOS'):
+        mss='BEARISH_MSS'
+
+    # 2) Liquidity void / Balanced Price Range (BPR): opposing unfilled FVGs that overlap.
+    active_bull=[g for g in quality_fvgs if g['type']=='BULLISH_FVG' and g.get('fill_state')!='FILLED']
+    active_bear=[g for g in quality_fvgs if g['type']=='BEARISH_FVG' and g.get('fill_state')!='FILLED']
+    bprs=[]
+    for bg in active_bull[-5:]:
+        for sg in active_bear[-5:]:
+            lo=max(float(bg['low']),float(sg['low'])); hi=min(float(bg['high']),float(sg['high']))
+            if lo < hi:
+                bprs.append({'low':round(lo,2),'high':round(hi,2),'state':'BALANCED_PRICE_RANGE'})
+    # Recent high-quality one-sided imbalance is treated as a liquidity void context.
+    liquidity_void='BULLISH_VOID' if recent_high_q and not recent_low_q else 'BEARISH_VOID' if recent_low_q and not recent_high_q else 'MIXED_OR_NONE'
+
+    # 3) Failed auction / acceptance-vs-rejection quality using several CLOSED candles.
+    recent4=c[-4:]
+    above=sum(1 for x in recent4 if x['c']>range_hi); below=sum(1 for x in recent4 if x['c']<range_lo)
+    if above>=2: auction_state='ACCEPTANCE_ABOVE_RANGE'
+    elif below>=2: auction_state='ACCEPTANCE_BELOW_RANGE'
+    elif sweep=='BUY_SIDE_SWEEP_RECLAIM_DOWN': auction_state='FAILED_AUCTION_ABOVE'
+    elif sweep=='SELL_SIDE_SWEEP_RECLAIM_UP': auction_state='FAILED_AUCTION_BELOW'
+    else: auction_state='BALANCED_OR_UNCLEAR'
+
+    # 4) Nested dealing-range hierarchy: broad range plus a recent micro range.
+    micro=c[-16:] if len(c)>=16 else c
+    micro_hi=max(x['h'] for x in micro); micro_lo=min(x['l'] for x in micro); micro_eq=(micro_hi+micro_lo)/2
+    micro_pd='PREMIUM' if last['c']>micro_eq+0.1*(micro_hi-micro_lo) else 'DISCOUNT' if last['c']<micro_eq-0.1*(micro_hi-micro_lo) else 'EQUILIBRIUM'
+    dealing_range_hierarchy={'macro':{'low':round(range_lo,2),'equilibrium':round(equilibrium,2),'high':round(range_hi,2),'state':pd},'micro':{'low':round(micro_lo,2),'equilibrium':round(micro_eq,2),'high':round(micro_hi,2),'state':micro_pd}}
+
+    # 5) Draw-on-liquidity / liquidity path: exposed pools are objectives/context, never predictions.
+    above_levels=[float(v) for v in ([range_hi]+[x for x in eqh[-2:]]+[x[1] for x in swings_hi[-2:]]) if float(v)>last['c']]
+    below_levels=[float(v) for v in ([range_lo]+[x for x in eql[-2:]]+[x[1] for x in swings_lo[-2:]]) if float(v)<last['c']]
+    nearest_above=min(above_levels,key=lambda v:v-last['c']) if above_levels else None
+    nearest_below=max(below_levels,key=lambda v:v) if below_levels else None
+    liquidity_path={'nearest_above':round(nearest_above,2) if nearest_above is not None else None,'nearest_below':round(nearest_below,2) if nearest_below is not None else None,'bias':'ABOVE' if structure=='HH_HL' and nearest_above is not None else 'BELOW' if structure=='LL_LH' and nearest_below is not None else 'TWO_SIDED','note':'Exposed liquidity context only; not a prediction that price must trade there.'}
+
     # Confluence clustering: transparent evidence count, not probability.
     bull_factors=[]; bear_factors=[]
     if structure=='HH_HL': bull_factors.append('HH/HL structure')
@@ -448,6 +491,10 @@ def analytics(c):
     if any(o['type']=='BEARISH_OB' and o['state']!='BREAKER' for o in obs): bear_factors.append('active bearish order block')
     if pd=='DISCOUNT': bull_factors.append('discount location')
     if pd=='PREMIUM': bear_factors.append('premium location')
+    if mss=='BULLISH_MSS': bull_factors.append('bullish MSS sequence')
+    if mss=='BEARISH_MSS': bear_factors.append('bearish MSS sequence')
+    if auction_state=='FAILED_AUCTION_BELOW': bull_factors.append('failed auction below')
+    if auction_state=='FAILED_AUCTION_ABOVE': bear_factors.append('failed auction above')
     confluence={'bullish':bull_factors,'bearish':bear_factors,'bullish_count':len(bull_factors),'bearish_count':len(bear_factors),'sequence':sequence}
 
     # V26 multi-candidate opportunity map. Deterministic candidates are ranked evidence locations, not signals.
@@ -637,9 +684,39 @@ def analytics(c):
         tstate='TRANSITION_CONFLICT' if max(bull_score,bear_score)>=30 else 'NO_CLEAR_TRANSITION'; tev=[]
     transition_engine={'state':tstate,'dominant_side':dominant,'evidence_score':min(100,dom_score),'bullish_score':min(100,bull_score),'bearish_score':min(100,bear_score),'evidence':tev[-6:],'prior_structure_bias':prior_bias,'note':'Closed-candle transition state only. It does not create a trade point; fresh-zone qualification remains separate.'}
 
-    return {'closed_candle_engine':True,'reaction_quality':reaction_quality,'latest_wick_rejection':wick_reject,'recent_bull_candles':bull,'recent_bear_candles':bear,'data_current_price':round(last['c'],3),'atr14':round(atr,3),'structure':structure,'structure_event':event,'momentum':mom,'volatility':vol,'current_pressure':pressure,'market_phase':phase,'shock_detector':shock,'last_candle_range_atr':round(range_atr,2),'last_candle_body_atr':round(body_atr,2),'approach_speed':speed,'move_3bar_atr':round(move3_atr,2),'last_swing_highs':[round(x[1],2) for x in swings_hi[-3:]],'last_swing_lows':[round(x[1],2) for x in swings_lo[-3:]],'equal_highs':eqh[-2:],'equal_lows':eql[-2:],'recent_5bar_move':round(move,3),'avg_body_5':round(avg_body,3),'displacement':displacement,'recent_fvgs':fvgs[-4:],'session_utc':session,'extension_atr_5bar':extension_atr,'chase_risk':chase_risk,'fvg_quality':quality_fvgs[-6:],'order_blocks':obs,'premium_discount':{'state':pd,'range_low':round(range_lo,2),'equilibrium':round(equilibrium,2),'range_high':round(range_hi,2)},'external_liquidity':external_liq,'internal_liquidity':internal_liq,'liquidity_sweep':sweep,'body_acceptance':acceptance,'session_liquidity':session_liq,'price_action_sequence':sequence,'confluence_cluster':confluence,'candidate_zones':candidate_zones,'dynamic_pullback':dynamic,'transition_engine':transition_engine,'latest_closed_candles':c[-12:]}
+    return {'closed_candle_engine':True,'reaction_quality':reaction_quality,'latest_wick_rejection':wick_reject,'recent_bull_candles':bull,'recent_bear_candles':bear,'data_current_price':round(last['c'],3),'atr14':round(atr,3),'structure':structure,'structure_event':event,'momentum':mom,'volatility':vol,'current_pressure':pressure,'market_phase':phase,'shock_detector':shock,'last_candle_range_atr':round(range_atr,2),'last_candle_body_atr':round(body_atr,2),'approach_speed':speed,'move_3bar_atr':round(move3_atr,2),'last_swing_highs':[round(x[1],2) for x in swings_hi[-3:]],'last_swing_lows':[round(x[1],2) for x in swings_lo[-3:]],'equal_highs':eqh[-2:],'equal_lows':eql[-2:],'recent_5bar_move':round(move,3),'avg_body_5':round(avg_body,3),'displacement':displacement,'recent_fvgs':fvgs[-4:],'session_utc':session,'extension_atr_5bar':extension_atr,'chase_risk':chase_risk,'fvg_quality':quality_fvgs[-6:],'order_blocks':obs,'premium_discount':{'state':pd,'range_low':round(range_lo,2),'equilibrium':round(equilibrium,2),'range_high':round(range_hi,2)},'external_liquidity':external_liq,'internal_liquidity':internal_liq,'liquidity_sweep':sweep,'body_acceptance':acceptance,'session_liquidity':session_liq,'price_action_sequence':sequence,'market_structure_shift':mss,'liquidity_void':liquidity_void,'balanced_price_ranges':bprs[-4:],'auction_state':auction_state,'dealing_range_hierarchy':dealing_range_hierarchy,'liquidity_path':liquidity_path,'confluence_cluster':confluence,'candidate_zones':candidate_zones,'dynamic_pullback':dynamic,'transition_engine':transition_engine,'latest_closed_candles':c[-12:]}
 
 
+
+def inducement_relationship(m, side, z, atr=None):
+    """V34.5 supporting context only: identify minor internal liquidity sitting in front of a candidate.
+    This never creates a zone and never vetoes one. It can add a small ranking bonus when the
+    geometry is sensible: minor low above BUY demand / minor high below SELL supply.
+    """
+    try:
+        cp=float(m.get('data_current_price')); lo=float(z.get('low')); hi=float(z.get('high'))
+        atr=float(atr or m.get('atr14') or 1)
+    except (TypeError,ValueError):
+        return {'present':False,'level':None,'bonus':0,'note':'NONE'}
+    il=m.get('internal_liquidity') or {}
+    vals=(il.get('minor_lows') or []) + (il.get('equal_lows') or []) if side=='buy' else (il.get('minor_highs') or []) + (il.get('equal_highs') or [])
+    clean=[]
+    for v in vals:
+        try: clean.append(float(v))
+        except (TypeError,ValueError): pass
+    # For BUY, a minor low between current price and demand may be swept before demand is tested.
+    # For SELL, a minor high between current price and supply may be swept first.
+    if side=='buy':
+        front=[v for v in clean if hi < v < cp]
+        level=min(front, key=lambda v:abs(v-hi)) if front else None
+        sensible=level is not None and (level-hi) <= max(atr*1.8,0.35)
+    else:
+        front=[v for v in clean if cp < v < lo]
+        level=min(front, key=lambda v:abs(lo-v)) if front else None
+        sensible=level is not None and (lo-level) <= max(atr*1.8,0.35)
+    if not sensible:
+        return {'present':False,'level':round(level,2) if level is not None else None,'bonus':0,'note':'NONE'}
+    return {'present':True,'level':round(level,2),'bonus':4,'note':'Minor internal liquidity/possible inducement sits in front of the candidate; supporting context only.'}
 
 def enrich_mtf_candidates(mtf):
     """V26: rank M5 watch areas with M15/H1 confluence, current-price relevance, and setup type without letting HTF force direction."""
@@ -676,6 +753,25 @@ def enrich_mtf_candidates(mtf):
             target=ext.get('below' if bull else 'above')
             if isinstance(target,(int,float)):
                 if (bull and target < z['low']) or ((not bull) and target > z['high']): opposition.append('external liquidity remains beyond zone')
+            ind=inducement_relationship(m5,side,z,atr)
+            if ind.get('present'):
+                bonus+=int(ind.get('bonus') or 0); evidence.append('possible inducement/internal liquidity in front of zone')
+            z['inducement_context']=ind
+            # V34.6 relationship bonuses are deliberately small and never veto a valid fresh zone.
+            seq_bonus=0; seq_ctx=[]
+            mss=str(m5.get('market_structure_shift') or 'NONE')
+            auc=str(m5.get('auction_state') or 'BALANCED_OR_UNCLEAR')
+            dr=m5.get('dealing_range_hierarchy') or {}; micro_pd=((dr.get('micro') or {}).get('state'))
+            lp=m5.get('liquidity_path') or {}
+            bprs=m5.get('balanced_price_ranges') or []
+            if (bull and mss=='BULLISH_MSS') or ((not bull) and mss=='BEARISH_MSS'): seq_bonus+=5; seq_ctx.append('MSS aligned')
+            if (bull and auc=='FAILED_AUCTION_BELOW') or ((not bull) and auc=='FAILED_AUCTION_ABOVE'): seq_bonus+=4; seq_ctx.append('failed-auction rejection aligned')
+            if (bull and micro_pd=='DISCOUNT') or ((not bull) and micro_pd=='PREMIUM'): seq_bonus+=3; seq_ctx.append('micro dealing-range location')
+            if any(not (z['high']<float(r['low'])-atr*.2 or z['low']>float(r['high'])+atr*.2) for r in bprs): seq_bonus+=3; seq_ctx.append('BPR/imbalance overlap')
+            draw=lp.get('nearest_above' if bull else 'nearest_below')
+            if isinstance(draw,(int,float)): seq_bonus+=2; seq_ctx.append('exposed liquidity in setup direction')
+            bonus+=min(12,seq_bonus)
+            z['sequence_context']={'bonus':min(12,seq_bonus),'evidence':seq_ctx}
             z['m5_base_score']=base; z['mtf_bonus']=bonus; z['rank_score']=max(0,min(100,base+bonus))
             z['mtf_evidence']=evidence; z['mtf_opposition']=opposition
             z['depth']='SHALLOW'
@@ -1264,10 +1360,22 @@ def build_m1_precision_engine(mtf):
             context_bonus=8 if context_aligned else 2 if context_direction=='MIXED' else -4
             pbdir=str(pullback_state.get('direction') or '')
             pullback_bonus=6 if (bull and pbdir=='BULLISH_CONTINUATION') or ((not bull) and pbdir=='BEARISH_CONTINUATION') else 0
-            score=max(0,min(100,base+source_bonus+micro_bonus+proximity+context_bonus+pullback_bonus))
+            ind=inducement_relationship(m1,side,z,atr)
+            inducement_bonus=int(ind.get('bonus') or 0)
+            # V34.6 M1 sequence intelligence: supportive bonuses only, never mandatory.
+            seq_bonus=0; seq_ev=[]
+            mss=str(m1.get('market_structure_shift') or 'NONE'); auc=str(m1.get('auction_state') or '')
+            dr=m1.get('dealing_range_hierarchy') or {}; micro_pd=((dr.get('micro') or {}).get('state'))
+            lp=m1.get('liquidity_path') or {}; bprs=m1.get('balanced_price_ranges') or []
+            if (bull and mss=='BULLISH_MSS') or ((not bull) and mss=='BEARISH_MSS'): seq_bonus+=5; seq_ev.append('MSS')
+            if (bull and auc=='FAILED_AUCTION_BELOW') or ((not bull) and auc=='FAILED_AUCTION_ABOVE'): seq_bonus+=4; seq_ev.append('failed auction')
+            if (bull and micro_pd=='DISCOUNT') or ((not bull) and micro_pd=='PREMIUM'): seq_bonus+=3; seq_ev.append('nested range')
+            if any(not (hi<float(r['low'])-atr*.2 or lo>float(r['high'])+atr*.2) for r in bprs): seq_bonus+=3; seq_ev.append('BPR')
+            if isinstance(lp.get('nearest_above' if bull else 'nearest_below'),(int,float)): seq_bonus+=2; seq_ev.append('liquidity path')
+            score=max(0,min(100,base+source_bonus+micro_bonus+proximity+context_bonus+pullback_bonus+inducement_bonus+min(12,seq_bonus)))
             if score<min_score: continue
             mode='CONTINUATION' if point_class.endswith('CONTINUATION') else 'TRANSITION'
-            rows.append({'side':side.upper(),'low':round(lo,2),'high':round(hi,2),'source':src,'score':score,'gate_score':max(bull_context,bear_context),'context_score':bull_context if bull else bear_context,'distance_m1_atr':round(datr,2),'m1_structure':m1st,'m1_momentum':m1mom,'m1_event':m1ev,'status':'QUALIFIED_PRECISION_POINT','point_class':point_class,'mode':mode,'context_direction':context_direction,'note':f'Qualified fresh M1 {mode.lower()} precision point. H1/M15/M5 are context rather than a hard lock; counter-context points require stronger M1 evidence. It is a watch area, not an automatic entry.'})
+            rows.append({'side':side.upper(),'low':round(lo,2),'high':round(hi,2),'source':src,'score':score,'gate_score':max(bull_context,bear_context),'context_score':bull_context if bull else bear_context,'distance_m1_atr':round(datr,2),'m1_structure':m1st,'m1_momentum':m1mom,'m1_event':m1ev,'status':'QUALIFIED_PRECISION_POINT','point_class':point_class,'mode':mode,'context_direction':context_direction,'inducement_context':ind,'sequence_context':{'bonus':min(12,seq_bonus),'evidence':seq_ev},'note':f'Qualified fresh M1 {mode.lower()} precision point. Possible inducement is supporting context only and can add at most a small ranking bonus; it never creates a point. H1/M15/M5 are context rather than a hard lock. It is a watch area, not an automatic entry.'})
 
     rows.sort(key=lambda x:(x['score'],-x['distance_m1_atr']),reverse=True)
     if rows:
@@ -1277,7 +1385,7 @@ def build_m1_precision_engine(mtf):
     else:
         direction='SEARCHING_BOTH' if context_direction=='MIXED' else context_direction+'_CONTEXT'
         state='NO_FRESH_QUALIFIED_M1_POINT'
-    return {'state':state,'direction':direction,'context_direction':context_direction,'gate_score':max(bull_context,bear_context),'bull_gate':bull_context,'bear_gate':bear_context,'candidates':rows[:4],'m1_pullback':pullback_state,'m5_structure':m5.get('structure'),'m5_momentum':m5.get('momentum'),'m5_pressure':m5.get('current_pressure'),'m15_structure':m15.get('structure'),'h1_structure':h1.get('structure'),'m1_structure':m1st,'m1_momentum':m1mom,'shock_caution':shock,'note':'V34.4 always-on M1 search separates pullback-state detection from precision-point qualification. H1/M15/M5 remain weighted context, not a hard lock. A detected pullback can exist even when no fresh M1 point qualifies. Freshness and used-zone suppression remain unchanged.'}
+    return {'state':state,'direction':direction,'context_direction':context_direction,'gate_score':max(bull_context,bear_context),'bull_gate':bull_context,'bear_gate':bear_context,'candidates':rows[:4],'m1_pullback':pullback_state,'m5_structure':m5.get('structure'),'m5_momentum':m5.get('momentum'),'m5_pressure':m5.get('current_pressure'),'m15_structure':m15.get('structure'),'h1_structure':h1.get('structure'),'m1_structure':m1st,'m1_momentum':m1mom,'shock_caution':shock,'note':'V34.6 keeps always-on M1 and adds MSS, BPR/liquidity-void, failed-auction acceptance/rejection, nested dealing ranges, and liquidity-path context as supporting evidence only. It does not make these concepts mandatory. V34.5 keeps always-on M1 and pullback-state separation, and adds possible inducement as a small supporting relationship only. It never creates or vetoes a point. V34.4 always-on M1 search separates pullback-state detection from precision-point qualification. H1/M15/M5 remain weighted context, not a hard lock. A detected pullback can exist even when no fresh M1 point qualifies. Freshness and used-zone suppression remain unchanged.'}
 
 def build_reaction_engine(m5):
     """V32 deterministic closed-M5 reaction state for zones currently being tracked.
@@ -1399,11 +1507,11 @@ def live_scan():
         out=data_only_result(mtf,data_status,data_note,'NOT_USED_LIVE_DATA_MODE')
         out['mode']='LIVE_DATA_CONTEXT'
         out['gemini_status']='NOT_USED'
-        out['scanner_version']='V34.4 M1 PULLBACK STATE'
+        out['scanner_version']='V34.5 INDUCEMENT CONTEXT'
         out['market_context']=market_context
         out['event_risk']=market_context.get('event_risk','UNKNOWN')
         out['data_only_summary']=out['data_only_summary'].replace('V26 maps','V30 maps')
-        out['note']='V34.4 keeps V34.3 always-on M1 and fresh-only protections, while separating M1 pullback-state detection from M1 point qualification. M1 can report a developing bullish/bearish pullback even when no fresh precision zone qualifies; only real fresh structure can create a displayed point.'
+        out['note']='V34.5 keeps V34.4 always-on M1, pullback-state separation and fresh-only protections, and adds inducement/internal-liquidity relationship as a small optional ranking bonus only. It never creates or vetoes a zone. V34.4 separates M1 pullback-state detection from M1 point qualification. M1 can report a developing bullish/bearish pullback even when no fresh precision zone qualifies; only real fresh structure can create a displayed point.'
         return jsonify(out)
     except Exception as e:
         return jsonify({'error':'live_scan_failed','detail':str(e)[:1200]}),500
