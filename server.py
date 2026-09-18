@@ -1151,8 +1151,45 @@ def apply_market_context(mtf,ctx):
 
 
 
+def build_m1_pullback_state(m1):
+    """V34.4: sensitive M1 pullback STATE detector, separate from point qualification.
+    Detects a recent meaningful impulse followed by an opposite retracement using closed M1 candles.
+    It never creates a point by itself.
+    """
+    c=(m1 or {}).get('latest_closed_candles') or []
+    atr=float((m1 or {}).get('atr14') or 0)
+    if len(c)<8 or atr<=0:
+        return {'state':'NONE','direction':'NONE','market_state_detected':False,'note':'Not enough closed M1 data for pullback-state detection.'}
+    cp=float((m1 or {}).get('data_current_price') or c[-1].get('c') or 0)
+    start=max(0,len(c)-30); seg=c[start:]
+    low_rel=min(range(len(seg)),key=lambda k:seg[k]['l']); high_rel=max(range(len(seg)),key=lambda k:seg[k]['h'])
+    low_idx=start+low_rel; high_idx=start+high_rel; low_px=seg[low_rel]['l']; high_px=seg[high_rel]['h']
+
+    bear_slice=c[max(start,low_idx-14):low_idx+1]
+    bear_start=max(start,low_idx-14)+max(range(len(bear_slice)),key=lambda k:bear_slice[k]['h'])
+    bear_imp=(c[bear_start]['h']-low_px)/atr
+    bear_ret=max(0.0,(cp-low_px)/atr); bear_ratio=bear_ret/max(bear_imp,1e-9)
+
+    bull_slice=c[max(start,high_idx-14):high_idx+1]
+    bull_start=max(start,high_idx-14)+min(range(len(bull_slice)),key=lambda k:bull_slice[k]['l'])
+    bull_imp=(high_px-c[bull_start]['l'])/atr
+    bull_ret=max(0.0,(high_px-cp)/atr); bull_ratio=bull_ret/max(bull_imp,1e-9)
+
+    # M1 should recognize the state early; point qualification remains stricter downstream.
+    bear=(bear_start<low_idx and low_idx>=len(c)-10 and bear_imp>=1.05 and bear_ret>=0.15 and bear_ratio<=0.90)
+    bull=(bull_start<high_idx and high_idx>=len(c)-10 and bull_imp>=1.05 and bull_ret>=0.15 and bull_ratio<=0.90)
+    choose=None
+    if bear and bull: choose='BEAR' if low_idx>high_idx else 'BULL'
+    elif bear: choose='BEAR'
+    elif bull: choose='BULL'
+    if choose=='BEAR':
+        return {'state':'PULLBACK_STARTING' if bear_ret<0.40 else 'PULLBACK_IN_PROGRESS','direction':'BEARISH_CONTINUATION','market_state_detected':True,'impulse_atr':round(bear_imp,2),'retracement_atr':round(bear_ret,2),'retracement_ratio':round(bear_ratio,2),'note':'Latest meaningful M1 impulse is bearish and an upward retracement is developing. This state does not create a SELL point by itself.'}
+    if choose=='BULL':
+        return {'state':'PULLBACK_STARTING' if bull_ret<0.40 else 'PULLBACK_IN_PROGRESS','direction':'BULLISH_CONTINUATION','market_state_detected':True,'impulse_atr':round(bull_imp,2),'retracement_atr':round(bull_ret,2),'retracement_ratio':round(bull_ratio,2),'note':'Latest meaningful M1 impulse is bullish and a downward retracement is developing. This state does not create a BUY point by itself.'}
+    return {'state':'NONE','direction':'NONE','market_state_detected':False,'impulse_atr':0.0,'retracement_atr':0.0,'retracement_ratio':0.0,'note':'No meaningful active M1 pullback detected from closed candles.'}
+
 def build_m1_precision_engine(mtf):
-    """V34.3 always-on M1 precision generator.
+    """V34.4 always-on M1 precision generator with independent pullback-state detection.
     H1/M15/M5 provide weighted context, but no longer hard-lock M1 direction.
     M1 may qualify aligned continuation points or stronger counter-context transition points.
     M5 remains the major-zone generator; M1 remains a precision layer.
@@ -1195,6 +1232,7 @@ def build_m1_precision_engine(mtf):
         'sell':{'BEARISH_FVG','BEARISH_OB','SWING_SUPPLY','DYNAMIC_BROKEN_SUPPORT_RETEST'}
     }
     m1st=str(m1.get('structure') or 'UNCLEAR'); m1mom=str(m1.get('momentum') or 'NEUTRAL'); m1ev=str(m1.get('structure_event') or '')
+    pullback_state=build_m1_pullback_state(m1)
     rows=[]
     for side in ('buy','sell'):
         bull=side=='buy'; own_bias=bm1 if bull else sm1; opp_bias=sm1 if bull else bm1
@@ -1224,7 +1262,9 @@ def build_m1_precision_engine(mtf):
             micro_bonus=14 if strong_micro else 10
             proximity=max(0,12-int(datr*3))
             context_bonus=8 if context_aligned else 2 if context_direction=='MIXED' else -4
-            score=max(0,min(100,base+source_bonus+micro_bonus+proximity+context_bonus))
+            pbdir=str(pullback_state.get('direction') or '')
+            pullback_bonus=6 if (bull and pbdir=='BULLISH_CONTINUATION') or ((not bull) and pbdir=='BEARISH_CONTINUATION') else 0
+            score=max(0,min(100,base+source_bonus+micro_bonus+proximity+context_bonus+pullback_bonus))
             if score<min_score: continue
             mode='CONTINUATION' if point_class.endswith('CONTINUATION') else 'TRANSITION'
             rows.append({'side':side.upper(),'low':round(lo,2),'high':round(hi,2),'source':src,'score':score,'gate_score':max(bull_context,bear_context),'context_score':bull_context if bull else bear_context,'distance_m1_atr':round(datr,2),'m1_structure':m1st,'m1_momentum':m1mom,'m1_event':m1ev,'status':'QUALIFIED_PRECISION_POINT','point_class':point_class,'mode':mode,'context_direction':context_direction,'note':f'Qualified fresh M1 {mode.lower()} precision point. H1/M15/M5 are context rather than a hard lock; counter-context points require stronger M1 evidence. It is a watch area, not an automatic entry.'})
@@ -1237,7 +1277,7 @@ def build_m1_precision_engine(mtf):
     else:
         direction='SEARCHING_BOTH' if context_direction=='MIXED' else context_direction+'_CONTEXT'
         state='NO_FRESH_QUALIFIED_M1_POINT'
-    return {'state':state,'direction':direction,'context_direction':context_direction,'gate_score':max(bull_context,bear_context),'bull_gate':bull_context,'bear_gate':bear_context,'candidates':rows[:4],'m5_structure':m5.get('structure'),'m5_momentum':m5.get('momentum'),'m5_pressure':m5.get('current_pressure'),'m15_structure':m15.get('structure'),'h1_structure':h1.get('structure'),'m1_structure':m1st,'m1_momentum':m1mom,'shock_caution':shock,'note':'V34.3 always-on M1 search: H1/M15/M5 provide weighted context but do not hard-lock M1. Aligned continuation points use normal qualification; counter-context transition points require stronger M1 structure. Freshness and used-zone suppression remain unchanged.'}
+    return {'state':state,'direction':direction,'context_direction':context_direction,'gate_score':max(bull_context,bear_context),'bull_gate':bull_context,'bear_gate':bear_context,'candidates':rows[:4],'m1_pullback':pullback_state,'m5_structure':m5.get('structure'),'m5_momentum':m5.get('momentum'),'m5_pressure':m5.get('current_pressure'),'m15_structure':m15.get('structure'),'h1_structure':h1.get('structure'),'m1_structure':m1st,'m1_momentum':m1mom,'shock_caution':shock,'note':'V34.4 always-on M1 search separates pullback-state detection from precision-point qualification. H1/M15/M5 remain weighted context, not a hard lock. A detected pullback can exist even when no fresh M1 point qualifies. Freshness and used-zone suppression remain unchanged.'}
 
 def build_reaction_engine(m5):
     """V32 deterministic closed-M5 reaction state for zones currently being tracked.
@@ -1359,11 +1399,11 @@ def live_scan():
         out=data_only_result(mtf,data_status,data_note,'NOT_USED_LIVE_DATA_MODE')
         out['mode']='LIVE_DATA_CONTEXT'
         out['gemini_status']='NOT_USED'
-        out['scanner_version']='V34.2 BALANCED FRESH POINTS'
+        out['scanner_version']='V34.4 M1 PULLBACK STATE'
         out['market_context']=market_context
         out['event_risk']=market_context.get('event_risk','UNKNOWN')
         out['data_only_summary']=out['data_only_summary'].replace('V26 maps','V30 maps')
-        out['note']='V34.2 rebalances qualification without weakening freshness. M5 keeps a wider structural candidate pool and applies fresh-only filtering before display; M1 keeps core structure/freshness requirements while secondary confluence and gate thresholds are less restrictive. Used/retested zones remain hidden and no point is forced.'
+        out['note']='V34.4 keeps V34.3 always-on M1 and fresh-only protections, while separating M1 pullback-state detection from M1 point qualification. M1 can report a developing bullish/bearish pullback even when no fresh precision zone qualifies; only real fresh structure can create a displayed point.'
         return jsonify(out)
     except Exception as e:
         return jsonify({'error':'live_scan_failed','detail':str(e)[:1200]}),500

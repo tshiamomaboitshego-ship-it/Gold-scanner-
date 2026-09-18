@@ -1,6 +1,6 @@
-# Gold Scanner V34.3 — Always-On M1
+# Gold Scanner V34.4 — M1 Pullback State + Always-On M1
 
-V34.3 is a targeted update to V34.2.
+V34.4 is a targeted update to V34.2.
 
 - M5 remains the major-zone generator.
 - H1/M15/M5 remain weighted market context, but no longer hard-lock M1 point generation.
@@ -12,3 +12,6 @@ V34.3 is a targeted update to V34.2.
 - No point is forced when no fresh structure qualifies.
 
 Precision/evidence scores are not win probabilities. Zones are watch areas, not automatic entries.
+
+
+V34.4 targeted fix: M1 pullback STATE detection is independent from M1 precision-point qualification. A meaningful recent M1 impulse plus opposite retracement can display PULLBACK_STARTING / PULLBACK_IN_PROGRESS without inventing a zone. Precision points still require fresh qualified structure, and used/overlapping M1 zones remain hidden.
