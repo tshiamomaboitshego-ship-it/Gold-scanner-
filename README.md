@@ -1,10 +1,12 @@
-# Gold Scanner V30.3 — Dynamic Pullback Test Build
+# Gold Scanner V30.4 — Pullback State Separation
 
-Adds a deterministic dynamic pullback engine to V30.1 while preserving fresh-only candidates.
+Targeted test build.
 
-- Detects a meaningful M5 impulse followed by an opposing retracement.
-- Shows PULLBACK IN PROGRESS even when no fresh continuation zone qualifies.
-- Searches for a fresh first retest of structure broken by the impulse (broken support for bearish continuation; broken resistance for bullish continuation).
-- Never recycles a level already retested after the break.
-- Existing H1/M15/M5, macro/session, caching, stale-feed protection, fresh-zone filtering, Pullback Continuation, New Move Origin, and forward-test logic remain.
-- Dynamic pullback state is analysis, not an automatic trade instruction.
+Changes from V30.3:
+- Pullback market-state detection is now separate from continuation-zone qualification.
+- An obvious early M5 retracement can display as PULLBACK_STARTING / PULLBACK_IN_PROGRESS even when no fresh continuation zone qualifies yet.
+- State detection cannot manufacture a BUY/SELL zone. Fresh-zone rules remain strict.
+- Latest significant impulse/extreme remains recency-first and works symmetrically for bullish and bearish moves.
+- Dynamic state now exposes market_state_detected and setup_qualified separately.
+
+All V30.3 fresh-only, caching, macro/session, tracked-setup and forward-test logic is retained.

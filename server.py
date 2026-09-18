@@ -498,7 +498,7 @@ def analytics(c):
     # V30.3 RECENCY-FIRST DYNAMIC PULLBACK ENGINE.
     # A pullback must belong to the latest dominant impulse, not an older opposite leg.
     # Detection is deliberately earlier (ATR-relative), while zone qualification remains strict/fresh-only.
-    dynamic={'state':'NONE','direction':'NONE','impulse_atr':0.0,'retracement_atr':0.0,'retracement_ratio':0.0,'fresh_continuation_found':False,'note':'No active qualified pullback detected.'}
+    dynamic={'state':'NONE','direction':'NONE','impulse_atr':0.0,'retracement_atr':0.0,'retracement_ratio':0.0,'fresh_continuation_found':False,'market_state_detected':False,'setup_qualified':False,'note':'No meaningful M5 pullback state detected.'}
     lookback=max(0,len(c)-32)
     recent_seg=c[lookback:]
     if len(recent_seg)>=8:
@@ -540,8 +540,26 @@ def analytics(c):
         elif bear_active: choose='BEAR'
         elif bull_active: choose='BULL'
 
+        # V30.4 STATE/SETUP SEPARATION. If strict setup gates reject both legs,
+        # still classify an obvious current retracement from the newest significant
+        # impulse extreme. This is informational only and cannot create a zone.
+        # The latest significant extreme wins; a zone still needs the stricter rules below.
+        if choose is None:
+            state_bear=(bear_imp>=1.25 and bear_retrace>=0.18 and bear_ratio<=0.90 and
+                        low_idx>=len(c)-10 and bear_start<low_idx and
+                        cp>=low_px+0.18*(atr or 1))
+            state_bull=(bull_imp>=1.25 and bull_retrace>=0.18 and bull_ratio<=0.90 and
+                        high_idx>=len(c)-10 and bull_start<high_idx and
+                        cp<=high_px-0.18*(atr or 1))
+            if state_bear and state_bull:
+                choose='BEAR' if low_idx>high_idx else 'BULL'
+            elif state_bear:
+                choose='BEAR'
+            elif state_bull:
+                choose='BULL'
+
         if choose=='BEAR':
-            dynamic={'state':'PULLBACK_STARTING' if bear_retrace<0.45 else 'PULLBACK_IN_PROGRESS','direction':'BEARISH_CONTINUATION','impulse_atr':round(bear_imp,2),'retracement_atr':round(bear_retrace,2),'retracement_ratio':round(bear_ratio,2),'fresh_continuation_found':False,'note':'Latest dominant M5 impulse is bearish; an upward retracement is developing. Searching for a fresh first-retest SELL continuation level.'}
+            dynamic={'state':'PULLBACK_STARTING' if bear_retrace<0.45 else 'PULLBACK_IN_PROGRESS','direction':'BEARISH_CONTINUATION','impulse_atr':round(bear_imp,2),'retracement_atr':round(bear_retrace,2),'retracement_ratio':round(bear_ratio,2),'fresh_continuation_found':False,'market_state_detected':True,'setup_qualified':False,'note':'Latest dominant M5 impulse is bearish; an upward retracement is developing. Searching for a fresh first-retest SELL continuation level.'}
             for si,sv in reversed(swings_lo):
                 if si>=low_idx or si<max(0,low_idx-35): continue
                 breaks=[j for j in range(si+1,low_idx+1) if c[j]['c'] < sv-0.05*atr]
@@ -552,10 +570,11 @@ def analytics(c):
                 if lo>cp and not tested:
                     add_candidate('SELL',lo,hi,'DYNAMIC_BROKEN_SUPPORT_RETEST',82,{'dynamic_pullback':True,'broken_swing':round(sv,2),'break_index':bi,'impulse_extreme_index':low_idx},touch_from=bi+1)
                     dynamic['fresh_continuation_found']=True
+                    dynamic['setup_qualified']=True
                     dynamic['note']='Bearish pullback active; a fresh broken-support first-retest SELL area was found ahead of price.'
                     break
         elif choose=='BULL':
-            dynamic={'state':'PULLBACK_STARTING' if bull_retrace<0.45 else 'PULLBACK_IN_PROGRESS','direction':'BULLISH_CONTINUATION','impulse_atr':round(bull_imp,2),'retracement_atr':round(bull_retrace,2),'retracement_ratio':round(bull_ratio,2),'fresh_continuation_found':False,'note':'Latest dominant M5 impulse is bullish; a downward retracement is developing. Searching for a fresh first-retest BUY continuation level.'}
+            dynamic={'state':'PULLBACK_STARTING' if bull_retrace<0.45 else 'PULLBACK_IN_PROGRESS','direction':'BULLISH_CONTINUATION','impulse_atr':round(bull_imp,2),'retracement_atr':round(bull_retrace,2),'retracement_ratio':round(bull_ratio,2),'fresh_continuation_found':False,'market_state_detected':True,'setup_qualified':False,'note':'Latest dominant M5 impulse is bullish; a downward retracement is developing. Searching for a fresh first-retest BUY continuation level.'}
             for si,sv in reversed(swings_hi):
                 if si>=high_idx or si<max(0,high_idx-35): continue
                 breaks=[j for j in range(si+1,high_idx+1) if c[j]['c'] > sv+0.05*atr]
@@ -566,6 +585,7 @@ def analytics(c):
                 if hi<cp and not tested:
                     add_candidate('BUY',lo,hi,'DYNAMIC_BROKEN_RESISTANCE_RETEST',82,{'dynamic_pullback':True,'broken_swing':round(sv,2),'break_index':bi,'impulse_extreme_index':high_idx},touch_from=bi+1)
                     dynamic['fresh_continuation_found']=True
+                    dynamic['setup_qualified']=True
                     dynamic['note']='Bullish pullback active; a fresh broken-resistance first-retest BUY area was found below price.'
                     break
     # Deduplicate overlapping same-side candidates, preserving the stronger one.
