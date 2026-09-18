@@ -1,10 +1,7 @@
-# Gold Scanner V32 — Transition + Reaction Engine
+# Gold Scanner V33 — M1 Precision Layer
 
-Phone-first screenshot-free XAU/USD scanner.
+V33 keeps the V32 H1/M15/M5 scanner, fresh-zone filtering, persistent pullback tracking, Transition Engine, Reaction/Confirmation Engine, context/caching and forward-test behavior.
 
-V32 keeps V31 fresh-zone and persistent-pullback behavior and adds two deterministic closed-M5 intelligence layers:
+New: M1 Precision Layer. M1 is fetched with a short cache and is allowed to surface micro continuation watch areas only when M5 direction/transition is already established. M1 never replaces M5, never overrides H1/M15/M5, and never creates the primary direction by itself.
 
-- Transition Engine: tracks potential bullish/bearish change of control through sweep/reclaim, displacement, CHoCH/BOS, momentum/pressure, acceptance and HH/HL or LL/LH structure. It does not manufacture trade points.
-- Reaction / Confirmation Engine: tracks WAIT, TESTING, REJECTION_RECLAIM, FOLLOW_THROUGH, STRUCTURE_CONFIRMED and INVALIDATED around zones using closed M5 candles. A wick alone is never confirmation.
-
-Fresh BUY/SELL candidate qualification remains separate and unchanged in principle. Evidence scores are not win probabilities.
+Render: `pip install -r requirements.txt` then `gunicorn server:app`.

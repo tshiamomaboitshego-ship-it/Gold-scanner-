@@ -183,7 +183,7 @@ def image_part(data_url):
 
 # V30 FINAL: provider-rate protection. Cache is per Render worker and intentionally conservative.
 _DATA_CACHE = {}
-_CACHE_TTLS = {'5min':240, '15min':720, '1h':3000, 'price':60, 'DXY':720, 'FRED':21600, 'CFTC':43200, 'futures':720}
+_CACHE_TTLS = {'1min':55, '5min':240, '15min':720, '1h':3000, 'price':60, 'DXY':720, 'FRED':21600, 'CFTC':43200, 'futures':720}
 
 def _cache_get(key, allow_stale=False):
     item=_DATA_CACHE.get(key)
@@ -266,7 +266,7 @@ def reanchor_candidates(mtf, reference_price):
     m5['opportunity_map']={'current_price':round(float(reference_price),3),'market_phase':m5.get('market_phase','UNCLEAR'),'buy_watch_areas':((m5.get('candidate_zones') or {}).get('buy') or []),'sell_watch_areas':((m5.get('candidate_zones') or {}).get('sell') or []),'purpose':'Ahead-of-price watch areas anchored to provider reference price. Not predictions.'}
 
 def fetch_multitimeframe():
-    specs={'M5':('5min',240),'M15':('15min',240),'H1':('1h',240)}
+    specs={'M1':('1min',180),'M5':('5min',240),'M15':('15min',240),'H1':('1h',240)}
     out={}; statuses=[]; notes=[]
     for tf,(interval,n) in specs.items():
         c,st,note=fetch_tf(interval,n); out[tf]={'candles':c,'status':st,'note':note,'metrics':analytics(c) if c else {}}; statuses.append(st); notes.append(tf+': '+note)
@@ -1150,6 +1150,43 @@ def apply_market_context(mtf,ctx):
     m5['market_context']=ctx
 
 
+
+def build_m1_precision_engine(mtf):
+    """V33 M1 precision layer. M1 never sets the primary market direction and never replaces M5 zones.
+    It may surface micro continuation/reaction areas only when M5 has already established directional evidence.
+    """
+    m1=(mtf.get('M1') or {}).get('metrics') or {}
+    m5=(mtf.get('M5') or {}).get('metrics') or {}
+    if not m1 or not m5:
+        return {'state':'UNAVAILABLE','direction':'NONE','candidates':[],'note':'M1 or M5 data unavailable.'}
+    m5st=str(m5.get('structure') or 'UNCLEAR'); m5mom=str(m5.get('momentum') or 'UNCLEAR'); pressure=str(m5.get('current_pressure') or 'UNCLEAR')
+    trans=m5.get('transition_engine') or {}; tstate=str(trans.get('state') or '')
+    bull=(m5st=='HH_HL' and m5mom.startswith('BULLISH')) or ('BULLISH' in tstate and int(trans.get('bullish_score') or 0)>=55)
+    bear=(m5st=='LL_LH' and m5mom.startswith('BEARISH')) or ('BEARISH' in tstate and int(trans.get('bearish_score') or 0)>=55)
+    if bull and bear: bull=bear=False
+    direction='BULLISH' if bull else 'BEARISH' if bear else 'NONE'
+    if direction=='NONE':
+        return {'state':'STANDBY','direction':'NONE','candidates':[],'note':'M1 precision is gated off until M5 direction/transition is sufficiently established.'}
+    side='buy' if bull else 'sell'; cp=float(m1.get('data_current_price') or m5.get('data_current_price') or 0); atr=float(m1.get('atr14') or 1)
+    allowed_buy={'BULLISH_FVG','BULLISH_OB','SWING_DEMAND','DYNAMIC_BROKEN_RESISTANCE_RETEST'}
+    allowed_sell={'BEARISH_FVG','BEARISH_OB','SWING_SUPPLY','DYNAMIC_BROKEN_SUPPORT_RETEST'}
+    allowed=allowed_buy if bull else allowed_sell
+    rows=[]
+    for z in ((m1.get('candidate_zones') or {}).get(side) or []):
+        src=str(z.get('source') or '')
+        if src not in allowed: continue
+        lo=float(z.get('low')); hi=float(z.get('high')); touches=int(z.get('touch_count') or 0); cons=str(z.get('consumption') or '').upper()
+        # Precision candidates must still be fresh and ahead of price.
+        ahead=(hi < cp) if bull else (lo > cp)
+        if not ahead or touches>1 or cons not in ('','UNTOUCHED','LIGHT'): continue
+        dist=max(0,cp-hi) if bull else max(0,lo-cp); datr=dist/atr if atr else 99
+        if datr>6: continue
+        base=int(z.get('rank_score') or 0); align=12 if ((bull and str(m1.get('momentum','')).startswith('BULLISH')) or (bear and str(m1.get('momentum','')).startswith('BEARISH'))) else 5
+        score=max(0,min(100,base+align+max(0,10-int(datr*2))))
+        rows.append({'side':side.upper(),'low':round(lo,2),'high':round(hi,2),'source':src,'score':score,'distance_m1_atr':round(datr,2),'m1_structure':m1.get('structure'),'m1_momentum':m1.get('momentum'),'status':'PRECISION_WATCH','note':'M1 micro continuation area aligned with established M5 context; not an automatic entry.'})
+    rows.sort(key=lambda x:(x['score'],-x['distance_m1_atr']),reverse=True)
+    return {'state':'PRECISION_AREAS_FOUND' if rows else 'ALIGNED_NO_FRESH_M1_AREA','direction':direction+'_CONTINUATION','candidates':rows[:3],'m5_structure':m5st,'m5_momentum':m5mom,'m5_pressure':pressure,'m1_structure':m1.get('structure'),'m1_momentum':m1.get('momentum'),'note':'M1 refines timing only. H1/M15/M5 remain the primary context and M5 remains the main zone timeframe.'}
+
 def build_reaction_engine(m5):
     """V32 deterministic closed-M5 reaction state for zones currently being tracked.
     Rejection alone is not confirmation; follow-through/structure evidence is required.
@@ -1217,7 +1254,7 @@ def filter_fresh_candidates(mtf):
     return mtf
 
 def data_only_result(mtf,data_status,data_note,why='Gemini visual check unavailable'):
-    m5=mtf.get('M5',{}).get('metrics',{}); m15=mtf.get('M15',{}).get('metrics',{}); h1=mtf.get('H1',{}).get('metrics',{})
+    m1=mtf.get('M1',{}).get('metrics',{}); m5=mtf.get('M5',{}).get('metrics',{}); m15=mtf.get('M15',{}).get('metrics',{}); h1=mtf.get('H1',{}).get('metrics',{})
     def top(side):
         arr=(m5.get('candidate_zones') or {}).get(side,[])
         return arr[0] if arr else None
@@ -1227,8 +1264,8 @@ def data_only_result(mtf,data_status,data_note,why='Gemini visual check unavaila
       'market_phase':m5.get('market_phase','UNCLEAR'),'shock_detector':m5.get('shock_detector','NORMAL'),
       'approach_speed':m5.get('approach_speed','UNCLEAR'),'m5_state':'BULLISH' if str(m5.get('momentum','')).startswith('BULLISH') else 'BEARISH' if str(m5.get('momentum','')).startswith('BEARISH') else 'UNCLEAR',
       'structure':m5.get('structure','UNCLEAR'),'structure_event':m5.get('structure_event','NONE'),'volatility':m5.get('volatility','NORMAL'),'momentum':m5.get('momentum','UNCLEAR'),
-      'multi_timeframe_metrics':{'H1':h1,'M15':m15,'M5':m5},'candidate_zones':m5.get('candidate_zones',{}),'opportunity_map':m5.get('opportunity_map',{}),
-      'dynamic_pullback':m5.get('dynamic_pullback',{}),'transition_engine':m5.get('transition_engine',{}),'reaction_engine':m5.get('reaction_engine',{}),'data_only_summary':f"H1 {h1.get('structure','—')} · M15 {m15.get('structure','—')} · M5 {m5.get('structure','—')}. V26 maps ahead-of-price pullback and new-move-origin candidates with H1/M15 confluence; Gemini visual confirmation unavailable.",
+      'multi_timeframe_metrics':{'H1':h1,'M15':m15,'M5':m5,'M1':m1},'candidate_zones':m5.get('candidate_zones',{}),'opportunity_map':m5.get('opportunity_map',{}),
+      'dynamic_pullback':m5.get('dynamic_pullback',{}),'transition_engine':m5.get('transition_engine',{}),'reaction_engine':m5.get('reaction_engine',{}),'m1_precision':m5.get('m1_precision',{}),'data_only_summary':f"H1 {h1.get('structure','—')} · M15 {m15.get('structure','—')} · M5 {m5.get('structure','—')}. V26 maps ahead-of-price pullback and new-move-origin candidates with H1/M15 confluence; Gemini visual confirmation unavailable.",
       'buy_candidate':top('buy'),'sell_candidate':top('sell'),
       'note':'Data-only analysis aid. Ahead-of-price watch areas are deterministic evidence locations, not predictions or guaranteed reversal points.'
     }
@@ -1245,6 +1282,7 @@ def live_scan():
         apply_market_context(mtf,market_context)
         filter_fresh_candidates(mtf)
         mtf['M5']['metrics']['reaction_engine']=build_reaction_engine(mtf['M5']['metrics'])
+        mtf['M5']['metrics']['m1_precision']=build_m1_precision_engine(mtf)
         # V31: keep pullback state/candidate discovery separate from final display qualification.
         # This prevents a detected setup from silently disappearing between scans.
         m5=(mtf.get('M5') or {}).get('metrics') or {}
@@ -1268,11 +1306,11 @@ def live_scan():
         out=data_only_result(mtf,data_status,data_note,'NOT_USED_LIVE_DATA_MODE')
         out['mode']='LIVE_DATA_CONTEXT'
         out['gemini_status']='NOT_USED'
-        out['scanner_version']='V32 TRANSITION + REACTION ENGINE'
+        out['scanner_version']='V33 M1 PRECISION LAYER'
         out['market_context']=market_context
         out['event_risk']=market_context.get('event_risk','UNKNOWN')
         out['data_only_summary']=out['data_only_summary'].replace('V26 maps','V30 maps')
-        out['note']='V32 adds closed-candle Transition and Reaction/Confirmation engines without loosening fresh-zone qualification. Fresh-zone deterministic scan. Only fresh/untested qualified zones are surfaced as NEW candidates. Used/rejected zones remain internal market evidence. Previously saved fresh zones are tracked separately through testing, follow-through or invalidation.'
+        out['note']='V33 adds an M1 precision layer on top of V32. M1 is gated by established M5 context and cannot override H1/M15/M5 or manufacture a primary direction. V32 keeps closed-candle Transition and Reaction/Confirmation engines without loosening fresh-zone qualification. Fresh-zone deterministic scan. Only fresh/untested qualified zones are surfaced as NEW candidates. Used/rejected zones remain internal market evidence. Previously saved fresh zones are tracked separately through testing, follow-through or invalidation.'
         return jsonify(out)
     except Exception as e:
         return jsonify({'error':'live_scan_failed','detail':str(e)[:1200]}),500
