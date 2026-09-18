@@ -495,63 +495,78 @@ def analytics(c):
     for v in eql[-2:]: add_candidate('BUY',v-ztol,v+ztol,'EQUAL_LOW_LIQUIDITY',68,{'liquidity_pool':True})
     for v in eqh[-2:]: add_candidate('SELL',v-ztol,v+ztol,'EQUAL_HIGH_LIQUIDITY',68,{'liquidity_pool':True})
 
-    # V30.2 DYNAMIC PULLBACK ENGINE.
-    # Detect an active retracement after a meaningful impulse, then look for a fresh
-    # first retest of structure that was broken by that impulse. This does NOT turn
-    # every bounce into a setup and it does not recycle an already-tested level.
-    dynamic={'state':'NONE','direction':'NONE','impulse_atr':0.0,'retracement_atr':0.0,'fresh_continuation_found':False,'note':'No active qualified pullback detected.'}
-    lookback=max(0,len(c)-28)
+    # V30.3 RECENCY-FIRST DYNAMIC PULLBACK ENGINE.
+    # A pullback must belong to the latest dominant impulse, not an older opposite leg.
+    # Detection is deliberately earlier (ATR-relative), while zone qualification remains strict/fresh-only.
+    dynamic={'state':'NONE','direction':'NONE','impulse_atr':0.0,'retracement_atr':0.0,'retracement_ratio':0.0,'fresh_continuation_found':False,'note':'No active qualified pullback detected.'}
+    lookback=max(0,len(c)-32)
     recent_seg=c[lookback:]
     if len(recent_seg)>=8:
-        # Bearish impulse -> current bounce from a recent low.
         low_rel=min(range(len(recent_seg)), key=lambda k: recent_seg[k]['l'])
-        low_idx=lookback+low_rel; low_px=recent_seg[low_rel]['l']
-        pre_high=max(x['h'] for x in c[max(0,low_idx-12):low_idx+1]) if low_idx>=lookback else low_px
-        bear_imp=(pre_high-low_px)/(atr or 1)
-        bear_retrace=(cp-low_px)/(atr or 1)
-        bearish_context=(structure=='LL_LH' or pressure in ('BEARISH','EXTREME_BEARISH') or mom.startswith('BEARISH'))
-        bear_active=bearish_context and bear_imp>=1.8 and bear_retrace>=0.45 and low_idx<=len(c)-2
-
-        # Bullish impulse -> current dip from a recent high.
         high_rel=max(range(len(recent_seg)), key=lambda k: recent_seg[k]['h'])
+        low_idx=lookback+low_rel; low_px=recent_seg[low_rel]['l']
         high_idx=lookback+high_rel; high_px=recent_seg[high_rel]['h']
-        pre_low=min(x['l'] for x in c[max(0,high_idx-12):high_idx+1]) if high_idx>=lookback else high_px
-        bull_imp=(high_px-pre_low)/(atr or 1)
-        bull_retrace=(high_px-cp)/(atr or 1)
-        bullish_context=(structure=='HH_HL' or pressure in ('BULLISH','EXTREME_BULLISH') or mom.startswith('BULLISH'))
-        bull_active=bullish_context and bull_imp>=1.8 and bull_retrace>=0.45 and high_idx<=len(c)-2
 
-        if bear_active and (not bull_active or bear_imp>=bull_imp):
-            dynamic={'state':'PULLBACK_IN_PROGRESS','direction':'BEARISH_CONTINUATION','impulse_atr':round(bear_imp,2),'retracement_atr':round(bear_retrace,2),'fresh_continuation_found':False,'note':'Bearish impulse followed by an upward M5 retracement. Searching for a fresh first-retest continuation level.'}
-            # A prior swing low that closed below during the impulse can become fresh resistance.
+        # Build the bearish leg only from a high that occurred BEFORE the latest low.
+        bear_slice=c[max(lookback,low_idx-16):low_idx+1]
+        bear_start_rel=max(range(len(bear_slice)), key=lambda k: bear_slice[k]['h']) if bear_slice else 0
+        bear_start=max(lookback,low_idx-16)+bear_start_rel
+        bear_high=c[bear_start]['h']; bear_imp=(bear_high-low_px)/(atr or 1)
+        bear_retrace=max(0.0,(cp-low_px)/(atr or 1)); bear_ratio=bear_retrace/max(bear_imp,1e-9)
+
+        # Build the bullish leg only from a low that occurred BEFORE the latest high.
+        bull_slice=c[max(lookback,high_idx-16):high_idx+1]
+        bull_start_rel=min(range(len(bull_slice)), key=lambda k: bull_slice[k]['l']) if bull_slice else 0
+        bull_start=max(lookback,high_idx-16)+bull_start_rel
+        bull_low=c[bull_start]['l']; bull_imp=(high_px-bull_low)/(atr or 1)
+        bull_retrace=max(0.0,(high_px-cp)/(atr or 1)); bull_ratio=bull_retrace/max(bull_imp,1e-9)
+
+        bearish_context=(structure=='LL_LH' or pressure in ('BEARISH','EXTREME_BEARISH') or mom.startswith('BEARISH'))
+        bullish_context=(structure=='HH_HL' or pressure in ('BULLISH','EXTREME_BULLISH') or mom.startswith('BULLISH'))
+
+        # A true retracement must be materially smaller than the impulse. If price has
+        # retraced >85% of an old leg, that old leg cannot label the current pullback.
+        # 0.20 ATR allows early detection without calling every tiny opposite candle a pullback.
+        bear_active=(bearish_context and bear_imp>=1.5 and bear_retrace>=0.20 and bear_ratio<=0.85 and low_idx<=len(c)-2 and bear_start<low_idx)
+        bull_active=(bullish_context and bull_imp>=1.5 and bull_retrace>=0.20 and bull_ratio<=0.85 and high_idx<=len(c)-2 and bull_start<high_idx)
+
+        # Recency wins first: the newest completed impulse extreme is the execution leg.
+        # Strength is only a tie-breaker; an older giant move cannot override a newer break.
+        choose=None
+        if bear_active and bull_active:
+            if low_idx>high_idx: choose='BEAR'
+            elif high_idx>low_idx: choose='BULL'
+            else: choose='BEAR' if bear_imp>=bull_imp else 'BULL'
+        elif bear_active: choose='BEAR'
+        elif bull_active: choose='BULL'
+
+        if choose=='BEAR':
+            dynamic={'state':'PULLBACK_STARTING' if bear_retrace<0.45 else 'PULLBACK_IN_PROGRESS','direction':'BEARISH_CONTINUATION','impulse_atr':round(bear_imp,2),'retracement_atr':round(bear_retrace,2),'retracement_ratio':round(bear_ratio,2),'fresh_continuation_found':False,'note':'Latest dominant M5 impulse is bearish; an upward retracement is developing. Searching for a fresh first-retest SELL continuation level.'}
             for si,sv in reversed(swings_lo):
                 if si>=low_idx or si<max(0,low_idx-35): continue
                 breaks=[j for j in range(si+1,low_idx+1) if c[j]['c'] < sv-0.05*atr]
                 if not breaks: continue
-                bi=breaks[0]
-                lo,hi=sv-ztol,sv+ztol
-                # Must still be ahead of price and untested after the break.
+                bi=breaks[0]; lo,hi=sv-ztol,sv+ztol
                 post=c[bi+1:]
                 tested=any(x['l']<=hi and x['h']>=lo for x in post)
                 if lo>cp and not tested:
-                    add_candidate('SELL',lo,hi,'DYNAMIC_BROKEN_SUPPORT_RETEST',82,{'dynamic_pullback':True,'broken_swing':round(sv,2),'break_index':bi},touch_from=bi+1)
+                    add_candidate('SELL',lo,hi,'DYNAMIC_BROKEN_SUPPORT_RETEST',82,{'dynamic_pullback':True,'broken_swing':round(sv,2),'break_index':bi,'impulse_extreme_index':low_idx},touch_from=bi+1)
                     dynamic['fresh_continuation_found']=True
-                    dynamic['note']='Bearish pullback active; a fresh broken-support first-retest area was found ahead of price.'
+                    dynamic['note']='Bearish pullback active; a fresh broken-support first-retest SELL area was found ahead of price.'
                     break
-        elif bull_active:
-            dynamic={'state':'PULLBACK_IN_PROGRESS','direction':'BULLISH_CONTINUATION','impulse_atr':round(bull_imp,2),'retracement_atr':round(bull_retrace,2),'fresh_continuation_found':False,'note':'Bullish impulse followed by a downward M5 retracement. Searching for a fresh first-retest continuation level.'}
+        elif choose=='BULL':
+            dynamic={'state':'PULLBACK_STARTING' if bull_retrace<0.45 else 'PULLBACK_IN_PROGRESS','direction':'BULLISH_CONTINUATION','impulse_atr':round(bull_imp,2),'retracement_atr':round(bull_retrace,2),'retracement_ratio':round(bull_ratio,2),'fresh_continuation_found':False,'note':'Latest dominant M5 impulse is bullish; a downward retracement is developing. Searching for a fresh first-retest BUY continuation level.'}
             for si,sv in reversed(swings_hi):
                 if si>=high_idx or si<max(0,high_idx-35): continue
                 breaks=[j for j in range(si+1,high_idx+1) if c[j]['c'] > sv+0.05*atr]
                 if not breaks: continue
-                bi=breaks[0]
-                lo,hi=sv-ztol,sv+ztol
+                bi=breaks[0]; lo,hi=sv-ztol,sv+ztol
                 post=c[bi+1:]
                 tested=any(x['l']<=hi and x['h']>=lo for x in post)
                 if hi<cp and not tested:
-                    add_candidate('BUY',lo,hi,'DYNAMIC_BROKEN_RESISTANCE_RETEST',82,{'dynamic_pullback':True,'broken_swing':round(sv,2),'break_index':bi},touch_from=bi+1)
+                    add_candidate('BUY',lo,hi,'DYNAMIC_BROKEN_RESISTANCE_RETEST',82,{'dynamic_pullback':True,'broken_swing':round(sv,2),'break_index':bi,'impulse_extreme_index':high_idx},touch_from=bi+1)
                     dynamic['fresh_continuation_found']=True
-                    dynamic['note']='Bullish pullback active; a fresh broken-resistance first-retest area was found below price.'
+                    dynamic['note']='Bullish pullback active; a fresh broken-resistance first-retest BUY area was found below price.'
                     break
     # Deduplicate overlapping same-side candidates, preserving the stronger one.
     ranked=[]

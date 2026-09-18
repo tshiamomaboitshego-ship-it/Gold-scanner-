@@ -1,4 +1,4 @@
-# Gold Scanner V30.2 — Dynamic Pullback Test Build
+# Gold Scanner V30.3 — Dynamic Pullback Test Build
 
 Adds a deterministic dynamic pullback engine to V30.1 while preserving fresh-only candidates.
 
