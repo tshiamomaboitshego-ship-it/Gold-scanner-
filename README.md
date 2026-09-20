@@ -17,3 +17,8 @@ Twelve Data's VWAP documentation says its VWAP endpoint applies to all instrumen
 - Quantitative M1 acceptance/rejection after a zone is tested: penetration, closes inside/beyond, reclaim speed, displacement.
 - TPO/session evidence is a small non-blocking ranking bonus only after the existing structural point qualifies. It cannot manufacture or veto a point.
 - VWAP and true order flow remain optional/unavailable unless trustworthy volume/aggressor data is connected.
+
+## V36.1 Phase 1 freeze additions
+- Dedicated local Phase-1 logger for fresh M1 Precision points and their existing context. It does not change point generation, scoring, zones, or qualification.
+- Data-quality guard records latest M1/M5 timestamps and ages. Stale execution-feed scans remain viewable but are excluded from Phase-1 logging/statistics.
+- Phase-1 freshness thresholds: M1 <= 3 minutes, M5 <= 8 minutes.

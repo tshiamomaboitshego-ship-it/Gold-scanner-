@@ -275,8 +275,15 @@ def fetch_multitimeframe():
     ref,ref_status,ref_note=fetch_reference_price()
     if ref is not None: reanchor_candidates(out,ref)
     m5c=(out.get('M5') or {}).get('candles') or []
+    m1c=(out.get('M1') or {}).get('candles') or []
     age=candle_age_minutes(m5c)
-    out['_price_meta']={'reference_price':round(ref,3) if ref is not None else None,'reference_status':ref_status,'reference_note':ref_note,'latest_m5_time':m5c[-1]['t'] if m5c else None,'m5_feed_age_minutes':age,'m5_feed_stale':bool(age is not None and age>8),'market_data_inactive':bool(age is not None and age>12),'market_data_note':'MARKET / DATA FEED INACTIVE — analysis uses last available closed candles; lifecycle resumes with fresh M5 data.' if age is not None and age>12 else 'Fresh M5 data available.'}
+    m1_age=candle_age_minutes(m1c)
+    # Phase-1 data-quality guard: this does not alter structural point generation.
+    # It only marks scans ineligible for the forward-test log when the execution feeds are stale.
+    m5_stale=bool(age is None or age>8)
+    m1_stale=bool(m1_age is None or m1_age>3)
+    test_eligible=not (m5_stale or m1_stale)
+    out['_price_meta']={'reference_price':round(ref,3) if ref is not None else None,'reference_status':ref_status,'reference_note':ref_note,'latest_m5_time':m5c[-1]['t'] if m5c else None,'m5_feed_age_minutes':age,'m5_feed_stale':m5_stale,'latest_m1_time':m1c[-1]['t'] if m1c else None,'m1_feed_age_minutes':m1_age,'m1_feed_stale':m1_stale,'phase1_test_eligible':test_eligible,'market_data_inactive':bool(age is not None and age>12),'market_data_note':'MARKET / DATA FEED INACTIVE — analysis uses last available closed candles; lifecycle resumes with fresh M5 data.' if age is not None and age>12 else 'Fresh M5 data available.'}
     return out,overall,' | '.join(notes)+' | PRICE: '+ref_note
 
 def analytics(c):
