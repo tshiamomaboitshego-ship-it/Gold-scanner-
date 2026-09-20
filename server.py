@@ -183,7 +183,7 @@ def image_part(data_url):
 
 # V30 FINAL: provider-rate protection. Cache is per Render worker and intentionally conservative.
 _DATA_CACHE = {}
-_CACHE_TTLS = {'1min':55, '5min':240, '15min':720, '1h':3000, 'price':60, 'DXY':720, 'FRED':21600, 'CFTC':43200, 'futures':720}
+_CACHE_TTLS = {'1min':55, '5min':240, '15min':720, '1h':3000, 'price':60, 'DXY':720, 'FRED':21600, 'CFTC':43200, 'futures':720, 'vwap':120, 'orderflow':30}
 
 def _cache_get(key, allow_stale=False):
     item=_DATA_CACHE.get(key)
@@ -1174,7 +1174,67 @@ def fetch_optional_gold_futures():
     c,st,note=fetch_twelve_symbol(sym,'15min',100)
     if not c:return {'status':'UNAVAILABLE','symbol':sym,'note':note}
     a=analytics(c)
-    return {'status':'LIVE_DATA','symbol':sym,'price':c[-1]['c'],'structure':a.get('structure'),'momentum':a.get('momentum'),'pressure':a.get('current_pressure'),'note':note}
+    return {'status':'LIVE_DATA','symbol':sym,'price':c[-1]['c'],'structure':a.get('structure'),'momentum':a.get('momentum'),'pressure':a.get('current_pressure'),'candles':c,'note':note}
+
+
+
+def _session_vwap_from_candles(candles):
+    """Compute session VWAP only when the provider supplies real volume. Never synthesize volume."""
+    if not candles:
+        return {'status':'UNAVAILABLE','note':'No volume-bearing candles available for VWAP.'}
+    rows=[x for x in candles if isinstance(x.get('v'),(int,float)) and x.get('v',0)>0]
+    if len(rows)<3:
+        return {'status':'UNAVAILABLE','note':'Provider did not supply enough real volume for VWAP; no synthetic VWAP is invented.'}
+    day=str(rows[-1].get('t',''))[:10]
+    session=[x for x in rows if str(x.get('t',''))[:10]==day]
+    if len(session)<3: session=rows[-min(32,len(rows)):]
+    pv=sum(((x['h']+x['l']+x['c'])/3.0)*x['v'] for x in session)
+    vv=sum(x['v'] for x in session)
+    if vv<=0:return {'status':'UNAVAILABLE','note':'Volume sum is zero; VWAP unavailable.'}
+    vwap=pv/vv; last=session[-1]['c']
+    return {'status':'LIVE_DATA','vwap':round(vwap,3),'last_price':round(last,3),'price_vs_vwap':'ABOVE' if last>vwap else 'BELOW' if last<vwap else 'AT','distance':round(last-vwap,3),'bars':len(session),'session_date':day,'note':'Session VWAP calculated only from provider candles that contain real reported volume.'}
+
+def build_vwap_context(mtf, futures_ctx):
+    """Prefer exchange/futures volume. Spot XAU/USD VWAP is used only if its feed actually includes volume."""
+    fc=(futures_ctx or {}).get('candles') or []
+    if fc:
+        x=_session_vwap_from_candles(fc); x['source']='GOLD_FUTURES'; x['symbol']=(futures_ctx or {}).get('symbol'); return x
+    spot=(mtf.get('M1') or {}).get('candles') or []
+    x=_session_vwap_from_candles(spot); x['source']='XAU_USD_PROVIDER_VOLUME'
+    if x.get('status')!='LIVE_DATA':
+        x['note']='VWAP waiting for trustworthy volume. Twelve Data documents VWAP as unavailable for currencies, so the scanner will not fabricate spot-XAU volume.'
+    return x
+
+def build_orderflow_context(futures_ctx):
+    """True order flow requires aggressor/bid-ask volume. OHLCV alone is deliberately not mislabeled as order flow."""
+    # Reserved adapter: a future provider can populate bid_volume/ask_volume per candle.
+    rows=(futures_ctx or {}).get('candles') or []
+    usable=[x for x in rows if isinstance(x.get('bid_volume'),(int,float)) and isinstance(x.get('ask_volume'),(int,float))]
+    if len(usable)<3:
+        return {'status':'UNAVAILABLE','state':'WAITING_FOR_TRUE_ORDER_FLOW_DATA','delta':None,'imbalance':None,'note':'No true bid/ask aggressor-volume feed is connected. OHLCV is not being faked into order flow.'}
+    recent=usable[-10:]; buy=sum(x['ask_volume'] for x in recent); sell=sum(x['bid_volume'] for x in recent); total=buy+sell; delta=buy-sell
+    ratio=(delta/total) if total else 0
+    state='BUYERS_AGGRESSIVE' if ratio>=.12 else 'SELLERS_AGGRESSIVE' if ratio<=-.12 else 'BALANCED'
+    return {'status':'LIVE_DATA','state':state,'delta':round(delta,2),'imbalance':round(ratio,3),'sample_bars':len(recent),'note':'True order-flow context from connected bid/ask aggressor volume; confirmation context only.'}
+
+def apply_microstructure_context(mtf, vwap, orderflow):
+    """Annotate existing M1 points. Never create, delete or hard-veto a structural point."""
+    m5=(mtf.get('M5') or {}).get('metrics') or {}; p=m5.get('m1_precision') or {}
+    vw=(vwap or {}).get('vwap'); of=(orderflow or {}).get('state')
+    for z in p.get('candidates') or []:
+        side=str(z.get('side','')).upper(); lo=float(z.get('low',0)); hi=float(z.get('high',0)); mid=(lo+hi)/2
+        vstate='UNAVAILABLE'
+        if isinstance(vw,(int,float)):
+            # VWAP is context: a BUY below/near VWAP or SELL above/near VWAP is potentially useful location context.
+            tol=max(float(((mtf.get('M1') or {}).get('metrics') or {}).get('atr14') or 0)*0.35,0.15)
+            if lo-tol <= vw <= hi+tol:vstate='NEAR_ZONE'
+            elif side=='BUY' and mid<=vw:vstate='DISCOUNT_TO_VWAP'
+            elif side=='SELL' and mid>=vw:vstate='PREMIUM_TO_VWAP'
+            else:vstate='NON_CONFLUENT'
+        ostate='WAITING' if (orderflow or {}).get('status')!='LIVE_DATA' else ('SUPPORTIVE' if (side=='BUY' and of=='BUYERS_AGGRESSIVE') or (side=='SELL' and of=='SELLERS_AGGRESSIVE') else 'CONFLICTING' if (side=='BUY' and of=='SELLERS_AGGRESSIVE') or (side=='SELL' and of=='BUYERS_AGGRESSIVE') else 'NEUTRAL')
+        z['vwap_context']=vstate; z['orderflow_context']=ostate
+        z['microstructure_note']='VWAP/order flow annotate this already-created point; they do not manufacture or veto it.'
+    m5['m1_precision']=p
 
 def fetch_cftc_gold_positioning():
     """Weekly CFTC disaggregated futures positioning. Context only; never an M5 trigger."""
@@ -1203,7 +1263,7 @@ def fetch_cftc_gold_positioning():
         return stale if stale is not None else {'status':'UNAVAILABLE','note':str(e)[:180]}
 
 def build_market_context(mtf):
-    usd=fetch_usd_context(); rates=fetch_rates_context(); cal=fetch_calendar_context(); sessions=build_session_level_context(mtf); volreg=build_volatility_regime(mtf); volume=build_volume_context(mtf); futures=fetch_optional_gold_futures(); cftc=fetch_cftc_gold_positioning()
+    usd=fetch_usd_context(); rates=fetch_rates_context(); cal=fetch_calendar_context(); sessions=build_session_level_context(mtf); volreg=build_volatility_regime(mtf); volume=build_volume_context(mtf); futures=fetch_optional_gold_futures(); vwap=build_vwap_context(mtf,futures); orderflow=build_orderflow_context(futures); cftc=fetch_cftc_gold_positioning()
     m5=(mtf.get('M5') or {}).get('metrics') or {}; h1=(mtf.get('H1') or {}).get('metrics') or {}; m15=(mtf.get('M15') or {}).get('metrics') or {}
     bull=0; bear=0; reasons=[]
     um=str(usd.get('momentum') or '')
@@ -1222,7 +1282,8 @@ def build_market_context(mtf):
     if structs.count('HH_HL')>=2:tech='BULLISH'
     elif structs.count('LL_LH')>=2:tech='BEARISH'
     macro='BULLISH_GOLD' if bull>=bear+2 else 'BEARISH_GOLD' if bear>=bull+2 else 'MIXED'
-    return {'usd':usd,'rates':rates,'calendar':cal,'sessions':sessions,'volatility_regime':volreg,'volume_context':volume,'gold_futures':futures,'cftc_positioning':cftc,'macro_bias':macro,'technical_alignment':tech,'bull_context_points':bull,'bear_context_points':bear,'reasons':reasons,'event_risk':cal.get('risk','UNKNOWN')}
+    futures_public={k:v for k,v in futures.items() if k!='candles'}
+    return {'usd':usd,'rates':rates,'calendar':cal,'sessions':sessions,'volatility_regime':volreg,'volume_context':volume,'gold_futures':futures_public,'vwap_context':vwap,'orderflow_context':orderflow,'cftc_positioning':cftc,'macro_bias':macro,'technical_alignment':tech,'bull_context_points':bull,'bear_context_points':bear,'reasons':reasons,'event_risk':cal.get('risk','UNKNOWN')}
 
 def apply_market_context(mtf,ctx):
     """Context may rank/downweight existing zones; it never creates or moves a price zone."""
@@ -1484,6 +1545,7 @@ def live_scan():
         filter_fresh_candidates(mtf)
         mtf['M5']['metrics']['reaction_engine']=build_reaction_engine(mtf['M5']['metrics'])
         mtf['M5']['metrics']['m1_precision']=build_m1_precision_engine(mtf)
+        apply_microstructure_context(mtf,market_context.get('vwap_context',{}),market_context.get('orderflow_context',{}))
         # V31: keep pullback state/candidate discovery separate from final display qualification.
         # This prevents a detected setup from silently disappearing between scans.
         m5=(mtf.get('M5') or {}).get('metrics') or {}
@@ -1507,11 +1569,11 @@ def live_scan():
         out=data_only_result(mtf,data_status,data_note,'NOT_USED_LIVE_DATA_MODE')
         out['mode']='LIVE_DATA_CONTEXT'
         out['gemini_status']='NOT_USED'
-        out['scanner_version']='V34.5 INDUCEMENT CONTEXT'
+        out['scanner_version']='V35 VWAP + ORDER FLOW READY'
         out['market_context']=market_context
         out['event_risk']=market_context.get('event_risk','UNKNOWN')
         out['data_only_summary']=out['data_only_summary'].replace('V26 maps','V30 maps')
-        out['note']='V34.5 keeps V34.4 always-on M1, pullback-state separation and fresh-only protections, and adds inducement/internal-liquidity relationship as a small optional ranking bonus only. It never creates or vetoes a zone. V34.4 separates M1 pullback-state detection from M1 point qualification. M1 can report a developing bullish/bearish pullback even when no fresh precision zone qualifies; only real fresh structure can create a displayed point.'
+        out['note']='V35 preserves V34.6 structural point generation and adds VWAP location context plus an honest true-order-flow layer. VWAP is calculated only from real reported volume; order flow activates only when bid/ask aggressor volume exists. Neither layer creates, deletes or vetoes structural points.'
         return jsonify(out)
     except Exception as e:
         return jsonify({'error':'live_scan_failed','detail':str(e)[:1200]}),500
