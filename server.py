@@ -1345,6 +1345,99 @@ def build_m1_pullback_state(m1):
         return {'state':'PULLBACK_STARTING' if bull_ret<0.40 else 'PULLBACK_IN_PROGRESS','direction':'BULLISH_CONTINUATION','market_state_detected':True,'impulse_atr':round(bull_imp,2),'retracement_atr':round(bull_ret,2),'retracement_ratio':round(bull_ratio,2),'note':'Latest meaningful M1 impulse is bullish and a downward retracement is developing. This state does not create a BUY point by itself.'}
     return {'state':'NONE','direction':'NONE','market_state_detected':False,'impulse_atr':0.0,'retracement_atr':0.0,'retracement_ratio':0.0,'note':'No meaningful active M1 pullback detected from closed candles.'}
 
+def build_tpo_profile(candles, atr=None, lookback=180):
+    """V36 time-at-price profile from closed M1 OHLC only. This is TPO/time acceptance, NOT volume profile."""
+    rows=(candles or [])[-lookback:]
+    if len(rows)<20:
+        return {'status':'INSUFFICIENT_DATA','note':'Need more closed M1 candles for TPO profile.'}
+    if not atr:
+        ranges=[max(0.0001,float(x['h'])-float(x['l'])) for x in rows[-60:]]
+        atr=statistics.median(ranges) if ranges else 1.0
+    lo=min(float(x['l']) for x in rows); hi=max(float(x['h']) for x in rows)
+    # Keep bins stable but fine enough to be useful on M1 Gold.
+    step=max(float(atr)*0.22,(hi-lo)/80.0,0.05)
+    n=max(8,min(120,int((hi-lo)/step)+1))
+    step=(hi-lo)/max(1,n-1) if hi>lo else step
+    bins=[0]*n
+    for x in rows:
+        a=float(x['l']); b=float(x['h'])
+        i0=max(0,int((a-lo)/step)); i1=min(n-1,int((b-lo)/step))
+        for i in range(i0,i1+1): bins[i]+=1
+    total=sum(bins) or 1
+    poc_i=max(range(n),key=lambda i:bins[i]); poc=lo+poc_i*step
+    # 70% value area expanded from POC toward the more accepted adjacent bin.
+    chosen={poc_i}; acc=bins[poc_i]; target=total*0.70; left=poc_i-1; right=poc_i+1
+    while acc<target and (left>=0 or right<n):
+        lv=bins[left] if left>=0 else -1; rv=bins[right] if right<n else -1
+        if rv>lv: chosen.add(right); acc+=max(0,rv); right+=1
+        else: chosen.add(left); acc+=max(0,lv); left-=1
+    val=lo+min(chosen)*step; vah=lo+max(chosen)*step
+    mx=max(bins) or 1
+    hvn=[]; lvn=[]
+    for i,v in enumerate(bins):
+        price=lo+i*step
+        if v>=mx*0.75: hvn.append(round(price,2))
+        elif v<=mx*0.20: lvn.append(round(price,2))
+    return {'status':'LIVE_DATA','type':'TPO_TIME_AT_PRICE','poc':round(poc,2),'vah':round(vah,2),'val':round(val,2),'bin_size':round(step,3),'bars':len(rows),'hvn':hvn[:8],'lvn':lvn[:8],'note':'Time-at-price profile from closed M1 candles; no volume is fabricated.'}
+
+def build_initial_balance(candles):
+    """V36 UTC session opening ranges / initial balance from closed M1 price data."""
+    rows=candles or []
+    if not rows: return {'status':'NO_DATA'}
+    day=str(rows[-1].get('t',''))[:10]
+    today=[x for x in rows if str(x.get('t',''))[:10]==day]
+    def hour(x):
+        try:return int(str(x.get('t','')).split(' ')[1].split(':')[0])
+        except:return -1
+    def rng(a,b):
+        xs=[x for x in today if a<=hour(x)<b]
+        if not xs:return None
+        return {'high':round(max(float(x['h']) for x in xs),2),'low':round(min(float(x['l']) for x in xs),2),'bars':len(xs)}
+    return {'status':'LIVE_DATA','date':day,'asia':rng(0,7),'london_opening_range':rng(7,8),'london_initial_balance':rng(7,8),'new_york_opening_range':rng(12,13),'new_york_initial_balance':rng(12,13),'note':'UTC price/time ranges only; they add context and never create a point.'}
+
+def profile_session_context(side, lo, hi, tpo, ib, atr):
+    """Small non-blocking location bonus for an already-created structural candidate."""
+    bull=side=='buy'; mid=(lo+hi)/2.0; bonus=0; ev=[]
+    if tpo.get('status')=='LIVE_DATA':
+        val=float(tpo['val']); vah=float(tpo['vah']); poc=float(tpo['poc'])
+        if bull and mid<=val+atr*.25: bonus+=3; ev.append('at/below TPO value low')
+        elif (not bull) and mid>=vah-atr*.25: bonus+=3; ev.append('at/above TPO value high')
+        if abs(mid-poc)<=atr*.25: ev.append('near TPO POC/acceptance')
+        # LVN proximity can be useful as an edge/fast-travel reference, but only a tiny bonus.
+        if any(abs(mid-float(x))<=atr*.20 for x in (tpo.get('lvn') or [])): bonus+=1; ev.append('near low-time node')
+    for name in ('asia','london_opening_range','new_york_opening_range'):
+        r=ib.get(name) if isinstance(ib,dict) else None
+        if not r: continue
+        level=float(r['low'] if bull else r['high'])
+        if abs(mid-level)<=atr*.30: bonus+=2; ev.append('near '+name.replace('_',' ')); break
+    return {'bonus':min(5,bonus),'evidence':ev}
+
+def quantify_zone_reaction(candles, side, lo, hi, atr):
+    """V36 closed-M1 acceptance/rejection measurement for a candidate after it is tested."""
+    rows=(candles or [])[-30:]
+    touched=[i for i,x in enumerate(rows) if float(x['l'])<=hi and float(x['h'])>=lo]
+    if not touched:
+        return {'state':'AHEAD','quality':'WAITING','penetration_pct':0,'closes_inside':0,'closes_beyond':0,'reclaim_bars':None,'displacement_atr':0,'note':'Point has not been tested by recent closed M1 candles.'}
+    i=touched[0]; post=rows[i:]
+    width=max(hi-lo,atr*.08,0.01)
+    max_pen=0.0
+    for x in post:
+        if side=='buy': max_pen=max(max_pen,max(0.0,hi-float(x['l'])))
+        else: max_pen=max(max_pen,max(0.0,float(x['h'])-lo))
+    pen=min(200,100*max_pen/width)
+    inside=sum(1 for x in post if lo<=float(x['c'])<=hi)
+    beyond=sum(1 for x in post if (side=='buy' and float(x['c'])<lo) or (side=='sell' and float(x['c'])>hi))
+    reclaim=None
+    for j,x in enumerate(post):
+        if (side=='buy' and float(x['c'])>hi) or (side=='sell' and float(x['c'])<lo): reclaim=j; break
+    start=float(post[0]['c']); best=(max(float(x['h']) for x in post)-start) if side=='buy' else (start-min(float(x['l']) for x in post))
+    disp=max(0,best)/(atr or 1)
+    if beyond>=2: state='ACCEPTANCE_THROUGH'; quality='WEAK/INVALIDATING'
+    elif reclaim is not None and reclaim<=3 and disp>=0.6: state='FAST_REJECTION_RECLAIM'; quality='STRONG'
+    elif reclaim is not None: state='RECLAIM'; quality='MODERATE'
+    else: state='TESTING'; quality='UNCONFIRMED'
+    return {'state':state,'quality':quality,'penetration_pct':round(pen,0),'closes_inside':inside,'closes_beyond':beyond,'reclaim_bars':reclaim,'displacement_atr':round(disp,2),'note':'Closed-M1 measurement only. Rejection quality is context, not an automatic trade entry.'}
+
 def build_m1_precision_engine(mtf):
     """V34.4 always-on M1 precision generator with independent pullback-state detection.
     H1/M15/M5 provide weighted context, but no longer hard-lock M1 direction.
@@ -1390,6 +1483,9 @@ def build_m1_precision_engine(mtf):
     }
     m1st=str(m1.get('structure') or 'UNCLEAR'); m1mom=str(m1.get('momentum') or 'NEUTRAL'); m1ev=str(m1.get('structure_event') or '')
     pullback_state=build_m1_pullback_state(m1)
+    m1_candles=(mtf.get('M1') or {}).get('candles') or []
+    tpo=build_tpo_profile(m1_candles,atr)
+    initial_balance=build_initial_balance(m1_candles)
     rows=[]
     for side in ('buy','sell'):
         bull=side=='buy'; own_bias=bm1 if bull else sm1; opp_bias=sm1 if bull else bm1
@@ -1433,10 +1529,14 @@ def build_m1_precision_engine(mtf):
             if (bull and micro_pd=='DISCOUNT') or ((not bull) and micro_pd=='PREMIUM'): seq_bonus+=3; seq_ev.append('nested range')
             if any(not (hi<float(r['low'])-atr*.2 or lo>float(r['high'])+atr*.2) for r in bprs): seq_bonus+=3; seq_ev.append('BPR')
             if isinstance(lp.get('nearest_above' if bull else 'nearest_below'),(int,float)): seq_bonus+=2; seq_ev.append('liquidity path')
-            score=max(0,min(100,base+source_bonus+micro_bonus+proximity+context_bonus+pullback_bonus+inducement_bonus+min(12,seq_bonus)))
-            if score<min_score: continue
+            ps=profile_session_context(side,lo,hi,tpo,initial_balance,atr)
+            # V36 profile/session evidence is deliberately small and NON-BLOCKING. Qualification threshold uses structural score only.
+            structural_score=max(0,min(100,base+source_bonus+micro_bonus+proximity+context_bonus+pullback_bonus+inducement_bonus+min(12,seq_bonus)))
+            if structural_score<min_score: continue
+            score=max(0,min(100,structural_score+int(ps.get('bonus') or 0)))
+            reaction=quantify_zone_reaction(m1_candles,side,lo,hi,atr)
             mode='CONTINUATION' if point_class.endswith('CONTINUATION') else 'TRANSITION'
-            rows.append({'side':side.upper(),'low':round(lo,2),'high':round(hi,2),'source':src,'score':score,'gate_score':max(bull_context,bear_context),'context_score':bull_context if bull else bear_context,'distance_m1_atr':round(datr,2),'m1_structure':m1st,'m1_momentum':m1mom,'m1_event':m1ev,'status':'QUALIFIED_PRECISION_POINT','point_class':point_class,'mode':mode,'context_direction':context_direction,'inducement_context':ind,'sequence_context':{'bonus':min(12,seq_bonus),'evidence':seq_ev},'note':f'Qualified fresh M1 {mode.lower()} precision point. Possible inducement is supporting context only and can add at most a small ranking bonus; it never creates a point. H1/M15/M5 are context rather than a hard lock. It is a watch area, not an automatic entry.'})
+            rows.append({'side':side.upper(),'low':round(lo,2),'high':round(hi,2),'source':src,'score':score,'structural_score':structural_score,'gate_score':max(bull_context,bear_context),'context_score':bull_context if bull else bear_context,'distance_m1_atr':round(datr,2),'m1_structure':m1st,'m1_momentum':m1mom,'m1_event':m1ev,'status':'QUALIFIED_PRECISION_POINT','point_class':point_class,'mode':mode,'context_direction':context_direction,'inducement_context':ind,'sequence_context':{'bonus':min(12,seq_bonus),'evidence':seq_ev},'profile_session_context':ps,'acceptance_rejection':reaction,'note':f'Qualified fresh M1 {mode.lower()} precision point. V36 TPO/session evidence only ranks an already-qualified structural point; it cannot create or veto one. Acceptance/rejection activates after a test. It is a watch area, not an automatic entry.'})
 
     rows.sort(key=lambda x:(x['score'],-x['distance_m1_atr']),reverse=True)
     if rows:
@@ -1446,7 +1546,7 @@ def build_m1_precision_engine(mtf):
     else:
         direction='SEARCHING_BOTH' if context_direction=='MIXED' else context_direction+'_CONTEXT'
         state='NO_FRESH_QUALIFIED_M1_POINT'
-    return {'state':state,'direction':direction,'context_direction':context_direction,'gate_score':max(bull_context,bear_context),'bull_gate':bull_context,'bear_gate':bear_context,'candidates':rows[:4],'m1_pullback':pullback_state,'m5_structure':m5.get('structure'),'m5_momentum':m5.get('momentum'),'m5_pressure':m5.get('current_pressure'),'m15_structure':m15.get('structure'),'h1_structure':h1.get('structure'),'m1_structure':m1st,'m1_momentum':m1mom,'shock_caution':shock,'note':'V34.6 keeps always-on M1 and adds MSS, BPR/liquidity-void, failed-auction acceptance/rejection, nested dealing ranges, and liquidity-path context as supporting evidence only. It does not make these concepts mandatory. V34.5 keeps always-on M1 and pullback-state separation, and adds possible inducement as a small supporting relationship only. It never creates or vetoes a point. V34.4 always-on M1 search separates pullback-state detection from precision-point qualification. H1/M15/M5 remain weighted context, not a hard lock. A detected pullback can exist even when no fresh M1 point qualifies. Freshness and used-zone suppression remain unchanged.'}
+    return {'state':state,'direction':direction,'context_direction':context_direction,'gate_score':max(bull_context,bear_context),'bull_gate':bull_context,'bear_gate':bear_context,'candidates':rows[:4],'m1_pullback':pullback_state,'tpo_profile':tpo,'initial_balance':initial_balance,'m5_structure':m5.get('structure'),'m5_momentum':m5.get('momentum'),'m5_pressure':m5.get('current_pressure'),'m15_structure':m15.get('structure'),'h1_structure':h1.get('structure'),'m1_structure':m1st,'m1_momentum':m1mom,'shock_caution':shock,'note':'V34.6 keeps always-on M1 and adds MSS, BPR/liquidity-void, failed-auction acceptance/rejection, nested dealing ranges, and liquidity-path context as supporting evidence only. It does not make these concepts mandatory. V34.5 keeps always-on M1 and pullback-state separation, and adds possible inducement as a small supporting relationship only. It never creates or vetoes a point. V34.4 always-on M1 search separates pullback-state detection from precision-point qualification. H1/M15/M5 remain weighted context, not a hard lock. A detected pullback can exist even when no fresh M1 point qualifies. Freshness and used-zone suppression remain unchanged.'}
 
 def build_reaction_engine(m5):
     """V32 deterministic closed-M5 reaction state for zones currently being tracked.

@@ -10,3 +10,10 @@ Built directly from V34.6. The structural engine is preserved: fresh-only M5 zon
 - Existing M1 points show their VWAP and order-flow context directly.
 
 Twelve Data's VWAP documentation says its VWAP endpoint applies to all instruments except currencies, so V35 does not pretend XAU/USD has centralized exchange volume. `GOLD_FUTURES_SYMBOL` remains the optional futures symbol setting from the earlier scanner. Evidence scores are not win probabilities; zones are watch areas, not automatic entries.
+
+## V36 Precision Context additions
+- TPO / time-at-price Market Profile from closed M1 OHLC (POC, VAH, VAL, HVN/LVN). It is explicitly not Volume Profile and fabricates no volume.
+- UTC session/opening-range + Initial Balance context (Asia, London, New York) from M1 price/time.
+- Quantitative M1 acceptance/rejection after a zone is tested: penetration, closes inside/beyond, reclaim speed, displacement.
+- TPO/session evidence is a small non-blocking ranking bonus only after the existing structural point qualifies. It cannot manufacture or veto a point.
+- VWAP and true order flow remain optional/unavailable unless trustworthy volume/aggressor data is connected.
