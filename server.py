@@ -1659,13 +1659,6 @@ def build_reaction_engine(m5):
     cp=float(m5.get('data_current_price') or 0)
     allz=m5.get('all_candidate_zones') or m5.get('candidate_zones') or {}
     rows=[]
-    ranked_pool=[]
-    vw=vwap_context or {}
-    daily_vw=((vw.get('daily') or {}).get('vwap'))
-    session_vw=((vw.get('session') or {}).get('vwap'))
-    avpack=vw.get('avwap') or {}
-    bull_av=((avpack.get('bullish') or {}).get('vwap'))
-    bear_av=((avpack.get('bearish') or {}).get('vwap'))
     for side in ('buy','sell'):
         for z in (allz.get(side) or [])[:8]:
             lo=float(z.get('low')); hi=float(z.get('high'))
