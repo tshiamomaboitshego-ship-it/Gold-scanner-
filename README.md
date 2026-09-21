@@ -18,3 +18,12 @@ These states are analysis/forward-testing aids, not automatic entries or guarant
 - M1 Market Regime 2.0: TRENDING / ORDERLY_TREND_OR_PULLBACK / COMPRESSION / EXPANSION_VOLATILITY_SHOCK / RANGE_OR_TRANSITION.
 - Setup Similarity Quant: compares the latest frozen precision setup with the nearest categorical cohort; remains INSUFFICIENT until sample size develops.
 All five are context/state/statistics layers. They do not invent zones or turn Quant statistics into probabilities.
+
+## V39.5 additions — Candidate Ladder + Diagnostics
+- **Pullback Candidate Ladder:** native M1 structure + Pullback Bridge candidates are ranked together as shallow/intermediate/deep areas.
+- **WATCH vs QUALIFIED:** legitimate near-qualified structure remains visible as WATCH instead of disappearing; WATCH is not an entry signal.
+- **Independent Break & Retest route:** closed-M1 break of a recent micro extreme can create a fresh first-retest candidate without requiring a classic continuation pullback.
+- **Independent Transition route:** liquidity sweep + reclaim + opposite displacement can create a transition/reversal retest candidate.
+- **Candidate Diagnostics:** shows raw → fresh → distance-valid → ranked → WATCH → QUALIFIED counts plus rejection reasons and route counts.
+- The normal M1 structural qualification reference remains 66; this is not a blanket threshold reduction.
+- M5/M15/H1 remain non-blocking context. Gemini/screenshots are not required for normal scans.

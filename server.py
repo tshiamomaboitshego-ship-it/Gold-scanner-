@@ -1924,6 +1924,62 @@ def v393_setup_state(candles, side, lo, hi, atr, pa, trap, reaction=None):
         state='APPROACHING' if dist<=atr*1.5 else 'CANDIDATE_FOUND'; original='FRESH'
     return {'state':state,'original_state':original,'price':round(cp,2),'reclaim_is_new_setup':state=='RECLAIM_AFTER_INVALIDATION','note':'Original invalidation is never erased by a later reclaim; reclaim is tracked as a new setup state.'}
 
+
+
+def v395_extra_m1_candidates(m1, candles, pullback_state):
+    """Independent M1 candidate routes for V39.5.
+
+    Adds only price-derived areas: first break/retest levels and transition/reversal
+    retest areas. These are candidate generators, not automatic trade signals.
+    """
+    rows=(candles or [])[-100:]
+    atr=float((m1 or {}).get('atr14') or 0)
+    cp=float((m1 or {}).get('data_current_price') or (rows[-1].get('c') if rows else 0) or 0)
+    if len(rows)<18 or atr<=0:return []
+    out=[]; tol=max(.08,atr*.12)
+    def add(side,lo,hi,source,base,idx,evidence):
+        lo,hi=sorted((float(lo),float(hi)))
+        # Candidate must still be ahead of the latest closed price.
+        if side=='BUY' and hi>=cp:return
+        if side=='SELL' and lo<=cp:return
+        if ((cp-hi)/atr if side=='BUY' else (lo-cp)/atr)>5.5:return
+        after=rows[min(len(rows),idx+1):]
+        touches=sum(1 for x in after if float(x['l'])<=hi and float(x['h'])>=lo)
+        closes=sum(1 for x in after if (float(x['c'])<lo-.08*atr if side=='BUY' else float(x['c'])>hi+.08*atr))
+        if touches>1 or closes:return
+        out.append({'side':side,'low':round(lo,3),'high':round(hi,3),'source':source,'rank_score':base,
+                    'touch_count':touches,'consumption':'UNTOUCHED' if touches==0 else 'LIGHT',
+                    'v395_route':evidence.get('route'),'v395_evidence':evidence,'created_index':idx})
+    # BREAK & RETEST: a close decisively through a recent 5-bar extreme creates a first-retest level.
+    for i in range(7,len(rows)-2):
+        prev=rows[i-6:i]
+        ph=max(float(x['h']) for x in prev); pl=min(float(x['l']) for x in prev)
+        c=float(rows[i]['c']); o=float(rows[i]['o'])
+        body=abs(c-o)
+        if c>ph+.05*atr and body>=.35*atr:
+            add('BUY',ph-tol,ph+tol,'M1_BREAK_RETEST_BUY',74,i,{'route':'BREAK_RETEST','break_index':i,'level':round(ph,3)})
+        if c<pl-.05*atr and body>=.35*atr:
+            add('SELL',pl-tol,pl+tol,'M1_BREAK_RETEST_SELL',74,i,{'route':'BREAK_RETEST','break_index':i,'level':round(pl,3)})
+    # TRANSITION: sweep an extreme, reclaim it, then opposite displacement. Candidate is first retest
+    # of the reclaimed micro level; this is deliberately separate from continuation pullback logic.
+    for i in range(8,len(rows)-2):
+        prior=rows[i-7:i]
+        ph=max(float(x['h']) for x in prior); pl=min(float(x['l']) for x in prior)
+        x=rows[i]; n=rows[i+1]
+        # bullish: sell-side sweep + reclaim + bullish displacement
+        if float(x['l'])<pl-.05*atr and float(x['c'])>pl and float(n['c'])>float(n['o']) and (float(n['c'])-float(n['o']))>=.45*atr:
+            add('BUY',pl-tol,pl+tol,'M1_TRANSITION_RECLAIM_BUY',76,i+1,{'route':'TRANSITION','sweep':'SELL_SIDE','reclaim':round(pl,3)})
+        # bearish reverse
+        if float(x['h'])>ph+.05*atr and float(x['c'])<ph and float(n['c'])<float(n['o']) and (float(n['o'])-float(n['c']))>=.45*atr:
+            add('SELL',ph-tol,ph+tol,'M1_TRANSITION_RECLAIM_SELL',76,i+1,{'route':'TRANSITION','sweep':'BUY_SIDE','reclaim':round(ph,3)})
+    # Deduplicate overlapping same-side areas, preferring newest / higher base score.
+    out.sort(key=lambda z:(z['rank_score'],z['created_index']),reverse=True)
+    kept=[]
+    for z in out:
+        if any(k['side']==z['side'] and not (z['high']<k['low']-.15*atr or z['low']>k['high']+.15*atr) for k in kept):continue
+        kept.append(z)
+    return kept[:10]
+
 def build_m1_precision_engine(mtf, vwap_context=None):
     """V39.1 M1-FIRST precision generator.
     M1 owns setup detection, candidate generation, qualification and precision ranking.
@@ -1967,9 +2023,11 @@ def build_m1_precision_engine(mtf, vwap_context=None):
     cp=float(m1.get('data_current_price') or m5.get('data_current_price') or 0); atr=float(m1.get('atr14') or 1)
     allowed_by_side={
         'buy':{'BULLISH_FVG','BULLISH_OB','SWING_DEMAND','DYNAMIC_BROKEN_RESISTANCE_RETEST',
-               'M1_PULLBACK_BULLISH_FVG','M1_PULLBACK_BUY_DISPLACEMENT_ORIGIN','M1_PULLBACK_BROKEN_RESISTANCE_RETEST'},
+               'M1_PULLBACK_BULLISH_FVG','M1_PULLBACK_BUY_DISPLACEMENT_ORIGIN','M1_PULLBACK_BROKEN_RESISTANCE_RETEST',
+               'M1_BREAK_RETEST_BUY','M1_TRANSITION_RECLAIM_BUY'},
         'sell':{'BEARISH_FVG','BEARISH_OB','SWING_SUPPLY','DYNAMIC_BROKEN_SUPPORT_RETEST',
-                'M1_PULLBACK_BEARISH_FVG','M1_PULLBACK_SELL_DISPLACEMENT_ORIGIN','M1_PULLBACK_BROKEN_SUPPORT_RETEST'}
+                'M1_PULLBACK_BEARISH_FVG','M1_PULLBACK_SELL_DISPLACEMENT_ORIGIN','M1_PULLBACK_BROKEN_SUPPORT_RETEST',
+                'M1_BREAK_RETEST_SELL','M1_TRANSITION_RECLAIM_SELL'}
     }
     m1st=str(m1.get('structure') or 'UNCLEAR'); m1mom=str(m1.get('momentum') or 'NEUTRAL'); m1ev=str(m1.get('structure_event') or '')
     pullback_state=build_m1_pullback_state(m1)
@@ -1979,6 +2037,8 @@ def build_m1_precision_engine(mtf, vwap_context=None):
     compression_expansion=v394_compression_expansion(m1_candles,atr)
     market_regime_v2=v394_market_regime(m1,m1_candles,atr,compression_expansion)
     pullback_bridge=build_m1_pullback_bridge_candidates(m1,m1_candles,pullback_state,pullback_quality)
+    extra_routes=v395_extra_m1_candidates(m1,m1_candles,pullback_state)
+    diagnostics={'raw':0,'fresh':0,'distance_ok':0,'ranked':0,'qualified':0,'watch':0,'rejected':{},'by_route':{}}
     tpo=build_tpo_profile(m1_candles,atr)
     initial_balance=build_initial_balance(m1_candles)
     rows=[]
@@ -2002,26 +2062,42 @@ def build_m1_precision_engine(mtf, vwap_context=None):
         point_class='M1_PRECISION_CONTINUATION' if m1_continuation else 'M1_PRECISION_TRANSITION'
         # One M1-owned qualification floor. HTF alignment cannot raise/lower this gate.
         min_score=66
-        if not micro_align: continue
+        # V39.5: lack of same-direction M1 momentum no longer deletes a legitimate
+        # transition/break-retest candidate before it can be evaluated. It is reflected
+        # in scoring and WATCH/QUALIFIED state instead.
 
         native_pool=list(((m1.get('candidate_zones') or {}).get(side) or []))
         bridge_pool=[z for z in pullback_bridge if str(z.get('side') or '').lower()==side]
-        candidate_pool=native_pool+bridge_pool
+        route_pool=[z for z in extra_routes if str(z.get('side') or '').lower()==side]
+        candidate_pool=native_pool+bridge_pool+route_pool
+        diagnostics['raw'] += len(candidate_pool)
+        for _z in candidate_pool:
+            _r=_z.get('v395_route') or ('PULLBACK_BRIDGE' if _z.get('pullback_bridge') else 'NATIVE')
+            diagnostics['by_route'][_r]=diagnostics['by_route'].get(_r,0)+1
         for z in candidate_pool:
             src=str(z.get('source') or '')
-            if src not in allowed_by_side[side]: continue
+            if src not in allowed_by_side[side]:
+                diagnostics['rejected']['SOURCE_NOT_ALLOWED']=diagnostics['rejected'].get('SOURCE_NOT_ALLOWED',0)+1; continue
             lo=float(z.get('low')); hi=float(z.get('high')); touches=int(z.get('touch_count') or 0); cons=str(z.get('consumption') or '').upper()
             original_lo,original_hi=lo,hi
             math_cluster=v39_level_cluster(m1,side,lo,hi,atr)
             refinement=v39_micro_refine(m1,side,lo,hi,atr,math_cluster)
             lo,hi=float(refinement['low']),float(refinement['high'])
             ahead=(hi < cp) if bull else (lo > cp)
-            if not ahead or touches>1 or cons not in ('','UNTOUCHED','LIGHT'): continue
+            if not ahead:
+                diagnostics['rejected']['NOT_AHEAD']=diagnostics['rejected'].get('NOT_AHEAD',0)+1; continue
+            if touches>1:
+                diagnostics['rejected']['TOO_MANY_TOUCHES']=diagnostics['rejected'].get('TOO_MANY_TOUCHES',0)+1; continue
+            if cons not in ('','UNTOUCHED','LIGHT'):
+                diagnostics['rejected']['CONSUMED']=diagnostics['rejected'].get('CONSUMED',0)+1; continue
+            diagnostics['fresh'] += 1
             dist=max(0,cp-hi) if bull else max(0,lo-cp); datr=dist/atr if atr else 99
-            if datr>5.5: continue
+            if datr>5.5:
+                diagnostics['rejected']['TOO_FAR']=diagnostics['rejected'].get('TOO_FAR',0)+1; continue
+            diagnostics['distance_ok'] += 1
             base=int(z.get('rank_score') or 0)
-            source_bonus=13 if src.startswith('M1_PULLBACK_BROKEN_') else 12 if src.startswith('DYNAMIC_BROKEN_') else 11 if src.startswith('M1_PULLBACK_') and src.endswith('_FVG') else 10 if src.endswith('_FVG') else 10 if 'DISPLACEMENT_ORIGIN' in src else 8 if src.endswith('_OB') else 5
-            micro_bonus=14 if strong_micro else 10
+            source_bonus=13 if src.startswith('M1_BREAK_RETEST_') else 12 if src.startswith('M1_TRANSITION_RECLAIM_') else 13 if src.startswith('M1_PULLBACK_BROKEN_') else 12 if src.startswith('DYNAMIC_BROKEN_') else 11 if src.startswith('M1_PULLBACK_') and src.endswith('_FVG') else 10 if src.endswith('_FVG') else 10 if 'DISPLACEMENT_ORIGIN' in src else 8 if src.endswith('_OB') else 5
+            micro_bonus=14 if strong_micro else 9 if micro_align else 3
             proximity=max(0,12-int(datr*3))
             # HTF is deliberately excluded from M1 structural qualification.
             context_bonus=0
@@ -2094,19 +2170,30 @@ def build_m1_precision_engine(mtf, vwap_context=None):
             pa_sequence=v393_price_action_sequence(m1_candles,side,lo,hi,atr)
             trap_failure=v393_trap_failure(m1_candles,side,lo,hi,atr)
             setup_lifecycle=v393_setup_state(m1_candles,side,lo,hi,atr,pa_sequence,trap_failure,reaction)
-            mode='CONTINUATION' if point_class.endswith('CONTINUATION') else 'TRANSITION'
-            item={'side':side.upper(),'low':round(lo,2),'high':round(hi,2),'source':src,'score':rank_score,'structural_score':structural_score,'ranking_score':rank_score,'gate_score':max(bull_context,bear_context),'context_score':bull_context if bull else bear_context,'distance_m1_atr':round(datr,2),'depth':depth,'original_zone':{'low':round(original_lo,2),'high':round(original_hi,2)},'zone_refinement':refinement,'pullback_quality':pullback_quality,'pullback_geometry':pullback_geometry,'mathematical_cluster':math_cluster,'liquidity_target':liquidity_target,'path_obstacles':path_quality,'evidence_redundancy':redundancy,'m1_structure':m1st,'m1_momentum':m1mom,'m1_event':m1ev,'point_class':point_class,'mode':mode,'context_direction':context_direction,'mtf_alignment':mtf_alignment,'htf_confluence':{'bonus':htf_confluence_bonus,'hits':htf_hits,'non_blocking':True},'inducement_context':ind,'sequence_context':{'bonus':min(12,seq_bonus),'evidence':seq_ev},'profile_session_context':ps,'acceptance_rejection':reaction,'price_action_sequence':pa_sequence,'setup_lifecycle':setup_lifecycle,'trap_failure':trap_failure,'compression_expansion':compression_expansion,'market_regime_v2':market_regime_v2,'vwap_context':vwstate,'avwap_context':'SUPPORTIVE' if 'AVWAP' in near else 'UNAVAILABLE' if not isinstance(side_av,(int,float)) else 'NEUTRAL','vwap_ranking_bonus':vwap_bonus,'pullback_bridge':bool(z.get('pullback_bridge')),'bridge_evidence':z.get('bridge_evidence') or {},'vwap_detail':{'daily_vwap':daily_vw,'session_vwap':session_vw,'avwap':side_av,'near_zone':near,'source':vw.get('source'),'basis_adjustment':vw.get('basis_adjustment',0)}}
-            ranked_pool.append(dict(item, status='RANKED_STRUCTURAL_CANDIDATE'))
-            # Existing structural threshold still qualifies on its own. A near-qualified
-            # legitimate structure can only be promoted by actual available VWAP/AVWAP evidence.
+            route=z.get('v395_route') or ('PULLBACK_CONTINUATION' if z.get('pullback_bridge') or m1_continuation else 'NATIVE_STRUCTURE')
+            local_point_class='M1_PRECISION_BREAK_RETEST' if route=='BREAK_RETEST' else 'M1_PRECISION_TRANSITION' if route=='TRANSITION' else point_class
+            mode='BREAK_RETEST' if route=='BREAK_RETEST' else 'TRANSITION' if route=='TRANSITION' else ('CONTINUATION' if local_point_class.endswith('CONTINUATION') else 'TRANSITION')
+            item={'side':side.upper(),'low':round(lo,2),'high':round(hi,2),'source':src,'score':rank_score,'structural_score':structural_score,'ranking_score':rank_score,'gate_score':max(bull_context,bear_context),'context_score':bull_context if bull else bear_context,'distance_m1_atr':round(datr,2),'depth':depth,'original_zone':{'low':round(original_lo,2),'high':round(original_hi,2)},'zone_refinement':refinement,'pullback_quality':pullback_quality,'pullback_geometry':pullback_geometry,'mathematical_cluster':math_cluster,'liquidity_target':liquidity_target,'path_obstacles':path_quality,'evidence_redundancy':redundancy,'m1_structure':m1st,'m1_momentum':m1mom,'m1_event':m1ev,'point_class':local_point_class,'mode':mode,'candidate_route':route,'context_direction':context_direction,'mtf_alignment':mtf_alignment,'htf_confluence':{'bonus':htf_confluence_bonus,'hits':htf_hits,'non_blocking':True},'inducement_context':ind,'sequence_context':{'bonus':min(12,seq_bonus),'evidence':seq_ev},'profile_session_context':ps,'acceptance_rejection':reaction,'price_action_sequence':pa_sequence,'setup_lifecycle':setup_lifecycle,'trap_failure':trap_failure,'compression_expansion':compression_expansion,'market_regime_v2':market_regime_v2,'vwap_context':vwstate,'avwap_context':'SUPPORTIVE' if 'AVWAP' in near else 'UNAVAILABLE' if not isinstance(side_av,(int,float)) else 'NEUTRAL','vwap_ranking_bonus':vwap_bonus,'pullback_bridge':bool(z.get('pullback_bridge')),'bridge_evidence':z.get('bridge_evidence') or {},'vwap_detail':{'daily_vwap':daily_vw,'session_vwap':session_vw,'avwap':side_av,'near_zone':near,'source':vw.get('source'),'basis_adjustment':vw.get('basis_adjustment',0)}}
+            diagnostics['ranked'] += 1
+            # Dynamic classification, not a lower-quality automatic signal: legitimate near-qualified
+            # structures remain visible as WATCH candidates while the same 66 structural floor remains
+            # the normal qualification reference. Break/retest and transition routes can qualify from
+            # independent closed-candle evidence plus ranking, without requiring continuation state.
             precision_rescue=(pullback_bonus>0 and pullback_quality.get('score',0)>=58 and rank_score>=min_score and structural_score>=min_score-5)
-            qualifies = structural_score >= min_score or precision_rescue or (available and rank_score >= min_score and structural_score >= min_score-10)
+            route_rescue=(route in ('BREAK_RETEST','TRANSITION') and rank_score>=min_score and structural_score>=min_score-5)
+            qualifies = structural_score >= min_score or precision_rescue or route_rescue or (available and rank_score >= min_score and structural_score >= min_score-10)
             item['qualification_gap']=max(0,min_score-structural_score)
             item['qualification_threshold']=min_score
             item['candidate_competition_score']=rank_score
+            if qualifies:
+                item['status']='QUALIFIED_PRECISION_POINT'; diagnostics['qualified'] += 1
+            elif structural_score>=max(52,min_score-14):
+                item['status']='WATCH_CANDIDATE'; diagnostics['watch'] += 1
+            else:
+                diagnostics['rejected']['LOW_STRUCTURE']=diagnostics['rejected'].get('LOW_STRUCTURE',0)+1
+            ranked_pool.append(dict(item))
             if not qualifies:
                 continue
-            item['status']='QUALIFIED_PRECISION_POINT'
             item['note']=f'V39.3 M1 sequence-aware pullback-bridge qualified fresh M1 {mode.lower()} precision point. M5/M15/H1 are non-blocking context/confluence only. Quant evidence is not a probability or guarantee.'
             rows.append(item)
 
@@ -2119,7 +2206,7 @@ def build_m1_precision_engine(mtf, vwap_context=None):
     else:
         direction='SEARCHING_BOTH' if context_direction=='MIXED' else context_direction+'_CONTEXT'
         state='NO_FRESH_QUALIFIED_M1_POINT'
-    return {'state':state,'direction':direction,'context_direction':context_direction,'gate_score':max(bull_context,bear_context),'bull_gate':bull_context,'bear_gate':bear_context,'candidates':rows[:4],'ranked_candidate_pool':ranked_pool[:8],'m1_pullback':pullback_state,'pullback_quality':pullback_quality,'precision_engine_version':'V39.4_M1_STATE_MEMORY_REGIME_SIMILARITY','pullback_bridge_candidates':pullback_bridge,'compression_expansion':compression_expansion,'market_regime_v2':market_regime_v2,'tpo_profile':tpo,'initial_balance':initial_balance,'m5_structure':m5.get('structure'),'m5_momentum':m5.get('momentum'),'m5_pressure':m5.get('current_pressure'),'m15_structure':m15.get('structure'),'h1_structure':h1.get('structure'),'m1_structure':m1st,'m1_momentum':m1mom,'shock_caution':shock,'note':'V39.4 M1-FIRST + STATE INTEGRITY + MEMORY + REGIME 2.0: M1 owns setup detection, candidate generation, qualification and precision ranking. GOOD/STRONG active pullbacks trigger a structural re-scan for fresh M1 FVG, displacement-origin and broken-structure retest candidates. M5/M15/H1 retain their structure, FVG/OB, liquidity and other concept analysis as non-blocking context/confluence only. Mathematical clustering, pullback geometry, micro-zone refinement, liquidity path/obstacles, redundancy control, freshness and Quant tracking remain active.'}
+    return {'state':state,'direction':direction,'context_direction':context_direction,'gate_score':max(bull_context,bear_context),'bull_gate':bull_context,'bear_gate':bear_context,'candidates':rows[:4],'ranked_candidate_pool':ranked_pool[:8],'m1_pullback':pullback_state,'pullback_quality':pullback_quality,'precision_engine_version':'V39.5_M1_CANDIDATE_LADDER_DIAGNOSTICS','candidate_diagnostics':diagnostics,'extra_route_candidates':extra_routes,'pullback_bridge_candidates':pullback_bridge,'compression_expansion':compression_expansion,'market_regime_v2':market_regime_v2,'tpo_profile':tpo,'initial_balance':initial_balance,'m5_structure':m5.get('structure'),'m5_momentum':m5.get('momentum'),'m5_pressure':m5.get('current_pressure'),'m15_structure':m15.get('structure'),'h1_structure':h1.get('structure'),'m1_structure':m1st,'m1_momentum':m1mom,'shock_caution':shock,'note':'V39.5 M1 CANDIDATE LADDER + DIAGNOSTICS: continuation pullback, break/retest and transition routes feed one ranked M1 candidate ladder. WATCH candidates expose near-qualified structure without pretending it is qualified. State integrity, memory and Regime 2.0 remain active.  M1 owns setup detection, candidate generation, qualification and precision ranking. GOOD/STRONG active pullbacks trigger a structural re-scan for fresh M1 FVG, displacement-origin and broken-structure retest candidates. M5/M15/H1 retain their structure, FVG/OB, liquidity and other concept analysis as non-blocking context/confluence only. Mathematical clustering, pullback geometry, micro-zone refinement, liquidity path/obstacles, redundancy control, freshness and Quant tracking remain active.'}
 
 def build_reaction_engine(m5):
     """V32 deterministic closed-M5 reaction state for zones currently being tracked.
