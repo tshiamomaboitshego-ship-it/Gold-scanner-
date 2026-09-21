@@ -1806,6 +1806,76 @@ def build_m1_pullback_bridge_candidates(m1, candles, pullback_state, pullback_qu
             ded.append(z)
     return ded[:8]
 
+def v393_price_action_sequence(candles, side, lo, hi, atr):
+    """Closed-M1 price-action sequence around a candidate. Supportive only; never creates a zone."""
+    if not candles or atr <= 0:
+        return {'stage':0,'max_stage':5,'state':'WAITING','steps':{},'note':'M1 candles unavailable.'}
+    side=str(side).lower(); recent=candles[-24:]
+    touch_i=next((i for i,x in enumerate(recent) if float(x['l'])<=hi and float(x['h'])>=lo),None)
+    if touch_i is None:
+        cp=float(recent[-1]['c']); dist=max(0,cp-hi) if side=='buy' else max(0,lo-cp)
+        return {'stage':0,'max_stage':5,'state':'APPROACHING' if dist<=atr*1.5 else 'AHEAD','steps':{'sweep':False,'rejection_reclaim':False,'displacement':False,'micro_structure_break':False,'follow_through':False},'distance_atr':round(dist/atr,2),'note':'Waiting for closed-M1 interaction.'}
+    pre=recent[max(0,touch_i-6):touch_i+1]; post=recent[touch_i:]
+    x=recent[touch_i]; o,h,l,c=map(float,(x['o'],x['h'],x['l'],x['c']))
+    prev_lows=[float(q['l']) for q in pre[:-1]]; prev_highs=[float(q['h']) for q in pre[:-1]]
+    if side=='buy':
+        sweep=bool(prev_lows) and l < min(prev_lows) and c > min(prev_lows)
+        rejection=(l<=hi and c>=lo and c>(l+(h-l)*0.45))
+        disp=any(float(q['c'])-float(q['o']) >= atr*.55 for q in post[:4])
+        ref=max(prev_highs[-3:] or [h]); brk=any(float(q['c'])>ref for q in post[1:6])
+        ft=sum(1 for q in post[1:5] if float(q['c'])>float(q['o']))>=2
+    else:
+        sweep=bool(prev_highs) and h > max(prev_highs) and c < max(prev_highs)
+        rejection=(h>=lo and c<=hi and c<(l+(h-l)*0.55))
+        disp=any(float(q['o'])-float(q['c']) >= atr*.55 for q in post[:4])
+        ref=min(prev_lows[-3:] or [l]); brk=any(float(q['c'])<ref for q in post[1:6])
+        ft=sum(1 for q in post[1:5] if float(q['c'])<float(q['o']))>=2
+    steps={'sweep':sweep,'rejection_reclaim':rejection,'displacement':disp,'micro_structure_break':brk,'follow_through':ft}
+    # Ordered stage: later evidence cannot skip missing earlier reaction evidence.
+    ordered=[sweep or rejection,rejection,disp,brk,ft]; stage=0
+    for ok in ordered:
+        if ok: stage+=1
+        else: break
+    state='CONFIRMED' if stage>=5 else 'DEVELOPING' if stage>=2 else 'EARLY_REACTION' if stage==1 else 'TESTING'
+    return {'stage':stage,'max_stage':5,'state':state,'steps':steps,'note':'Sequence is reaction evidence, not an automatic entry.'}
+
+def v393_trap_failure(candles, side, lo, hi, atr):
+    """Detect closed-M1 acceptance through a zone and failed reclaim / opposite transition evidence."""
+    if not candles or atr<=0:return {'state':'NONE','opposite_transition':False}
+    side=str(side).lower(); r=candles[-16:]
+    touched=any(float(x['l'])<=hi and float(x['h'])>=lo for x in r)
+    if not touched:return {'state':'NONE','opposite_transition':False}
+    if side=='buy':
+        beyond=[i for i,x in enumerate(r) if float(x['c']) < lo]
+        if not beyond:return {'state':'HOLDING_OR_UNRESOLVED','opposite_transition':False}
+        i=beyond[-1]; after=r[i+1:]
+        reclaimed=any(float(x['c'])>hi for x in after)
+        opp_disp=any(float(x['o'])-float(x['c'])>=atr*.55 for x in r[max(0,i-2):])
+        failed=not reclaimed and opp_disp
+        return {'state':'BEARISH_TRAP_TRANSITION' if failed else 'ACCEPTANCE_BELOW' if not reclaimed else 'RECLAIMED','opposite_transition':failed,'acceptance_side':'BELOW'}
+    beyond=[i for i,x in enumerate(r) if float(x['c']) > hi]
+    if not beyond:return {'state':'HOLDING_OR_UNRESOLVED','opposite_transition':False}
+    i=beyond[-1]; after=r[i+1:]
+    reclaimed=any(float(x['c'])<lo for x in after)
+    opp_disp=any(float(x['c'])-float(x['o'])>=atr*.55 for x in r[max(0,i-2):])
+    failed=not reclaimed and opp_disp
+    return {'state':'BULLISH_TRAP_TRANSITION' if failed else 'ACCEPTANCE_ABOVE' if not reclaimed else 'RECLAIMED','opposite_transition':failed,'acceptance_side':'ABOVE'}
+
+def v393_setup_state(candles, side, lo, hi, atr, pa, trap):
+    """Deterministic M1 setup lifecycle from closed candles."""
+    if not candles:return {'state':'FORMING','note':'Waiting for M1 data.'}
+    cp=float(candles[-1]['c']); side=str(side).lower()
+    touched=any(float(x['l'])<=hi and float(x['h'])>=lo for x in candles[-24:])
+    if trap.get('opposite_transition'): state='FAILED_TRAP_TRANSITION'
+    elif pa.get('state')=='CONFIRMED': state='STRUCTURE_CONFIRMED'
+    elif pa.get('stage',0)>=3: state='CONFIRMING'
+    elif pa.get('stage',0)>=1: state='REJECTING'
+    elif touched: state='TESTING'
+    else:
+        dist=max(0,cp-hi) if side=='buy' else max(0,lo-cp)
+        state='APPROACHING' if dist<=atr*1.5 else 'CANDIDATE_FOUND'
+    return {'state':state,'price':round(cp,2),'note':'Lifecycle is based on closed M1 candles and does not execute trades.'}
+
 def build_m1_precision_engine(mtf, vwap_context=None):
     """V39.1 M1-FIRST precision generator.
     M1 owns setup detection, candidate generation, qualification and precision ranking.
@@ -1971,8 +2041,11 @@ def build_m1_precision_engine(mtf, vwap_context=None):
             depth='SHALLOW' if datr<=1.5 else 'INTERMEDIATE' if datr<=3.25 else 'DEEP'
             rank_score=max(0,min(100,structural_score+int(ps.get('bonus') or 0)+int(liquidity_target.get('bonus') or 0)+vwap_bonus+htf_confluence_bonus+mtf_context_adjustment))
             reaction=quantify_zone_reaction(m1_candles,side,lo,hi,atr)
+            pa_sequence=v393_price_action_sequence(m1_candles,side,lo,hi,atr)
+            trap_failure=v393_trap_failure(m1_candles,side,lo,hi,atr)
+            setup_lifecycle=v393_setup_state(m1_candles,side,lo,hi,atr,pa_sequence,trap_failure)
             mode='CONTINUATION' if point_class.endswith('CONTINUATION') else 'TRANSITION'
-            item={'side':side.upper(),'low':round(lo,2),'high':round(hi,2),'source':src,'score':rank_score,'structural_score':structural_score,'ranking_score':rank_score,'gate_score':max(bull_context,bear_context),'context_score':bull_context if bull else bear_context,'distance_m1_atr':round(datr,2),'depth':depth,'original_zone':{'low':round(original_lo,2),'high':round(original_hi,2)},'zone_refinement':refinement,'pullback_quality':pullback_quality,'pullback_geometry':pullback_geometry,'mathematical_cluster':math_cluster,'liquidity_target':liquidity_target,'path_obstacles':path_quality,'evidence_redundancy':redundancy,'m1_structure':m1st,'m1_momentum':m1mom,'m1_event':m1ev,'point_class':point_class,'mode':mode,'context_direction':context_direction,'mtf_alignment':mtf_alignment,'htf_confluence':{'bonus':htf_confluence_bonus,'hits':htf_hits,'non_blocking':True},'inducement_context':ind,'sequence_context':{'bonus':min(12,seq_bonus),'evidence':seq_ev},'profile_session_context':ps,'acceptance_rejection':reaction,'vwap_context':vwstate,'avwap_context':'SUPPORTIVE' if 'AVWAP' in near else 'UNAVAILABLE' if not isinstance(side_av,(int,float)) else 'NEUTRAL','vwap_ranking_bonus':vwap_bonus,'pullback_bridge':bool(z.get('pullback_bridge')),'bridge_evidence':z.get('bridge_evidence') or {},'vwap_detail':{'daily_vwap':daily_vw,'session_vwap':session_vw,'avwap':side_av,'near_zone':near,'source':vw.get('source'),'basis_adjustment':vw.get('basis_adjustment',0)}}
+            item={'side':side.upper(),'low':round(lo,2),'high':round(hi,2),'source':src,'score':rank_score,'structural_score':structural_score,'ranking_score':rank_score,'gate_score':max(bull_context,bear_context),'context_score':bull_context if bull else bear_context,'distance_m1_atr':round(datr,2),'depth':depth,'original_zone':{'low':round(original_lo,2),'high':round(original_hi,2)},'zone_refinement':refinement,'pullback_quality':pullback_quality,'pullback_geometry':pullback_geometry,'mathematical_cluster':math_cluster,'liquidity_target':liquidity_target,'path_obstacles':path_quality,'evidence_redundancy':redundancy,'m1_structure':m1st,'m1_momentum':m1mom,'m1_event':m1ev,'point_class':point_class,'mode':mode,'context_direction':context_direction,'mtf_alignment':mtf_alignment,'htf_confluence':{'bonus':htf_confluence_bonus,'hits':htf_hits,'non_blocking':True},'inducement_context':ind,'sequence_context':{'bonus':min(12,seq_bonus),'evidence':seq_ev},'profile_session_context':ps,'acceptance_rejection':reaction,'price_action_sequence':pa_sequence,'setup_lifecycle':setup_lifecycle,'trap_failure':trap_failure,'vwap_context':vwstate,'avwap_context':'SUPPORTIVE' if 'AVWAP' in near else 'UNAVAILABLE' if not isinstance(side_av,(int,float)) else 'NEUTRAL','vwap_ranking_bonus':vwap_bonus,'pullback_bridge':bool(z.get('pullback_bridge')),'bridge_evidence':z.get('bridge_evidence') or {},'vwap_detail':{'daily_vwap':daily_vw,'session_vwap':session_vw,'avwap':side_av,'near_zone':near,'source':vw.get('source'),'basis_adjustment':vw.get('basis_adjustment',0)}}
             ranked_pool.append(dict(item, status='RANKED_STRUCTURAL_CANDIDATE'))
             # Existing structural threshold still qualifies on its own. A near-qualified
             # legitimate structure can only be promoted by actual available VWAP/AVWAP evidence.
@@ -1984,7 +2057,7 @@ def build_m1_precision_engine(mtf, vwap_context=None):
             if not qualifies:
                 continue
             item['status']='QUALIFIED_PRECISION_POINT'
-            item['note']=f'V39.2 M1 pullback-bridge qualified fresh M1 {mode.lower()} precision point. M5/M15/H1 are non-blocking context/confluence only. Quant evidence is not a probability or guarantee.'
+            item['note']=f'V39.3 M1 sequence-aware pullback-bridge qualified fresh M1 {mode.lower()} precision point. M5/M15/H1 are non-blocking context/confluence only. Quant evidence is not a probability or guarantee.'
             rows.append(item)
 
     rows.sort(key=lambda x:(x['score'],-x['distance_m1_atr']),reverse=True)
@@ -1996,7 +2069,7 @@ def build_m1_precision_engine(mtf, vwap_context=None):
     else:
         direction='SEARCHING_BOTH' if context_direction=='MIXED' else context_direction+'_CONTEXT'
         state='NO_FRESH_QUALIFIED_M1_POINT'
-    return {'state':state,'direction':direction,'context_direction':context_direction,'gate_score':max(bull_context,bear_context),'bull_gate':bull_context,'bear_gate':bear_context,'candidates':rows[:4],'ranked_candidate_pool':ranked_pool[:8],'m1_pullback':pullback_state,'pullback_quality':pullback_quality,'precision_engine_version':'V39.2_M1_PULLBACK_BRIDGE','pullback_bridge_candidates':pullback_bridge,'tpo_profile':tpo,'initial_balance':initial_balance,'m5_structure':m5.get('structure'),'m5_momentum':m5.get('momentum'),'m5_pressure':m5.get('current_pressure'),'m15_structure':m15.get('structure'),'h1_structure':h1.get('structure'),'m1_structure':m1st,'m1_momentum':m1mom,'shock_caution':shock,'note':'V39.2 M1-FIRST + PULLBACK BRIDGE: M1 owns setup detection, candidate generation, qualification and precision ranking. GOOD/STRONG active pullbacks trigger a structural re-scan for fresh M1 FVG, displacement-origin and broken-structure retest candidates. M5/M15/H1 retain their structure, FVG/OB, liquidity and other concept analysis as non-blocking context/confluence only. Mathematical clustering, pullback geometry, micro-zone refinement, liquidity path/obstacles, redundancy control, freshness and Quant tracking remain active.'}
+    return {'state':state,'direction':direction,'context_direction':context_direction,'gate_score':max(bull_context,bear_context),'bull_gate':bull_context,'bear_gate':bear_context,'candidates':rows[:4],'ranked_candidate_pool':ranked_pool[:8],'m1_pullback':pullback_state,'pullback_quality':pullback_quality,'precision_engine_version':'V39.3_M1_SEQUENCE_STATE_TRAP','pullback_bridge_candidates':pullback_bridge,'tpo_profile':tpo,'initial_balance':initial_balance,'m5_structure':m5.get('structure'),'m5_momentum':m5.get('momentum'),'m5_pressure':m5.get('current_pressure'),'m15_structure':m15.get('structure'),'h1_structure':h1.get('structure'),'m1_structure':m1st,'m1_momentum':m1mom,'shock_caution':shock,'note':'V39.3 M1-FIRST + PRICE-ACTION SEQUENCE + STATE/TRAP: M1 owns setup detection, candidate generation, qualification and precision ranking. GOOD/STRONG active pullbacks trigger a structural re-scan for fresh M1 FVG, displacement-origin and broken-structure retest candidates. M5/M15/H1 retain their structure, FVG/OB, liquidity and other concept analysis as non-blocking context/confluence only. Mathematical clustering, pullback geometry, micro-zone refinement, liquidity path/obstacles, redundancy control, freshness and Quant tracking remain active.'}
 
 def build_reaction_engine(m5):
     """V32 deterministic closed-M5 reaction state for zones currently being tracked.

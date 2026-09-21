@@ -1,21 +1,12 @@
-# Gold Scanner V39.2 — M1 Pullback Bridge + Precision Quant Engine
+# Gold Scanner V39.3 — M1 Sequence + State + Trap Precision Quant Engine
 
-V39.2 is a targeted fix on top of V39.1. M1 remains the primary setup and precision timeframe; M5/M15/H1 remain non-blocking context/confluence.
+Built from V39.2 without removing the M1 Pullback Bridge, mathematical precision or forward Quant Engine.
 
-## Targeted change
-When the M1 pullback detector identifies a GOOD/STRONG active continuation pullback, V39.2 re-scans the active M1 impulse/retracement for structural candidates that the generic zone pool can miss:
-- fresh M1 FVG / imbalance areas created by the impulse
-- last-opposite-candle displacement origins
-- broken micro support/resistance first-retest areas
+## Added in V39.3
+- **M1 Price-Action Sequence Engine**: closed-M1 sweep/rejection-reclaim → displacement → micro structure break → follow-through stages. It is reaction evidence only and never manufactures a zone.
+- **M1 Setup-State Machine**: CANDIDATE_FOUND → APPROACHING → TESTING → REJECTING → CONFIRMING → STRUCTURE_CONFIRMED, with failure/transition state when appropriate.
+- **Failed-Setup / Trap Detection**: detects closed-candle acceptance through a candidate, failed reclaim plus opposite displacement, and flags a possible opposite transition.
 
-These bridge candidates are not automatic signals. They still pass V39 mathematical clustering, micro-zone refinement, freshness/consumption checks, distance checks, liquidity/path analysis, redundancy control, candidate competition and the same M1 qualification floor. The UI marks bridge-derived candidates as PULLBACK BRIDGE.
+M1 remains the primary setup/precision engine. M5/M15/H1 remain non-blocking context/confluence. Existing Pullback Bridge, mathematical clustering, micro-zone refinement, liquidity path/obstacle analysis, freshness/consumption and Quant tracking remain active.
 
-## Preserved
-- M1-first architecture
-- M5/M15/H1 non-blocking context/confluence
-- mathematical clustering and pullback geometry
-- micro-zone refinement
-- liquidity target/path and obstacle analysis
-- evidence redundancy control
-- forward-only Quant Engine
-- VWAP/AVWAP remain optional external context when server-side volume is unavailable
+These states are analysis/forward-testing aids, not automatic entries or guarantees.
