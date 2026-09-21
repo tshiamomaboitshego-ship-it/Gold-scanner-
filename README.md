@@ -1,13 +1,11 @@
-# Gold Scanner V37.1 — Candidate Ranking + VWAP/AVWAP
+# Gold Scanner V39 — Mathematical Precision + Quant Engine
 
-Separate forward-test build from V37.
+V39 keeps the V38.1 forward-only Quant Engine and adds five precision layers using closed OHLC structure:
 
-- Wider legitimate M1 structural candidate pool before final qualification.
-- SHALLOW / INTERMEDIATE / DEEP classification.
-- Daily VWAP, active Session VWAP and objective swing-anchored AVWAP participate in ranking when trustworthy reported volume exists.
-- VWAP/AVWAP cannot create or move zones.
-- No trustworthy volume means the original structural threshold remains decisive.
-- Top structural candidates are exposed for diagnostics even when none finally qualifies.
-- Freshness, used-zone suppression, pullback, transition, reaction, TPO/session and structural logic remain in place.
+- Mathematical multi-factor price clustering
+- Impulse/pullback geometry
+- Cluster-based micro-zone refinement
+- Liquidity path and obstacle analysis
+- Evidence redundancy control
 
-Forward testing is required; this build does not establish profitability.
+These features rank or refine an already-legitimate structural candidate. They do not fabricate a zone or treat a score as a win probability. VWAP/AVWAP remain optional external context when server-side trustworthy volume is unavailable.

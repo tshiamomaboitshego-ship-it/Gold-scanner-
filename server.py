@@ -1502,6 +1502,200 @@ def quantify_zone_reaction(candles, side, lo, hi, atr):
     else: state='TESTING'; quality='UNCONFIRMED'
     return {'state':state,'quality':quality,'penetration_pct':round(pen,0),'closes_inside':inside,'closes_beyond':beyond,'reclaim_bars':reclaim,'displacement_atr':round(disp,2),'note':'Closed-M1 measurement only. Rejection quality is context, not an automatic trade entry.'}
 
+def v38_pullback_quality(m1, pullback_state):
+    """Score the quality of a detected M1 pullback from closed OHLC only.
+    This is context/ranking evidence, not a standalone signal or probability.
+    """
+    if not pullback_state.get('market_state_detected'):
+        return {'score':0,'grade':'NONE','evidence':[],'retracement_ratio':0}
+    c=(m1 or {}).get('latest_closed_candles') or []
+    atr=float((m1 or {}).get('atr14') or 0) or 1.0
+    ratio=float(pullback_state.get('retracement_ratio') or 0)
+    impulse=float(pullback_state.get('impulse_atr') or 0)
+    evidence=[]; score=0
+    # Broad enough to preserve shallow and deep legitimate pullbacks; best score is not a hard gate.
+    if 0.22 <= ratio <= 0.72: score+=24; evidence.append('balanced retracement depth')
+    elif 0.12 <= ratio <= 0.86: score+=14; evidence.append('usable retracement depth')
+    else: score+=5; evidence.append('extreme retracement depth')
+    if impulse>=2.5: score+=22; evidence.append('strong preceding impulse')
+    elif impulse>=1.5: score+=16; evidence.append('clear preceding impulse')
+    else: score+=9
+    recent=c[-8:]
+    if recent:
+        bodies=[abs(float(x['c'])-float(x['o'])) for x in recent]
+        ranges=[max(0.0001,float(x['h'])-float(x['l'])) for x in recent]
+        body_ratio=sum(bodies)/max(sum(ranges),1e-9)
+        # Lower overlap/choppiness is better. Count adjacent range overlap.
+        overlaps=[]
+        for a,b in zip(recent,recent[1:]):
+            inter=max(0.0,min(float(a['h']),float(b['h']))-max(float(a['l']),float(b['l'])))
+            union=max(float(a['h']),float(b['h']))-min(float(a['l']),float(b['l']))
+            overlaps.append(inter/max(union,1e-9))
+        ov=sum(overlaps)/len(overlaps) if overlaps else 1.0
+        if body_ratio>=0.52: score+=14; evidence.append('decisive candle bodies')
+        elif body_ratio>=0.38: score+=9
+        if ov<=0.38: score+=14; evidence.append('low candle overlap')
+        elif ov<=0.58: score+=8
+    st=str((m1 or {}).get('structure') or '')
+    direction=str(pullback_state.get('direction') or '')
+    if (direction=='BULLISH_CONTINUATION' and st=='HH_HL') or (direction=='BEARISH_CONTINUATION' and st=='LL_LH'):
+        score+=16; evidence.append('protected trend structure intact')
+    score=max(0,min(100,score))
+    grade='STRONG' if score>=72 else 'GOOD' if score>=58 else 'MIXED' if score>=42 else 'WEAK'
+    return {'score':score,'grade':grade,'evidence':evidence[:5],'retracement_ratio':round(ratio,2)}
+
+def v38_refine_zone(m1, side, lo, hi, atr):
+    """Compress a structural zone only when a smaller existing M1 FVG/OB overlaps it.
+    No synthetic midpoint zone is created; otherwise original bounds are preserved.
+    """
+    originals=(lo,hi); options=[]
+    for g in (m1.get('fvg_quality') or []):
+        typ=str(g.get('type') or '')
+        if (side=='buy' and typ!='BULLISH_FVG') or (side=='sell' and typ!='BEARISH_FVG'): continue
+        try: a,b=float(g['low']),float(g['high'])
+        except: continue
+        x,y=max(lo,a),min(hi,b)
+        if x<y: options.append((x,y,'FVG_OVERLAP'))
+    for o in (m1.get('order_blocks') or []):
+        typ=str(o.get('type') or ''); state=str(o.get('state') or '')
+        if state=='BREAKER': continue
+        if (side=='buy' and typ!='BULLISH_OB') or (side=='sell' and typ!='BEARISH_OB'): continue
+        try: a,b=float(o['low']),float(o['high'])
+        except: continue
+        x,y=max(lo,a),min(hi,b)
+        if x<y: options.append((x,y,'ORDER_BLOCK_OVERLAP'))
+    if not options:
+        return {'low':lo,'high':hi,'refined':False,'method':'ORIGINAL_STRUCTURE','compression_pct':0}
+    # Prefer the narrowest genuine overlapping structural feature, but reject absurdly tiny slivers.
+    minw=max(0.08*atr,0.03)
+    options=[x for x in options if x[1]-x[0]>=minw] or options
+    x,y,method=min(options,key=lambda q:q[1]-q[0])
+    oldw=max(hi-lo,1e-9); neww=max(y-x,1e-9)
+    return {'low':round(x,3),'high':round(y,3),'refined':neww<oldw*.92,'method':method,'compression_pct':round(max(0,100*(1-neww/oldw)))}
+
+def v38_liquidity_target(m1, side, lo, hi, atr):
+    """Map nearest exposed liquidity in the candidate's favorable direction and opposing liquidity behind it."""
+    cp=float(m1.get('data_current_price') or 0); mid=(lo+hi)/2
+    ext=m1.get('external_liquidity') or {}; internal=m1.get('internal_liquidity') or {}; path=m1.get('liquidity_path') or {}
+    vals=[]
+    keys=('swing_highs','equal_highs','minor_highs') if side=='buy' else ('swing_lows','equal_lows','minor_lows')
+    for pack in (ext,internal):
+        for k in keys:
+            for v in (pack.get(k) or []):
+                try: vals.append(float(v))
+                except: pass
+    pv=path.get('nearest_above' if side=='buy' else 'nearest_below')
+    if isinstance(pv,(int,float)): vals.append(float(pv))
+    vals=[v for v in vals if (v>mid if side=='buy' else v<mid)]
+    target=(min(vals) if side=='buy' else max(vals)) if vals else None
+    distance=(abs(target-mid)/atr) if target is not None and atr else None
+    # Reward a visible objective far enough to justify travel, but never qualify a weak zone by itself.
+    bonus=4 if distance is not None and distance>=1.0 else 2 if distance is not None and distance>=0.5 else 0
+    return {'target':round(target,2) if target is not None else None,'distance_atr':round(distance,2) if distance is not None else None,'bonus':bonus,'note':'Nearest exposed liquidity in setup direction; objective/context only.'}
+
+
+def v39_pullback_geometry(m1, pullback_state):
+    """Quantify impulse/retracement geometry from closed M1 OHLC only."""
+    if not pullback_state.get('market_state_detected'):
+        return {'score':0,'grade':'NONE','retracement_pct':0,'tempo':'NONE','overlap':None,'evidence':[]}
+    c=(m1 or {}).get('latest_closed_candles') or []
+    atr=float((m1 or {}).get('atr14') or 0) or 1.0
+    ratio=float(pullback_state.get('retracement_ratio') or 0); impulse=float(pullback_state.get('impulse_atr') or 0)
+    recent=c[-10:]; ev=[]; score=0
+    pct=ratio*100
+    if 25<=pct<=65: score+=30; ev.append('efficient retracement depth')
+    elif 15<=pct<=80: score+=20; ev.append('usable retracement depth')
+    else: score+=7; ev.append('extreme retracement geometry')
+    if impulse>=2.5: score+=24; ev.append('large impulse/ATR')
+    elif impulse>=1.5: score+=17; ev.append('clear impulse/ATR')
+    else: score+=8
+    overlaps=[]
+    for a,b in zip(recent,recent[1:]):
+        inter=max(0.0,min(float(a['h']),float(b['h']))-max(float(a['l']),float(b['l'])))
+        union=max(float(a['h']),float(b['h']))-min(float(a['l']),float(b['l']))
+        overlaps.append(inter/max(union,1e-9))
+    ov=sum(overlaps)/len(overlaps) if overlaps else 1.0
+    if ov<=.35: score+=20; ev.append('clean low-overlap geometry')
+    elif ov<=.55: score+=12; ev.append('moderate overlap')
+    else: score+=4; ev.append('choppy overlap')
+    # Pullback tempo: retracement ATR divided by recent bars used as a stable relative proxy.
+    ret=float(pullback_state.get('retracement_atr') or 0)
+    speed=ret/max(1,min(8,len(recent)))
+    tempo='ORDERLY' if speed<=.18 else 'FAST' if speed<=.35 else 'AGGRESSIVE'
+    if tempo=='ORDERLY': score+=16; ev.append('orderly pullback tempo')
+    elif tempo=='FAST': score+=10
+    else: score+=4; ev.append('aggressive retracement tempo')
+    st=str((m1 or {}).get('structure') or ''); d=str(pullback_state.get('direction') or '')
+    intact=(d=='BULLISH_CONTINUATION' and st=='HH_HL') or (d=='BEARISH_CONTINUATION' and st=='LL_LH')
+    if intact: score+=10; ev.append('protected structure intact')
+    score=max(0,min(100,score)); grade='STRONG' if score>=75 else 'GOOD' if score>=60 else 'MIXED' if score>=45 else 'WEAK'
+    return {'score':score,'grade':grade,'retracement_pct':round(pct,1),'impulse_atr':round(impulse,2),'overlap':round(ov,2),'tempo':tempo,'protected_structure_intact':intact,'evidence':ev[:6]}
+
+def v39_math_cluster(m1, side, lo, hi, atr):
+    """Find a tight price cluster inside/near an existing structural zone. It cannot create a zone from nothing."""
+    tol=max(.18*atr,.04); pts=[]
+    def add(price,label,family):
+        try:
+            v=float(price)
+            if lo-tol<=v<=hi+tol: pts.append((v,label,family))
+        except: pass
+    add(lo,'zone low','zone'); add(hi,'zone high','zone'); add((lo+hi)/2,'zone midpoint','zone')
+    for g in (m1.get('fvg_quality') or []):
+        typ=str(g.get('type') or '')
+        if (side=='buy' and typ=='BULLISH_FVG') or (side=='sell' and typ=='BEARISH_FVG'):
+            add(g.get('low'),'FVG low','imbalance'); add(g.get('high'),'FVG high','imbalance')
+    for o in (m1.get('order_blocks') or []):
+        typ=str(o.get('type') or '')
+        if (side=='buy' and typ=='BULLISH_OB') or (side=='sell' and typ=='BEARISH_OB'):
+            add(o.get('low'),'OB low','origin'); add(o.get('high'),'OB high','origin')
+    for z in ((m1.get('candidate_zones') or {}).get(side) or []):
+        add(z.get('low'),'candidate low','structure'); add(z.get('high'),'candidate high','structure')
+    if len(pts)<3: return {'detected':False,'score':0,'count':len(pts),'families':0,'evidence':[]}
+    best=None
+    for v,_,_ in pts:
+        group=[x for x in pts if abs(x[0]-v)<=tol]
+        fam=len(set(x[2] for x in group)); spread=max(x[0] for x in group)-min(x[0] for x in group)
+        quality=len(group)*8+fam*9+max(0,12-int(20*spread/max(atr,1e-9)))
+        if best is None or quality>best[0]: best=(quality,group,spread,fam)
+    quality,group,spread,fam=best; vals=[x[0] for x in group]
+    # Cluster may refine only within original structural bounds.
+    a=max(lo,min(vals)); b=min(hi,max(vals)); minw=max(.08*atr,.03)
+    if b-a<minw:
+        center=sum(vals)/len(vals); a=max(lo,center-minw/2); b=min(hi,center+minw/2)
+    score=max(0,min(100,int(quality)))
+    return {'detected':fam>=2 and len(group)>=3,'score':score,'count':len(group),'families':fam,'low':round(a,3),'high':round(b,3),'width_atr':round((b-a)/atr,2) if atr else None,'evidence':list(dict.fromkeys(x[1] for x in group))[:6]}
+
+def v39_path_obstacles(m1, side, lo, hi, target, atr):
+    """Measure opposing structural obstacles between candidate and its mapped liquidity objective."""
+    if target is None: return {'score':0,'grade':'UNKNOWN','obstacles':0,'evidence':['no mapped target']}
+    mid=(lo+hi)/2; a,b=sorted((mid,float(target))); obs=[]
+    opp='sell' if side=='buy' else 'buy'
+    for z in ((m1.get('candidate_zones') or {}).get(opp) or []):
+        try: zl,zh=float(z['low']),float(z['high'])
+        except: continue
+        zm=(zl+zh)/2
+        if a<zm<b: obs.append(str(z.get('source') or 'opposing structure'))
+    distance=abs(float(target)-mid)/max(atr,1e-9)
+    score=max(0,min(100,int(78 + min(18,distance*5) - len(obs)*18)))
+    grade='CLEAN' if score>=75 else 'USABLE' if score>=55 else 'OBSTRUCTED'
+    return {'score':score,'grade':grade,'obstacles':len(obs),'distance_atr':round(distance,2),'evidence':obs[:4]}
+
+def v39_redundancy_adjustment(source, seq_evidence, inducement_present, cluster):
+    """Prevent several labels caused by the same displacement event from being counted as independent proof."""
+    families=set(); src=str(source)
+    if 'FVG' in src: families.add('displacement_family')
+    if 'OB' in src or 'DYNAMIC_BROKEN' in src: families.add('origin_structure_family')
+    for e in (seq_evidence or []):
+        if e in ('MSS','BPR'): families.add('displacement_family')
+        elif e=='liquidity path' or e=='failed auction': families.add('liquidity_family')
+        elif e=='nested range': families.add('range_family')
+    if inducement_present: families.add('liquidity_family')
+    if cluster and cluster.get('families',0)>=2: families.add('independent_cluster_family')
+    raw=(1 if 'FVG' in src else 0)+(1 if 'OB' in src else 0)+len(seq_evidence or [])+(1 if inducement_present else 0)
+    independent=len(families)
+    penalty=max(0,min(8,(raw-independent)*2))
+    return {'penalty':penalty,'independent_families':independent,'raw_labels':raw,'families':sorted(families),'note':'Correlated evidence is grouped so one displacement cannot inflate confidence multiple times.'}
+
 def build_m1_precision_engine(mtf, vwap_context=None):
     """V34.4 always-on M1 precision generator with independent pullback-state detection.
     H1/M15/M5 provide weighted context, but no longer hard-lock M1 direction.
@@ -1547,6 +1741,8 @@ def build_m1_precision_engine(mtf, vwap_context=None):
     }
     m1st=str(m1.get('structure') or 'UNCLEAR'); m1mom=str(m1.get('momentum') or 'NEUTRAL'); m1ev=str(m1.get('structure_event') or '')
     pullback_state=build_m1_pullback_state(m1)
+    pullback_quality=v38_pullback_quality(m1,pullback_state)
+    pullback_geometry=v39_pullback_geometry(m1,pullback_state)
     m1_candles=(mtf.get('M1') or {}).get('candles') or []
     tpo=build_tpo_profile(m1_candles,atr)
     initial_balance=build_initial_balance(m1_candles)
@@ -1577,6 +1773,9 @@ def build_m1_precision_engine(mtf, vwap_context=None):
             src=str(z.get('source') or '')
             if src not in allowed_by_side[side]: continue
             lo=float(z.get('low')); hi=float(z.get('high')); touches=int(z.get('touch_count') or 0); cons=str(z.get('consumption') or '').upper()
+            original_lo,original_hi=lo,hi
+            refinement=v38_refine_zone(m1,side,lo,hi,atr)
+            lo,hi=float(refinement['low']),float(refinement['high'])
             ahead=(hi < cp) if bull else (lo > cp)
             if not ahead or touches>1 or cons not in ('','UNTOUCHED','LIGHT'): continue
             dist=max(0,cp-hi) if bull else max(0,lo-cp); datr=dist/atr if atr else 99
@@ -1601,7 +1800,23 @@ def build_m1_precision_engine(mtf, vwap_context=None):
             if any(not (hi<float(r['low'])-atr*.2 or lo>float(r['high'])+atr*.2) for r in bprs): seq_bonus+=3; seq_ev.append('BPR')
             if isinstance(lp.get('nearest_above' if bull else 'nearest_below'),(int,float)): seq_bonus+=2; seq_ev.append('liquidity path')
             ps=profile_session_context(side,lo,hi,tpo,initial_balance,atr)
-            structural_score=max(0,min(100,base+source_bonus+micro_bonus+proximity+context_bonus+pullback_bonus+inducement_bonus+min(12,seq_bonus)))
+            pb_quality_bonus=min(8,int(pullback_quality.get('score') or 0)//10) if pullback_bonus else 0
+            liquidity_target=v38_liquidity_target(m1,side,lo,hi,atr)
+            math_cluster=v39_math_cluster(m1,side,lo,hi,atr)
+            # V39 micro refinement: only tighten an existing structural zone when a multi-family mathematical cluster exists inside it.
+            if math_cluster.get('detected'):
+                clo,chi=float(math_cluster['low']),float(math_cluster['high'])
+                if clo<chi and clo>=lo-1e-9 and chi<=hi+1e-9:
+                    oldw=max(hi-lo,1e-9); neww=chi-clo
+                    if neww>=max(.08*atr,.03) and neww<oldw*.92:
+                        lo,hi=clo,chi
+                        refinement={'low':round(lo,3),'high':round(hi,3),'refined':True,'method':'V39_MULTI_FACTOR_CLUSTER','compression_pct':round(max(0,100*(1-neww/oldw)))}
+            path_quality=v39_path_obstacles(m1,side,lo,hi,liquidity_target.get('target'),atr)
+            redundancy=v39_redundancy_adjustment(src,seq_ev,bool(ind.get('present')),math_cluster)
+            geometry_bonus=min(7,int(pullback_geometry.get('score') or 0)//14) if pullback_bonus else 0
+            cluster_bonus=min(8,int(math_cluster.get('score') or 0)//12) if math_cluster.get('detected') else 0
+            path_bonus=5 if path_quality.get('grade')=='CLEAN' else 2 if path_quality.get('grade')=='USABLE' else -3 if path_quality.get('grade')=='OBSTRUCTED' else 0
+            structural_score=max(0,min(100,base+source_bonus+micro_bonus+proximity+context_bonus+pullback_bonus+pb_quality_bonus+geometry_bonus+cluster_bonus+path_bonus+inducement_bonus+min(12,seq_bonus)-int(redundancy.get('penalty') or 0)))
             # V37.1 candidate pool: keep weak/random zones out, but let legitimate near-qualified
             # structures reach location ranking before the final qualification threshold.
             if structural_score < max(52, min_score-14):
@@ -1625,14 +1840,18 @@ def build_m1_precision_engine(mtf, vwap_context=None):
                 vwstate='CONFLICTING' if adverse else 'NEUTRAL'
                 if adverse: vwap_bonus=-2
             depth='SHALLOW' if datr<=1.5 else 'INTERMEDIATE' if datr<=3.25 else 'DEEP'
-            rank_score=max(0,min(100,structural_score+int(ps.get('bonus') or 0)+vwap_bonus))
+            rank_score=max(0,min(100,structural_score+int(ps.get('bonus') or 0)+int(liquidity_target.get('bonus') or 0)+vwap_bonus))
             reaction=quantify_zone_reaction(m1_candles,side,lo,hi,atr)
             mode='CONTINUATION' if point_class.endswith('CONTINUATION') else 'TRANSITION'
-            item={'side':side.upper(),'low':round(lo,2),'high':round(hi,2),'source':src,'score':rank_score,'structural_score':structural_score,'ranking_score':rank_score,'gate_score':max(bull_context,bear_context),'context_score':bull_context if bull else bear_context,'distance_m1_atr':round(datr,2),'depth':depth,'m1_structure':m1st,'m1_momentum':m1mom,'m1_event':m1ev,'point_class':point_class,'mode':mode,'context_direction':context_direction,'inducement_context':ind,'sequence_context':{'bonus':min(12,seq_bonus),'evidence':seq_ev},'profile_session_context':ps,'acceptance_rejection':reaction,'vwap_context':vwstate,'avwap_context':'SUPPORTIVE' if 'AVWAP' in near else 'UNAVAILABLE' if not isinstance(side_av,(int,float)) else 'NEUTRAL','vwap_ranking_bonus':vwap_bonus,'vwap_detail':{'daily_vwap':daily_vw,'session_vwap':session_vw,'avwap':side_av,'near_zone':near,'source':vw.get('source'),'basis_adjustment':vw.get('basis_adjustment',0)}}
+            item={'side':side.upper(),'low':round(lo,2),'high':round(hi,2),'source':src,'score':rank_score,'structural_score':structural_score,'ranking_score':rank_score,'gate_score':max(bull_context,bear_context),'context_score':bull_context if bull else bear_context,'distance_m1_atr':round(datr,2),'depth':depth,'original_zone':{'low':round(original_lo,2),'high':round(original_hi,2)},'zone_refinement':refinement,'pullback_quality':pullback_quality,'pullback_geometry':pullback_geometry,'mathematical_cluster':math_cluster,'liquidity_target':liquidity_target,'path_quality':path_quality,'evidence_redundancy':redundancy,'m1_structure':m1st,'m1_momentum':m1mom,'m1_event':m1ev,'point_class':point_class,'mode':mode,'context_direction':context_direction,'inducement_context':ind,'sequence_context':{'bonus':min(12,seq_bonus),'evidence':seq_ev},'profile_session_context':ps,'acceptance_rejection':reaction,'vwap_context':vwstate,'avwap_context':'SUPPORTIVE' if 'AVWAP' in near else 'UNAVAILABLE' if not isinstance(side_av,(int,float)) else 'NEUTRAL','vwap_ranking_bonus':vwap_bonus,'vwap_detail':{'daily_vwap':daily_vw,'session_vwap':session_vw,'avwap':side_av,'near_zone':near,'source':vw.get('source'),'basis_adjustment':vw.get('basis_adjustment',0)}}
             ranked_pool.append(dict(item, status='RANKED_STRUCTURAL_CANDIDATE'))
             # Existing structural threshold still qualifies on its own. A near-qualified
             # legitimate structure can only be promoted by actual available VWAP/AVWAP evidence.
-            qualifies = structural_score >= min_score or (available and rank_score >= min_score and structural_score >= min_score-10)
+            precision_rescue=(pullback_bonus>0 and pullback_quality.get('score',0)>=58 and rank_score>=min_score and structural_score>=min_score-5)
+            qualifies = structural_score >= min_score or precision_rescue or (available and rank_score >= min_score and structural_score >= min_score-10)
+            item['qualification_gap']=max(0,min_score-structural_score)
+            item['qualification_threshold']=min_score
+            item['candidate_competition_score']=rank_score
             if not qualifies:
                 continue
             item['status']='QUALIFIED_PRECISION_POINT'
@@ -1648,7 +1867,7 @@ def build_m1_precision_engine(mtf, vwap_context=None):
     else:
         direction='SEARCHING_BOTH' if context_direction=='MIXED' else context_direction+'_CONTEXT'
         state='NO_FRESH_QUALIFIED_M1_POINT'
-    return {'state':state,'direction':direction,'context_direction':context_direction,'gate_score':max(bull_context,bear_context),'bull_gate':bull_context,'bear_gate':bear_context,'candidates':rows[:4],'ranked_candidate_pool':ranked_pool[:8],'m1_pullback':pullback_state,'tpo_profile':tpo,'initial_balance':initial_balance,'m5_structure':m5.get('structure'),'m5_momentum':m5.get('momentum'),'m5_pressure':m5.get('current_pressure'),'m15_structure':m15.get('structure'),'h1_structure':h1.get('structure'),'m1_structure':m1st,'m1_momentum':m1mom,'shock_caution':shock,'note':'V34.6 keeps always-on M1 and adds MSS, BPR/liquidity-void, failed-auction acceptance/rejection, nested dealing ranges, and liquidity-path context as supporting evidence only. It does not make these concepts mandatory. V34.5 keeps always-on M1 and pullback-state separation, and adds possible inducement as a small supporting relationship only. It never creates or vetoes a point. V34.4 always-on M1 search separates pullback-state detection from precision-point qualification. H1/M15/M5 remain weighted context, not a hard lock. A detected pullback can exist even when no fresh M1 point qualifies. Freshness and used-zone suppression remain unchanged.'}
+    return {'state':state,'direction':direction,'context_direction':context_direction,'gate_score':max(bull_context,bear_context),'bull_gate':bull_context,'bear_gate':bear_context,'candidates':rows[:4],'ranked_candidate_pool':ranked_pool[:8],'m1_pullback':pullback_state,'pullback_quality':pullback_quality,'pullback_geometry':pullback_geometry,'precision_engine_version':'V39','tpo_profile':tpo,'initial_balance':initial_balance,'m5_structure':m5.get('structure'),'m5_momentum':m5.get('momentum'),'m5_pressure':m5.get('current_pressure'),'m15_structure':m15.get('structure'),'h1_structure':h1.get('structure'),'m1_structure':m1st,'m1_momentum':m1mom,'shock_caution':shock,'note':'V39 Precision Quant Engine adds mathematical multi-factor clustering, impulse/pullback geometry, cluster-based micro-zone refinement, liquidity path/obstacle analysis and evidence redundancy control on top of V38.1. These layers rank/refine existing structural candidates; they do not manufacture a zone from nothing. Freshness and used-zone suppression remain active.'}
 
 def build_reaction_engine(m5):
     """V32 deterministic closed-M5 reaction state for zones currently being tracked.
@@ -1771,11 +1990,11 @@ def live_scan():
         out=data_only_result(mtf,data_status,data_note,'NOT_USED_LIVE_DATA_MODE')
         out['mode']='LIVE_DATA_CONTEXT'
         out['gemini_status']='NOT_USED'
-        out['scanner_version']='V37.1 CANDIDATE RANKING + VWAP/AVWAP'
+        out['scanner_version']='V38.1 PRECISION + QUANT ENGINE'
         out['market_context']=market_context
         out['event_risk']=market_context.get('event_risk','UNKNOWN')
         out['data_only_summary']=out['data_only_summary'].replace('V26 maps','V30 maps')
-        out['note']='V37.1 ranks a wider pool of legitimate M1 structural candidates before final qualification. Daily/Session VWAP and objective AVWAP may add bounded location evidence, but cannot create or move a zone. Without trustworthy volume the original structural threshold remains decisive.'
+        out['note']='V39 combines the Precision Engine with mathematical clustering, pullback geometry, path/obstacle analysis, redundancy control and the forward-only Quant Engine. Quant statistics come only from previously frozen M1 precision points on this device and never create, move or qualify a zone. VWAP/AVWAP remain optional external context when unavailable server-side.'
         return jsonify(out)
     except Exception as e:
         return jsonify({'error':'live_scan_failed','detail':str(e)[:1200]}),500
@@ -1872,6 +2091,70 @@ def outcomes():
             summary[k]={'samples':g['samples'],'triggered':g['triggered'],'reacted':g['reacted'],'invalidated':g['invalidated'],'reaction_rate_of_triggered':round(100*g['reacted']/g['triggered'],1) if g['triggered'] else None,'avg_mfe':round(sum(g['mfe'])/len(g['mfe']),3) if g['mfe'] else None,'avg_mae':round(sum(g['mae'])/len(g['mae']),3) if g['mae'] else None}
         return jsonify({'status':'LIVE_DATA','note':'Forward statistics measure zone behavior only; sample size matters and this is not a guaranteed win rate.','counts':counts,'by_setup_type':summary,'outcomes':results})
     except Exception as e:return jsonify({'error':'outcome_failed','detail':str(e)[:800]}),500
+
+
+def evaluate_precision_setup(setup, candles):
+    """Forward-only M1 grading for a frozen precision point. Uses only candles at/after first_seen.
+    Meaningful reaction = >= 1.0 setup-time ATR favorable excursion before a closed-candle invalidation.
+    This measures zone behavior, not trade P&L or win probability.
+    """
+    side=str(setup.get('side') or '').upper()
+    try:
+        lo=float(setup.get('low')); hi=float(setup.get('high')); atr=float(setup.get('atr14') or 0)
+    except Exception:
+        return None
+    if side not in ('BUY','SELL') or hi < lo or atr <= 0 or not candles:return None
+    touch_i=next((i for i,x in enumerate(candles) if float(x['l'])<=hi and float(x['h'])>=lo),None)
+    base={'id':setup.get('id'),'side':side,'source':setup.get('source'),'depth':setup.get('depth'),'point_class':setup.get('point_class'),'mode':setup.get('mode'),'context_direction':setup.get('context_direction'),'session':setup.get('session'),'pullback_grade':setup.get('pullback_grade'),'pullback_score':setup.get('pullback_score'),'atr14':round(atr,4)}
+    if touch_i is None:
+        return {**base,'state':'NOT_TRIGGERED','meaningful_reaction':False,'mfe_atr':None,'mae_atr':None}
+    post=candles[touch_i:]
+    mid=(lo+hi)/2.0; best=0.0; adverse=0.0; invalid_at=None
+    for j,x in enumerate(post):
+        h,l,c=float(x['h']),float(x['l']),float(x['c'])
+        if side=='BUY':
+            best=max(best,h-mid); adverse=max(adverse,mid-l); invalid=(c<lo)
+        else:
+            best=max(best,mid-l); adverse=max(adverse,h-mid); invalid=(c>hi)
+        if invalid:
+            invalid_at=j; break
+    mfe=max(0.0,best)/atr; mae=max(0.0,adverse)/atr
+    meaningful=mfe>=1.0
+    state='MEANINGFUL_REACTION' if meaningful else ('INVALIDATED' if invalid_at is not None else 'TESTED')
+    return {**base,'state':state,'meaningful_reaction':meaningful,'invalidated':invalid_at is not None,'mfe_atr':round(mfe,2),'mae_atr':round(mae,2),'bars_to_invalidation':invalid_at}
+
+def quant_summary(rows):
+    triggered=[r for r in rows if r and r.get('state')!='NOT_TRIGGERED']
+    n=len(triggered); reacted=[r for r in triggered if r.get('meaningful_reaction')]
+    invalid=[r for r in triggered if r.get('invalidated')]
+    mf=[r['mfe_atr'] for r in triggered if isinstance(r.get('mfe_atr'),(int,float))]
+    ma=[r['mae_atr'] for r in triggered if isinstance(r.get('mae_atr'),(int,float))]
+    avg_mfe=round(sum(mf)/len(mf),2) if mf else None; avg_mae=round(sum(ma)/len(ma),2) if ma else None
+    net=round(avg_mfe-avg_mae,2) if avg_mfe is not None and avg_mae is not None else None
+    confidence='INSUFFICIENT' if n<20 else 'DEVELOPING' if n<50 else 'GOOD' if n<100 else 'STRONG_SAMPLE'
+    return {'samples':n,'meaningful_reactions':len(reacted),'reaction_rate':round(100*len(reacted)/n,1) if n else None,'invalidated':len(invalid),'avg_mfe_atr':avg_mfe,'avg_mae_atr':avg_mae,'net_excursion_atr':net,'sample_confidence':confidence}
+
+@app.post('/api/quant')
+def quant_engine():
+    """V38.1 forward-only Quant Engine for frozen M1 precision points supplied by the phone."""
+    try:
+        d=request.get_json(force=True); setups=(d.get('setups') or [])[:250]
+        candles,st,note=fetch_tf('1min',500)
+        if not candles:return jsonify({'status':st,'note':note,'summary':quant_summary([]),'groups':{}})
+        results=[]
+        for x in setups:
+            t=str(x.get('first_seen') or '').replace('T',' ')[:16]
+            after=[c for c in candles if str(c.get('t',''))[:16]>=t] if t else []
+            r=evaluate_precision_setup(x,after)
+            if r:results.append(r)
+        groups={}
+        for field in ('source','depth','mode','context_direction','session','pullback_grade'):
+            vals={}
+            for r in results:
+                key=str(r.get(field) or 'UNKNOWN'); vals.setdefault(key,[]).append(r)
+            groups[field]={k:quant_summary(v) for k,v in vals.items()}
+        return jsonify({'status':'LIVE_DATA','quant_version':'V38.1','definition':'Meaningful reaction = at least 1.0 setup-time M1 ATR favorable excursion after first touch and before closed-candle invalidation.','summary':quant_summary(results),'groups':groups,'results':results,'note':'Forward-only zone-behavior statistics from frozen precision points. Reaction rate is not a win rate; net excursion is avg MFE minus avg MAE, not trading P&L.'})
+    except Exception as e:return jsonify({'error':'quant_failed','detail':str(e)[:900]}),500
 
 @app.get('/api/replay')
 def replay():
