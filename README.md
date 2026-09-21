@@ -1,22 +1,21 @@
-# Gold Scanner V39.1 — M1-First Precision Quant Engine
+# Gold Scanner V39.2 — M1 Pullback Bridge + Precision Quant Engine
 
-Built from V38.1. Adds five focused precision upgrades while retaining the forward-only Quant Engine:
+V39.2 is a targeted fix on top of V39.1. M1 remains the primary setup and precision timeframe; M5/M15/H1 remain non-blocking context/confluence.
 
-- Mathematical confluence / level clustering across independent structural families.
-- Impulse/pullback geometry scoring from closed M1 OHLC.
-- ATR-bounded micro-zone refinement inside existing structural zones only.
-- Liquidity target path + opposing obstacle analysis.
-- Evidence redundancy control so correlated BOS/FVG/OB-style evidence is not over-counted.
+## Targeted change
+When the M1 pullback detector identifies a GOOD/STRONG active continuation pullback, V39.2 re-scans the active M1 impulse/retracement for structural candidates that the generic zone pool can miss:
+- fresh M1 FVG / imbalance areas created by the impulse
+- last-opposite-candle displacement origins
+- broken micro support/resistance first-retest areas
 
-Existing freshness, used-zone suppression, candidate competition, pullback quality, TPO/session context and Quant MFE/MAE/reaction tracking remain active. VWAP/AVWAP are still optional and are not fabricated when trustworthy volume is unavailable.
+These bridge candidates are not automatic signals. They still pass V39 mathematical clustering, micro-zone refinement, freshness/consumption checks, distance checks, liquidity/path analysis, redundancy control, candidate competition and the same M1 qualification floor. The UI marks bridge-derived candidates as PULLBACK BRIDGE.
 
-This is a forward-test build. Precision scores and Quant reaction statistics are evidence, not probabilities or guarantees.
-
-
-## V39.1 M1-FIRST architecture
-- M1 owns setup detection, candidate generation, structural qualification, mathematical clustering, micro-zone refinement and precision-point output.
-- M5, M15 and H1 retain their structure/concept analysis and can add bounded confluence/context to ranking, but cannot veto an otherwise legitimate M1 candidate.
-- Higher-timeframe disagreement is labeled ALIGNED / MIXED / COUNTER_CONTEXT; it does not raise the M1 qualification threshold.
-- The old counter-context pre-filter was removed.
-- The M1 structural qualification floor is no longer selected from M5-heavy context.
-- Quant tracking, freshness/consumption, liquidity path, pullback geometry and evidence-redundancy controls remain active.
+## Preserved
+- M1-first architecture
+- M5/M15/H1 non-blocking context/confluence
+- mathematical clustering and pullback geometry
+- micro-zone refinement
+- liquidity target/path and obstacle analysis
+- evidence redundancy control
+- forward-only Quant Engine
+- VWAP/AVWAP remain optional external context when server-side volume is unavailable

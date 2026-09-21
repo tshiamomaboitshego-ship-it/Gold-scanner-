@@ -1705,6 +1705,107 @@ def v39_redundancy_adjust(source, seq_evidence, cluster):
     independent=len(fam); penalty=0 if independent>=3 else 3 if independent==2 else 6
     return {'independent_families':independent,'families':sorted(fam),'penalty':penalty,'note':'Correlated BOS/FVG/OB-style evidence is grouped rather than double-counted.'}
 
+def build_m1_pullback_bridge_candidates(m1, candles, pullback_state, pullback_quality):
+    """V39.2 bridge from a detected M1 pullback to structural price candidates.
+
+    This does NOT manufacture arbitrary levels. It re-scans the active M1 impulse/retracement
+    for fresh structural locations that can be missed by the generic candidate pool:
+    imbalance/FVG, last-opposite-candle displacement origin, broken micro support/resistance
+    first retest, and retracement micro swings. Returned zones still pass the normal V39
+    refinement, freshness, distance, competition and qualification logic downstream.
+    """
+    rows=(candles or [])[-90:]
+    atr=float((m1 or {}).get('atr14') or 0)
+    cp=float((m1 or {}).get('data_current_price') or (rows[-1].get('c') if rows else 0) or 0)
+    direction=str((pullback_state or {}).get('direction') or '')
+    qscore=int((pullback_quality or {}).get('score') or 0)
+    if len(rows)<12 or atr<=0 or direction not in ('BEARISH_CONTINUATION','BULLISH_CONTINUATION') or qscore<55:
+        return []
+
+    side='SELL' if direction=='BEARISH_CONTINUATION' else 'BUY'
+    # Reconstruct the latest impulse from closed M1 candles, using the same recency philosophy
+    # as the pullback-state detector but with enough history to discover structural levels.
+    start=max(0,len(rows)-55); seg=rows[start:]
+    low_rel=min(range(len(seg)),key=lambda k:float(seg[k]['l']))
+    high_rel=max(range(len(seg)),key=lambda k:float(seg[k]['h']))
+    low_idx=start+low_rel; high_idx=start+high_rel
+    if side=='SELL':
+        sl=rows[max(start,low_idx-20):low_idx+1]
+        if not sl: return []
+        impulse_start=max(start,low_idx-20)+max(range(len(sl)),key=lambda k:float(sl[k]['h']))
+        impulse_end=low_idx
+    else:
+        sl=rows[max(start,high_idx-20):high_idx+1]
+        if not sl: return []
+        impulse_start=max(start,high_idx-20)+min(range(len(sl)),key=lambda k:float(sl[k]['l']))
+        impulse_end=high_idx
+    if impulse_start>=impulse_end or impulse_end < len(rows)-14:
+        return []
+
+    out=[]; ztol=max(0.10,atr*0.16)
+    def fresh(lo,hi,created_idx):
+        # The active retracement may be approaching a level, but a bridge candidate must not
+        # already have been materially traded through after its structural creation.
+        after=rows[min(len(rows),created_idx+1):]
+        touches=sum(1 for x in after if float(x['l'])<=hi and float(x['h'])>=lo)
+        closes_through=sum(1 for x in after if (float(x['c'])>hi+0.08*atr if side=='SELL' else float(x['c'])<lo-0.08*atr))
+        return touches<=1 and closes_through==0, touches
+    def add(lo,hi,source,base,created_idx,evidence):
+        lo=float(lo); hi=float(hi)
+        if hi<lo: lo,hi=hi,lo
+        # Continuation candidates must be ahead of the current retracement, not behind price.
+        if side=='SELL' and lo<=cp: return
+        if side=='BUY' and hi>=cp: return
+        if ((lo-cp)/atr if side=='SELL' else (cp-hi)/atr)>5.5: return
+        ok,touches=fresh(lo,hi,created_idx)
+        if not ok:return
+        out.append({'side':side,'low':round(lo,3),'high':round(hi,3),'source':source,
+                    'rank_score':int(base),'touch_count':touches,'consumption':'UNTOUCHED' if touches==0 else 'LIGHT',
+                    'pullback_bridge':True,'bridge_evidence':evidence,'created_index':created_idx})
+
+    # 1) Impulse FVGs / imbalances. These are exact three-candle price gaps created by the leg.
+    for i in range(max(2,impulse_start+2),min(len(rows),impulse_end+2)):
+        a,b=rows[i-2],rows[i]
+        if side=='SELL' and float(b['h'])<float(a['l']):
+            add(float(b['h']),float(a['l']),'M1_PULLBACK_BEARISH_FVG',78,i,{'family':'FVG','impulse_index':i})
+        elif side=='BUY' and float(b['l'])>float(a['h']):
+            add(float(a['h']),float(b['l']),'M1_PULLBACK_BULLISH_FVG',78,i,{'family':'FVG','impulse_index':i})
+
+    # 2) Last opposite candle before a >=1.0 ATR three-candle displacement inside the impulse.
+    for i in range(max(1,impulse_start),max(1,impulse_end-1)):
+        j=min(len(rows)-1,i+2); move=float(rows[j]['c'])-float(rows[i]['o'])
+        aligned=(side=='SELL' and move<=-1.0*atr) or (side=='BUY' and move>=1.0*atr)
+        if not aligned: continue
+        for k in range(i-1,max(impulse_start-1,i-5),-1):
+            x=rows[k]; opposite=(side=='SELL' and float(x['c'])>float(x['o'])) or (side=='BUY' and float(x['c'])<float(x['o']))
+            if opposite:
+                add(float(x['l']),float(x['h']),f'M1_PULLBACK_{side}_DISPLACEMENT_ORIGIN',80,k,{'family':'DISPLACEMENT_ORIGIN','move_atr':round(abs(move)/atr,2)})
+                break
+
+    # 3) Broken micro structure: first-retest of swing support/resistance broken by the impulse.
+    def piv_low(i): return float(rows[i]['l'])<float(rows[i-1]['l']) and float(rows[i]['l'])<=float(rows[i+1]['l'])
+    def piv_high(i): return float(rows[i]['h'])>float(rows[i-1]['h']) and float(rows[i]['h'])>=float(rows[i+1]['h'])
+    search0=max(2,impulse_start-18)
+    if side=='SELL':
+        for i in range(search0,impulse_end):
+            if not piv_low(i): continue
+            level=float(rows[i]['l'])
+            br=next((j for j in range(max(i+1,impulse_start),impulse_end+1) if float(rows[j]['c'])<level-0.03*atr),None)
+            if br is not None: add(level-ztol,level+ztol,'M1_PULLBACK_BROKEN_SUPPORT_RETEST',84,br,{'family':'BROKEN_STRUCTURE','level':round(level,3)})
+    else:
+        for i in range(search0,impulse_end):
+            if not piv_high(i): continue
+            level=float(rows[i]['h'])
+            br=next((j for j in range(max(i+1,impulse_start),impulse_end+1) if float(rows[j]['c'])>level+0.03*atr),None)
+            if br is not None: add(level-ztol,level+ztol,'M1_PULLBACK_BROKEN_RESISTANCE_RETEST',84,br,{'family':'BROKEN_STRUCTURE','level':round(level,3)})
+
+    # Deduplicate overlapping bridge zones while preserving the stronger structural source.
+    ded=[]
+    for z in sorted(out,key=lambda x:x['rank_score'],reverse=True):
+        if not any(not (z['high']<q['low']-0.08*atr or z['low']>q['high']+0.08*atr) for q in ded):
+            ded.append(z)
+    return ded[:8]
+
 def build_m1_precision_engine(mtf, vwap_context=None):
     """V39.1 M1-FIRST precision generator.
     M1 owns setup detection, candidate generation, qualification and precision ranking.
@@ -1747,14 +1848,17 @@ def build_m1_precision_engine(mtf, vwap_context=None):
 
     cp=float(m1.get('data_current_price') or m5.get('data_current_price') or 0); atr=float(m1.get('atr14') or 1)
     allowed_by_side={
-        'buy':{'BULLISH_FVG','BULLISH_OB','SWING_DEMAND','DYNAMIC_BROKEN_RESISTANCE_RETEST'},
-        'sell':{'BEARISH_FVG','BEARISH_OB','SWING_SUPPLY','DYNAMIC_BROKEN_SUPPORT_RETEST'}
+        'buy':{'BULLISH_FVG','BULLISH_OB','SWING_DEMAND','DYNAMIC_BROKEN_RESISTANCE_RETEST',
+               'M1_PULLBACK_BULLISH_FVG','M1_PULLBACK_BUY_DISPLACEMENT_ORIGIN','M1_PULLBACK_BROKEN_RESISTANCE_RETEST'},
+        'sell':{'BEARISH_FVG','BEARISH_OB','SWING_SUPPLY','DYNAMIC_BROKEN_SUPPORT_RETEST',
+                'M1_PULLBACK_BEARISH_FVG','M1_PULLBACK_SELL_DISPLACEMENT_ORIGIN','M1_PULLBACK_BROKEN_SUPPORT_RETEST'}
     }
     m1st=str(m1.get('structure') or 'UNCLEAR'); m1mom=str(m1.get('momentum') or 'NEUTRAL'); m1ev=str(m1.get('structure_event') or '')
     pullback_state=build_m1_pullback_state(m1)
     pullback_quality=v38_pullback_quality(m1,pullback_state)
     pullback_geometry=v39_pullback_geometry(m1,pullback_state)
     m1_candles=(mtf.get('M1') or {}).get('candles') or []
+    pullback_bridge=build_m1_pullback_bridge_candidates(m1,m1_candles,pullback_state,pullback_quality)
     tpo=build_tpo_profile(m1_candles,atr)
     initial_balance=build_initial_balance(m1_candles)
     rows=[]
@@ -1780,7 +1884,10 @@ def build_m1_precision_engine(mtf, vwap_context=None):
         min_score=66
         if not micro_align: continue
 
-        for z in ((m1.get('candidate_zones') or {}).get(side) or []):
+        native_pool=list(((m1.get('candidate_zones') or {}).get(side) or []))
+        bridge_pool=[z for z in pullback_bridge if str(z.get('side') or '').lower()==side]
+        candidate_pool=native_pool+bridge_pool
+        for z in candidate_pool:
             src=str(z.get('source') or '')
             if src not in allowed_by_side[side]: continue
             lo=float(z.get('low')); hi=float(z.get('high')); touches=int(z.get('touch_count') or 0); cons=str(z.get('consumption') or '').upper()
@@ -1793,7 +1900,7 @@ def build_m1_precision_engine(mtf, vwap_context=None):
             dist=max(0,cp-hi) if bull else max(0,lo-cp); datr=dist/atr if atr else 99
             if datr>5.5: continue
             base=int(z.get('rank_score') or 0)
-            source_bonus=12 if src.startswith('DYNAMIC_BROKEN_') else 10 if src.endswith('_FVG') else 8 if src.endswith('_OB') else 5
+            source_bonus=13 if src.startswith('M1_PULLBACK_BROKEN_') else 12 if src.startswith('DYNAMIC_BROKEN_') else 11 if src.startswith('M1_PULLBACK_') and src.endswith('_FVG') else 10 if src.endswith('_FVG') else 10 if 'DISPLACEMENT_ORIGIN' in src else 8 if src.endswith('_OB') else 5
             micro_bonus=14 if strong_micro else 10
             proximity=max(0,12-int(datr*3))
             # HTF is deliberately excluded from M1 structural qualification.
@@ -1865,7 +1972,7 @@ def build_m1_precision_engine(mtf, vwap_context=None):
             rank_score=max(0,min(100,structural_score+int(ps.get('bonus') or 0)+int(liquidity_target.get('bonus') or 0)+vwap_bonus+htf_confluence_bonus+mtf_context_adjustment))
             reaction=quantify_zone_reaction(m1_candles,side,lo,hi,atr)
             mode='CONTINUATION' if point_class.endswith('CONTINUATION') else 'TRANSITION'
-            item={'side':side.upper(),'low':round(lo,2),'high':round(hi,2),'source':src,'score':rank_score,'structural_score':structural_score,'ranking_score':rank_score,'gate_score':max(bull_context,bear_context),'context_score':bull_context if bull else bear_context,'distance_m1_atr':round(datr,2),'depth':depth,'original_zone':{'low':round(original_lo,2),'high':round(original_hi,2)},'zone_refinement':refinement,'pullback_quality':pullback_quality,'pullback_geometry':pullback_geometry,'mathematical_cluster':math_cluster,'liquidity_target':liquidity_target,'path_obstacles':path_quality,'evidence_redundancy':redundancy,'m1_structure':m1st,'m1_momentum':m1mom,'m1_event':m1ev,'point_class':point_class,'mode':mode,'context_direction':context_direction,'mtf_alignment':mtf_alignment,'htf_confluence':{'bonus':htf_confluence_bonus,'hits':htf_hits,'non_blocking':True},'inducement_context':ind,'sequence_context':{'bonus':min(12,seq_bonus),'evidence':seq_ev},'profile_session_context':ps,'acceptance_rejection':reaction,'vwap_context':vwstate,'avwap_context':'SUPPORTIVE' if 'AVWAP' in near else 'UNAVAILABLE' if not isinstance(side_av,(int,float)) else 'NEUTRAL','vwap_ranking_bonus':vwap_bonus,'vwap_detail':{'daily_vwap':daily_vw,'session_vwap':session_vw,'avwap':side_av,'near_zone':near,'source':vw.get('source'),'basis_adjustment':vw.get('basis_adjustment',0)}}
+            item={'side':side.upper(),'low':round(lo,2),'high':round(hi,2),'source':src,'score':rank_score,'structural_score':structural_score,'ranking_score':rank_score,'gate_score':max(bull_context,bear_context),'context_score':bull_context if bull else bear_context,'distance_m1_atr':round(datr,2),'depth':depth,'original_zone':{'low':round(original_lo,2),'high':round(original_hi,2)},'zone_refinement':refinement,'pullback_quality':pullback_quality,'pullback_geometry':pullback_geometry,'mathematical_cluster':math_cluster,'liquidity_target':liquidity_target,'path_obstacles':path_quality,'evidence_redundancy':redundancy,'m1_structure':m1st,'m1_momentum':m1mom,'m1_event':m1ev,'point_class':point_class,'mode':mode,'context_direction':context_direction,'mtf_alignment':mtf_alignment,'htf_confluence':{'bonus':htf_confluence_bonus,'hits':htf_hits,'non_blocking':True},'inducement_context':ind,'sequence_context':{'bonus':min(12,seq_bonus),'evidence':seq_ev},'profile_session_context':ps,'acceptance_rejection':reaction,'vwap_context':vwstate,'avwap_context':'SUPPORTIVE' if 'AVWAP' in near else 'UNAVAILABLE' if not isinstance(side_av,(int,float)) else 'NEUTRAL','vwap_ranking_bonus':vwap_bonus,'pullback_bridge':bool(z.get('pullback_bridge')),'bridge_evidence':z.get('bridge_evidence') or {},'vwap_detail':{'daily_vwap':daily_vw,'session_vwap':session_vw,'avwap':side_av,'near_zone':near,'source':vw.get('source'),'basis_adjustment':vw.get('basis_adjustment',0)}}
             ranked_pool.append(dict(item, status='RANKED_STRUCTURAL_CANDIDATE'))
             # Existing structural threshold still qualifies on its own. A near-qualified
             # legitimate structure can only be promoted by actual available VWAP/AVWAP evidence.
@@ -1877,7 +1984,7 @@ def build_m1_precision_engine(mtf, vwap_context=None):
             if not qualifies:
                 continue
             item['status']='QUALIFIED_PRECISION_POINT'
-            item['note']=f'V39.1 M1-FIRST qualified fresh M1 {mode.lower()} precision point. M5/M15/H1 are non-blocking context/confluence only. Quant evidence is not a probability or guarantee.'
+            item['note']=f'V39.2 M1 pullback-bridge qualified fresh M1 {mode.lower()} precision point. M5/M15/H1 are non-blocking context/confluence only. Quant evidence is not a probability or guarantee.'
             rows.append(item)
 
     rows.sort(key=lambda x:(x['score'],-x['distance_m1_atr']),reverse=True)
@@ -1889,7 +1996,7 @@ def build_m1_precision_engine(mtf, vwap_context=None):
     else:
         direction='SEARCHING_BOTH' if context_direction=='MIXED' else context_direction+'_CONTEXT'
         state='NO_FRESH_QUALIFIED_M1_POINT'
-    return {'state':state,'direction':direction,'context_direction':context_direction,'gate_score':max(bull_context,bear_context),'bull_gate':bull_context,'bear_gate':bear_context,'candidates':rows[:4],'ranked_candidate_pool':ranked_pool[:8],'m1_pullback':pullback_state,'pullback_quality':pullback_quality,'precision_engine_version':'V39.1_M1_FIRST','tpo_profile':tpo,'initial_balance':initial_balance,'m5_structure':m5.get('structure'),'m5_momentum':m5.get('momentum'),'m5_pressure':m5.get('current_pressure'),'m15_structure':m15.get('structure'),'h1_structure':h1.get('structure'),'m1_structure':m1st,'m1_momentum':m1mom,'shock_caution':shock,'note':'V39.1 M1-FIRST: M1 owns setup detection, candidate generation, qualification and precision ranking. M5/M15/H1 retain their structure, FVG/OB, liquidity and other concept analysis as non-blocking context/confluence only. Mathematical clustering, pullback geometry, micro-zone refinement, liquidity path/obstacles, redundancy control, freshness and Quant tracking remain active.'}
+    return {'state':state,'direction':direction,'context_direction':context_direction,'gate_score':max(bull_context,bear_context),'bull_gate':bull_context,'bear_gate':bear_context,'candidates':rows[:4],'ranked_candidate_pool':ranked_pool[:8],'m1_pullback':pullback_state,'pullback_quality':pullback_quality,'precision_engine_version':'V39.2_M1_PULLBACK_BRIDGE','pullback_bridge_candidates':pullback_bridge,'tpo_profile':tpo,'initial_balance':initial_balance,'m5_structure':m5.get('structure'),'m5_momentum':m5.get('momentum'),'m5_pressure':m5.get('current_pressure'),'m15_structure':m15.get('structure'),'h1_structure':h1.get('structure'),'m1_structure':m1st,'m1_momentum':m1mom,'shock_caution':shock,'note':'V39.2 M1-FIRST + PULLBACK BRIDGE: M1 owns setup detection, candidate generation, qualification and precision ranking. GOOD/STRONG active pullbacks trigger a structural re-scan for fresh M1 FVG, displacement-origin and broken-structure retest candidates. M5/M15/H1 retain their structure, FVG/OB, liquidity and other concept analysis as non-blocking context/confluence only. Mathematical clustering, pullback geometry, micro-zone refinement, liquidity path/obstacles, redundancy control, freshness and Quant tracking remain active.'}
 
 def build_reaction_engine(m5):
     """V32 deterministic closed-M5 reaction state for zones currently being tracked.
