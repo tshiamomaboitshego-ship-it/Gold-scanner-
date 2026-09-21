@@ -10,3 +10,11 @@ Built from V39.2 without removing the M1 Pullback Bridge, mathematical precision
 M1 remains the primary setup/precision engine. M5/M15/H1 remain non-blocking context/confluence. Existing Pullback Bridge, mathematical clustering, micro-zone refinement, liquidity path/obstacle analysis, freshness/consumption and Quant tracking remain active.
 
 These states are analysis/forward-testing aids, not automatic entries or guarantees.
+
+## V39.4 additions
+- State integrity: acceptance-through invalidation cannot be overwritten by later PA confirmation; reclaim after invalidation is a separate state.
+- Persistent M1 state memory: phone localStorage keeps lifecycle history across scans and prevents silent state resets.
+- M1 Compression/Expansion Engine: closed-candle range contraction, overlap and expansion context.
+- M1 Market Regime 2.0: TRENDING / ORDERLY_TREND_OR_PULLBACK / COMPRESSION / EXPANSION_VOLATILITY_SHOCK / RANGE_OR_TRANSITION.
+- Setup Similarity Quant: compares the latest frozen precision setup with the nearest categorical cohort; remains INSUFFICIENT until sample size develops.
+All five are context/state/statistics layers. They do not invent zones or turn Quant statistics into probabilities.

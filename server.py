@@ -1861,20 +1861,68 @@ def v393_trap_failure(candles, side, lo, hi, atr):
     failed=not reclaimed and opp_disp
     return {'state':'BULLISH_TRAP_TRANSITION' if failed else 'ACCEPTANCE_ABOVE' if not reclaimed else 'RECLAIMED','opposite_transition':failed,'acceptance_side':'ABOVE'}
 
-def v393_setup_state(candles, side, lo, hi, atr, pa, trap):
-    """Deterministic M1 setup lifecycle from closed candles."""
-    if not candles:return {'state':'FORMING','note':'Waiting for M1 data.'}
-    cp=float(candles[-1]['c']); side=str(side).lower()
+def v394_compression_expansion(candles, atr):
+    """Closed-M1 compression/expansion classifier. Context only; never creates a zone."""
+    if not candles or len(candles)<14 or atr<=0:
+        return {'state':'UNAVAILABLE','score':0,'note':'Not enough M1 candles.'}
+    r=candles[-12:]
+    ranges=[max(0.0,float(x['h'])-float(x['l'])) for x in r]
+    bodies=[abs(float(x['c'])-float(x['o'])) for x in r]
+    recent=sum(ranges[-4:])/4; prior=sum(ranges[:8])/8
+    overlap=0
+    for a,b in zip(r[-6:-1],r[-5:]):
+        if min(float(a['h']),float(b['h'])) >= max(float(a['l']),float(b['l'])): overlap+=1
+    last=max(ranges[-1],1e-9); body=bodies[-1]
+    contraction=recent/max(prior,1e-9)
+    expansion=last/max(prior,1e-9)
+    if expansion>=1.65 and body/max(last,1e-9)>=0.62:
+        state='EXPANSION'; score=min(100,round(55+25*(expansion-1.0)))
+    elif contraction<=0.72 and overlap>=3:
+        state='COMPRESSION'; score=min(100,round(55+45*(1-contraction)))
+    elif overlap>=4:
+        state='RANGE_COMPRESSION'; score=60
+    else:
+        state='NORMAL'; score=45
+    return {'state':state,'score':score,'range_ratio':round(contraction,2),'last_range_atr':round(last/atr,2),'overlap_count':overlap,'note':'M1 range/overlap context only; it does not create or veto a point.'}
+
+def v394_market_regime(m1, candles, atr, compression):
+    """M1 Regime 2.0: descriptive context for setup ranking/diagnostics, not a direction gate."""
+    st=str(m1.get('structure') or 'UNCLEAR'); mom=str(m1.get('momentum') or 'NEUTRAL')
+    shock=str(m1.get('shock_detector') or '')=='TRIGGERED'
+    ce=str((compression or {}).get('state') or 'NORMAL')
+    if shock or ce=='EXPANSION': regime='EXPANSION_VOLATILITY_SHOCK'
+    elif ce in ('COMPRESSION','RANGE_COMPRESSION'): regime='COMPRESSION'
+    elif st in ('HH_HL','LL_LH') and ('STRONG' in mom): regime='TRENDING'
+    elif st in ('HH_HL','LL_LH'): regime='ORDERLY_TREND_OR_PULLBACK'
+    elif st in ('MIXED','UNCLEAR') and ce=='NORMAL': regime='RANGE_OR_TRANSITION'
+    else: regime='TRANSITION'
+    return {'regime':regime,'structure':st,'momentum':mom,'compression_state':ce,'note':'Regime changes context/ranking diagnostics only; M1 structure still owns point generation.'}
+
+def v393_setup_state(candles, side, lo, hi, atr, pa, trap, reaction=None):
+    """V39.4 state-integrity lifecycle. Invalidated originals stay invalidated; later reclaim is a new state."""
+    if not candles:return {'state':'FORMING','original_state':'FORMING','note':'Waiting for M1 data.'}
+    cp=float(candles[-1]['c']); side=str(side).lower(); reaction=reaction or {}
     touched=any(float(x['l'])<=hi and float(x['h'])>=lo for x in candles[-24:])
-    if trap.get('opposite_transition'): state='FAILED_TRAP_TRANSITION'
-    elif pa.get('state')=='CONFIRMED': state='STRUCTURE_CONFIRMED'
-    elif pa.get('stage',0)>=3: state='CONFIRMING'
-    elif pa.get('stage',0)>=1: state='REJECTING'
-    elif touched: state='TESTING'
+    accepted_through=str(reaction.get('state') or '')=='ACCEPTANCE_THROUGH' or int(reaction.get('closes_beyond') or 0)>=2
+    reclaimed=str(trap.get('state') or '')=='RECLAIMED'
+    if trap.get('opposite_transition'):
+        state='FAILED_TRAP_TRANSITION'; original='INVALIDATED'
+    elif accepted_through and reclaimed:
+        state='RECLAIM_AFTER_INVALIDATION'; original='INVALIDATED'
+    elif accepted_through:
+        state='INVALIDATED'; original='INVALIDATED'
+    elif pa.get('state')=='CONFIRMED':
+        state='STRUCTURE_CONFIRMED'; original='ACTIVE'
+    elif pa.get('stage',0)>=3:
+        state='CONFIRMING'; original='ACTIVE'
+    elif pa.get('stage',0)>=1:
+        state='REJECTING'; original='ACTIVE'
+    elif touched:
+        state='TESTING'; original='ACTIVE'
     else:
         dist=max(0,cp-hi) if side=='buy' else max(0,lo-cp)
-        state='APPROACHING' if dist<=atr*1.5 else 'CANDIDATE_FOUND'
-    return {'state':state,'price':round(cp,2),'note':'Lifecycle is based on closed M1 candles and does not execute trades.'}
+        state='APPROACHING' if dist<=atr*1.5 else 'CANDIDATE_FOUND'; original='FRESH'
+    return {'state':state,'original_state':original,'price':round(cp,2),'reclaim_is_new_setup':state=='RECLAIM_AFTER_INVALIDATION','note':'Original invalidation is never erased by a later reclaim; reclaim is tracked as a new setup state.'}
 
 def build_m1_precision_engine(mtf, vwap_context=None):
     """V39.1 M1-FIRST precision generator.
@@ -1928,6 +1976,8 @@ def build_m1_precision_engine(mtf, vwap_context=None):
     pullback_quality=v38_pullback_quality(m1,pullback_state)
     pullback_geometry=v39_pullback_geometry(m1,pullback_state)
     m1_candles=(mtf.get('M1') or {}).get('candles') or []
+    compression_expansion=v394_compression_expansion(m1_candles,atr)
+    market_regime_v2=v394_market_regime(m1,m1_candles,atr,compression_expansion)
     pullback_bridge=build_m1_pullback_bridge_candidates(m1,m1_candles,pullback_state,pullback_quality)
     tpo=build_tpo_profile(m1_candles,atr)
     initial_balance=build_initial_balance(m1_candles)
@@ -2043,9 +2093,9 @@ def build_m1_precision_engine(mtf, vwap_context=None):
             reaction=quantify_zone_reaction(m1_candles,side,lo,hi,atr)
             pa_sequence=v393_price_action_sequence(m1_candles,side,lo,hi,atr)
             trap_failure=v393_trap_failure(m1_candles,side,lo,hi,atr)
-            setup_lifecycle=v393_setup_state(m1_candles,side,lo,hi,atr,pa_sequence,trap_failure)
+            setup_lifecycle=v393_setup_state(m1_candles,side,lo,hi,atr,pa_sequence,trap_failure,reaction)
             mode='CONTINUATION' if point_class.endswith('CONTINUATION') else 'TRANSITION'
-            item={'side':side.upper(),'low':round(lo,2),'high':round(hi,2),'source':src,'score':rank_score,'structural_score':structural_score,'ranking_score':rank_score,'gate_score':max(bull_context,bear_context),'context_score':bull_context if bull else bear_context,'distance_m1_atr':round(datr,2),'depth':depth,'original_zone':{'low':round(original_lo,2),'high':round(original_hi,2)},'zone_refinement':refinement,'pullback_quality':pullback_quality,'pullback_geometry':pullback_geometry,'mathematical_cluster':math_cluster,'liquidity_target':liquidity_target,'path_obstacles':path_quality,'evidence_redundancy':redundancy,'m1_structure':m1st,'m1_momentum':m1mom,'m1_event':m1ev,'point_class':point_class,'mode':mode,'context_direction':context_direction,'mtf_alignment':mtf_alignment,'htf_confluence':{'bonus':htf_confluence_bonus,'hits':htf_hits,'non_blocking':True},'inducement_context':ind,'sequence_context':{'bonus':min(12,seq_bonus),'evidence':seq_ev},'profile_session_context':ps,'acceptance_rejection':reaction,'price_action_sequence':pa_sequence,'setup_lifecycle':setup_lifecycle,'trap_failure':trap_failure,'vwap_context':vwstate,'avwap_context':'SUPPORTIVE' if 'AVWAP' in near else 'UNAVAILABLE' if not isinstance(side_av,(int,float)) else 'NEUTRAL','vwap_ranking_bonus':vwap_bonus,'pullback_bridge':bool(z.get('pullback_bridge')),'bridge_evidence':z.get('bridge_evidence') or {},'vwap_detail':{'daily_vwap':daily_vw,'session_vwap':session_vw,'avwap':side_av,'near_zone':near,'source':vw.get('source'),'basis_adjustment':vw.get('basis_adjustment',0)}}
+            item={'side':side.upper(),'low':round(lo,2),'high':round(hi,2),'source':src,'score':rank_score,'structural_score':structural_score,'ranking_score':rank_score,'gate_score':max(bull_context,bear_context),'context_score':bull_context if bull else bear_context,'distance_m1_atr':round(datr,2),'depth':depth,'original_zone':{'low':round(original_lo,2),'high':round(original_hi,2)},'zone_refinement':refinement,'pullback_quality':pullback_quality,'pullback_geometry':pullback_geometry,'mathematical_cluster':math_cluster,'liquidity_target':liquidity_target,'path_obstacles':path_quality,'evidence_redundancy':redundancy,'m1_structure':m1st,'m1_momentum':m1mom,'m1_event':m1ev,'point_class':point_class,'mode':mode,'context_direction':context_direction,'mtf_alignment':mtf_alignment,'htf_confluence':{'bonus':htf_confluence_bonus,'hits':htf_hits,'non_blocking':True},'inducement_context':ind,'sequence_context':{'bonus':min(12,seq_bonus),'evidence':seq_ev},'profile_session_context':ps,'acceptance_rejection':reaction,'price_action_sequence':pa_sequence,'setup_lifecycle':setup_lifecycle,'trap_failure':trap_failure,'compression_expansion':compression_expansion,'market_regime_v2':market_regime_v2,'vwap_context':vwstate,'avwap_context':'SUPPORTIVE' if 'AVWAP' in near else 'UNAVAILABLE' if not isinstance(side_av,(int,float)) else 'NEUTRAL','vwap_ranking_bonus':vwap_bonus,'pullback_bridge':bool(z.get('pullback_bridge')),'bridge_evidence':z.get('bridge_evidence') or {},'vwap_detail':{'daily_vwap':daily_vw,'session_vwap':session_vw,'avwap':side_av,'near_zone':near,'source':vw.get('source'),'basis_adjustment':vw.get('basis_adjustment',0)}}
             ranked_pool.append(dict(item, status='RANKED_STRUCTURAL_CANDIDATE'))
             # Existing structural threshold still qualifies on its own. A near-qualified
             # legitimate structure can only be promoted by actual available VWAP/AVWAP evidence.
@@ -2069,7 +2119,7 @@ def build_m1_precision_engine(mtf, vwap_context=None):
     else:
         direction='SEARCHING_BOTH' if context_direction=='MIXED' else context_direction+'_CONTEXT'
         state='NO_FRESH_QUALIFIED_M1_POINT'
-    return {'state':state,'direction':direction,'context_direction':context_direction,'gate_score':max(bull_context,bear_context),'bull_gate':bull_context,'bear_gate':bear_context,'candidates':rows[:4],'ranked_candidate_pool':ranked_pool[:8],'m1_pullback':pullback_state,'pullback_quality':pullback_quality,'precision_engine_version':'V39.3_M1_SEQUENCE_STATE_TRAP','pullback_bridge_candidates':pullback_bridge,'tpo_profile':tpo,'initial_balance':initial_balance,'m5_structure':m5.get('structure'),'m5_momentum':m5.get('momentum'),'m5_pressure':m5.get('current_pressure'),'m15_structure':m15.get('structure'),'h1_structure':h1.get('structure'),'m1_structure':m1st,'m1_momentum':m1mom,'shock_caution':shock,'note':'V39.3 M1-FIRST + PRICE-ACTION SEQUENCE + STATE/TRAP: M1 owns setup detection, candidate generation, qualification and precision ranking. GOOD/STRONG active pullbacks trigger a structural re-scan for fresh M1 FVG, displacement-origin and broken-structure retest candidates. M5/M15/H1 retain their structure, FVG/OB, liquidity and other concept analysis as non-blocking context/confluence only. Mathematical clustering, pullback geometry, micro-zone refinement, liquidity path/obstacles, redundancy control, freshness and Quant tracking remain active.'}
+    return {'state':state,'direction':direction,'context_direction':context_direction,'gate_score':max(bull_context,bear_context),'bull_gate':bull_context,'bear_gate':bear_context,'candidates':rows[:4],'ranked_candidate_pool':ranked_pool[:8],'m1_pullback':pullback_state,'pullback_quality':pullback_quality,'precision_engine_version':'V39.4_M1_STATE_MEMORY_REGIME_SIMILARITY','pullback_bridge_candidates':pullback_bridge,'compression_expansion':compression_expansion,'market_regime_v2':market_regime_v2,'tpo_profile':tpo,'initial_balance':initial_balance,'m5_structure':m5.get('structure'),'m5_momentum':m5.get('momentum'),'m5_pressure':m5.get('current_pressure'),'m15_structure':m15.get('structure'),'h1_structure':h1.get('structure'),'m1_structure':m1st,'m1_momentum':m1mom,'shock_caution':shock,'note':'V39.4 M1-FIRST + STATE INTEGRITY + MEMORY + REGIME 2.0: M1 owns setup detection, candidate generation, qualification and precision ranking. GOOD/STRONG active pullbacks trigger a structural re-scan for fresh M1 FVG, displacement-origin and broken-structure retest candidates. M5/M15/H1 retain their structure, FVG/OB, liquidity and other concept analysis as non-blocking context/confluence only. Mathematical clustering, pullback geometry, micro-zone refinement, liquidity path/obstacles, redundancy control, freshness and Quant tracking remain active.'}
 
 def build_reaction_engine(m5):
     """V32 deterministic closed-M5 reaction state for zones currently being tracked.
@@ -2192,7 +2242,7 @@ def live_scan():
         out=data_only_result(mtf,data_status,data_note,'NOT_USED_LIVE_DATA_MODE')
         out['mode']='LIVE_DATA_CONTEXT'
         out['gemini_status']='NOT_USED'
-        out['scanner_version']='V39 PRECISION QUANT ENGINE'
+        out['scanner_version']='V39.4 M1 PRECISION QUANT ENGINE'
         out['market_context']=market_context
         out['event_risk']=market_context.get('event_risk','UNKNOWN')
         out['data_only_summary']=out['data_only_summary'].replace('V26 maps','V30 maps')
@@ -2307,7 +2357,7 @@ def evaluate_precision_setup(setup, candles):
         return None
     if side not in ('BUY','SELL') or hi < lo or atr <= 0 or not candles:return None
     touch_i=next((i for i,x in enumerate(candles) if float(x['l'])<=hi and float(x['h'])>=lo),None)
-    base={'id':setup.get('id'),'side':side,'source':setup.get('source'),'depth':setup.get('depth'),'point_class':setup.get('point_class'),'mode':setup.get('mode'),'context_direction':setup.get('context_direction'),'session':setup.get('session'),'pullback_grade':setup.get('pullback_grade'),'pullback_score':setup.get('pullback_score'),'atr14':round(atr,4)}
+    base={'id':setup.get('id'),'side':side,'source':setup.get('source'),'depth':setup.get('depth'),'point_class':setup.get('point_class'),'mode':setup.get('mode'),'context_direction':setup.get('context_direction'),'session':setup.get('session'),'pullback_grade':setup.get('pullback_grade'),'pullback_score':setup.get('pullback_score'),'market_phase':setup.get('market_phase'),'volatility_regime':setup.get('volatility_regime'),'m1_structure':setup.get('m1'),'m1_momentum':setup.get('m1_momentum'),'regime_v2':setup.get('regime_v2'),'compression_state':setup.get('compression_state'),'atr14':round(atr,4)}
     if touch_i is None:
         return {**base,'state':'NOT_TRIGGERED','meaningful_reaction':False,'mfe_atr':None,'mae_atr':None}
     post=candles[touch_i:]
@@ -2336,6 +2386,23 @@ def quant_summary(rows):
     confidence='INSUFFICIENT' if n<20 else 'DEVELOPING' if n<50 else 'GOOD' if n<100 else 'STRONG_SAMPLE'
     return {'samples':n,'meaningful_reactions':len(reacted),'reaction_rate':round(100*len(reacted)/n,1) if n else None,'invalidated':len(invalid),'avg_mfe_atr':avg_mfe,'avg_mae_atr':avg_mae,'net_excursion_atr':net,'sample_confidence':confidence}
 
+def quant_similarity(results, setups):
+    """Nearest categorical setup cohort. Descriptive only; never changes a point."""
+    if not results or not setups:return {'status':'INSUFFICIENT_SAMPLE','similar_samples':0}
+    latest=setups[0]
+    fields=('side','source','depth','mode','context_direction','pullback_grade','m1','m1_momentum','regime_v2','compression_state')
+    scored=[]
+    for r in results:
+        if r.get('id')==latest.get('id'): continue
+        matches=sum(1 for f in fields if latest.get(f) and r.get({'m1':'m1_structure'}.get(f,f))==latest.get(f))
+        scored.append((matches,r))
+    scored.sort(key=lambda x:x[0],reverse=True)
+    cohort=[r for score,r in scored if score>=max(3,scored[0][0]-1)] if scored else []
+    cohort=cohort[:60]
+    q=quant_summary(cohort)
+    q.update({'status':'INSUFFICIENT_SAMPLE' if q['samples']<20 else 'DEVELOPING' if q['samples']<50 else 'USABLE_CONTEXT','match_fields':list(fields),'latest_setup_id':latest.get('id')})
+    return q
+
 @app.post('/api/quant')
 def quant_engine():
     """V38.1 forward-only Quant Engine for frozen M1 precision points supplied by the phone."""
@@ -2355,7 +2422,7 @@ def quant_engine():
             for r in results:
                 key=str(r.get(field) or 'UNKNOWN'); vals.setdefault(key,[]).append(r)
             groups[field]={k:quant_summary(v) for k,v in vals.items()}
-        return jsonify({'status':'LIVE_DATA','quant_version':'V39','definition':'Meaningful reaction = at least 1.0 setup-time M1 ATR favorable excursion after first touch and before closed-candle invalidation.','summary':quant_summary(results),'groups':groups,'results':results,'note':'Forward-only zone-behavior statistics from frozen precision points. Reaction rate is not a win rate; net excursion is avg MFE minus avg MAE, not trading P&L.'})
+        return jsonify({'status':'LIVE_DATA','quant_version':'V39.4','definition':'Meaningful reaction = at least 1.0 setup-time M1 ATR favorable excursion after first touch and before closed-candle invalidation.','summary':quant_summary(results),'groups':groups,'similarity':quant_similarity(results,setups),'results':results,'note':'Forward-only zone-behavior statistics from frozen precision points. Reaction rate is not a win rate; net excursion is avg MFE minus avg MAE, not trading P&L.'})
     except Exception as e:return jsonify({'error':'quant_failed','detail':str(e)[:900]}),500
 
 @app.get('/api/replay')
