@@ -1185,32 +1185,85 @@ def fetch_optional_gold_futures():
 
 
 
-def _session_vwap_from_candles(candles):
-    """Compute session VWAP only when the provider supplies real volume. Never synthesize volume."""
-    if not candles:
-        return {'status':'UNAVAILABLE','note':'No volume-bearing candles available for VWAP.'}
-    rows=[x for x in candles if isinstance(x.get('v'),(int,float)) and x.get('v',0)>0]
+def _vwap_calc(rows, label='VWAP'):
+    rows=[x for x in (rows or []) if isinstance(x.get('v'),(int,float)) and x.get('v',0)>0]
     if len(rows)<3:
-        return {'status':'UNAVAILABLE','note':'Provider did not supply enough real volume for VWAP; no synthetic VWAP is invented.'}
-    day=str(rows[-1].get('t',''))[:10]
-    session=[x for x in rows if str(x.get('t',''))[:10]==day]
-    if len(session)<3: session=rows[-min(32,len(rows)):]
-    pv=sum(((x['h']+x['l']+x['c'])/3.0)*x['v'] for x in session)
-    vv=sum(x['v'] for x in session)
-    if vv<=0:return {'status':'UNAVAILABLE','note':'Volume sum is zero; VWAP unavailable.'}
-    vwap=pv/vv; last=session[-1]['c']
-    return {'status':'LIVE_DATA','vwap':round(vwap,3),'last_price':round(last,3),'price_vs_vwap':'ABOVE' if last>vwap else 'BELOW' if last<vwap else 'AT','distance':round(last-vwap,3),'bars':len(session),'session_date':day,'note':'Session VWAP calculated only from provider candles that contain real reported volume.'}
+        return {'status':'UNAVAILABLE','note':f'Not enough trustworthy reported volume for {label}; no synthetic volume is invented.'}
+    vv=sum(float(x['v']) for x in rows)
+    if vv<=0:return {'status':'UNAVAILABLE','note':f'Volume sum is zero; {label} unavailable.'}
+    pv=sum(((float(x['h'])+float(x['l'])+float(x['c']))/3.0)*float(x['v']) for x in rows)
+    v=pv/vv; last=float(rows[-1]['c'])
+    return {'status':'LIVE_DATA','vwap':round(v,3),'last_price':round(last,3),'price_vs_vwap':'ABOVE' if last>v else 'BELOW' if last<v else 'AT','distance':round(last-v,3),'bars':len(rows),'note':f'{label} calculated only from candles containing reported volume.'}
+
+def _hour_of(c):
+    try:return int(str(c.get('t',''))[11:13])
+    except:return -1
+
+def _daily_and_session_vwap(candles):
+    rows=[x for x in (candles or []) if isinstance(x.get('v'),(int,float)) and x.get('v',0)>0]
+    if len(rows)<3:
+        note='Provider did not supply enough trustworthy reported volume; Daily/Session VWAP unavailable and no synthetic VWAP is invented.'
+        return {'status':'UNAVAILABLE','daily':{'status':'UNAVAILABLE'},'session':{'status':'UNAVAILABLE'},'note':note}
+    day=str(rows[-1].get('t',''))[:10]; today=[x for x in rows if str(x.get('t',''))[:10]==day]
+    daily=_vwap_calc(today,'Daily VWAP')
+    h=_hour_of(rows[-1])
+    if 0<=h<7: name,a,b='ASIA',0,7
+    elif 7<=h<12: name,a,b='LONDON',7,12
+    elif 12<=h<21: name,a,b='NEW_YORK',12,21
+    else: name,a,b='OFF_HOURS',21,24
+    sess=[x for x in today if a<=_hour_of(x)<b]
+    session=_vwap_calc(sess,'Session VWAP'); session['session_name']=name
+    return {'status':'LIVE_DATA' if daily.get('status')=='LIVE_DATA' or session.get('status')=='LIVE_DATA' else 'UNAVAILABLE','daily':daily,'session':session,'session_name':name,'session_date':day,'note':'Daily and active-session VWAP use reported volume only.'}
+
+def _confirmed_swings(rows, lookback=80):
+    a=(rows or [])[-lookback:]; lows=[]; highs=[]
+    for i in range(2,len(a)-2):
+        if float(a[i]['l'])<min(float(a[i-1]['l']),float(a[i-2]['l']),float(a[i+1]['l']),float(a[i+2]['l'])): lows.append(i)
+        if float(a[i]['h'])>max(float(a[i-1]['h']),float(a[i-2]['h']),float(a[i+1]['h']),float(a[i+2]['h'])): highs.append(i)
+    return a,lows,highs
+
+def _objective_avwap(candles):
+    rows=[x for x in (candles or []) if isinstance(x.get('v'),(int,float)) and x.get('v',0)>0]
+    if len(rows)<12:return {'status':'UNAVAILABLE','note':'Not enough trustworthy volume-bearing candles for objective AVWAP.'}
+    a,lows,highs=_confirmed_swings(rows)
+    out={'status':'LIVE_DATA','method':'LATEST_CONFIRMED_5_BAR_SWING','note':'AVWAP anchors are objective latest confirmed swing low/high; anchors are not chosen after seeing the outcome.'}
+    for key,idxs,label in [('bullish',lows,'Bullish AVWAP'),('bearish',highs,'Bearish AVWAP')]:
+        if not idxs: out[key]={'status':'UNAVAILABLE'}; continue
+        i=idxs[-1]; calc=_vwap_calc(a[i:],label); calc['anchor_time']=a[i]['t']; calc['anchor_price']=round(float(a[i]['l'] if key=='bullish' else a[i]['h']),3); out[key]=calc
+    if all((out.get(k) or {}).get('status')!='LIVE_DATA' for k in ('bullish','bearish')):out['status']='UNAVAILABLE'
+    return out
+
+def _shift_vwap_values(obj, basis):
+    if not isinstance(obj,dict):return obj
+    for k,v in list(obj.items()):
+        if isinstance(v,dict):_shift_vwap_values(v,basis)
+    if obj.get('status')=='LIVE_DATA':
+        for k in ('vwap','last_price','anchor_price'):
+            if isinstance(obj.get(k),(int,float)):obj[k]=round(float(obj[k])+basis,3)
+        if isinstance(obj.get('last_price'),(int,float)) and isinstance(obj.get('vwap'),(int,float)):
+            obj['distance']=round(obj['last_price']-obj['vwap'],3); obj['price_vs_vwap']='ABOVE' if obj['last_price']>obj['vwap'] else 'BELOW' if obj['last_price']<obj['vwap'] else 'AT'
+    return obj
 
 def build_vwap_context(mtf, futures_ctx):
-    """Prefer exchange/futures volume. Spot XAU/USD VWAP is used only if its feed actually includes volume."""
-    fc=(futures_ctx or {}).get('candles') or []
+    """V37 Daily/Session VWAP + objective AVWAP. Prefer volume-bearing futures; basis-adjust to spot before comparing with spot zones."""
+    fc=(futures_ctx or {}).get('candles') or []; source='GOLD_FUTURES' if fc else 'XAU_USD_PROVIDER_VOLUME'
+    rows=fc or ((mtf.get('M1') or {}).get('candles') or [])
+    pack=_daily_and_session_vwap(rows); av=_objective_avwap(rows)
+    basis=0.0
     if fc:
-        x=_session_vwap_from_candles(fc); x['source']='GOLD_FUTURES'; x['symbol']=(futures_ctx or {}).get('symbol'); return x
-    spot=(mtf.get('M1') or {}).get('candles') or []
-    x=_session_vwap_from_candles(spot); x['source']='XAU_USD_PROVIDER_VOLUME'
-    if x.get('status')!='LIVE_DATA':
-        x['note']='VWAP waiting for trustworthy volume. Twelve Data documents VWAP as unavailable for currencies, so the scanner will not fabricate spot-XAU volume.'
-    return x
+        spot=((mtf.get('M1') or {}).get('candles') or [])
+        if spot and fc:
+            basis=float(spot[-1]['c'])-float(fc[-1]['c'])
+            _shift_vwap_values(pack,basis); _shift_vwap_values(av,basis)
+    pack['source']=source; pack['symbol']=(futures_ctx or {}).get('symbol') if fc else 'XAU/USD'; pack['basis_adjustment']=round(basis,3) if fc else 0.0; pack['avwap']=av
+    # backwards-compatible top-level VWAP uses Daily first, then Session.
+    primary=pack.get('daily') if (pack.get('daily') or {}).get('status')=='LIVE_DATA' else pack.get('session')
+    if isinstance(primary,dict) and primary.get('status')=='LIVE_DATA':
+        pack.update({k:primary.get(k) for k in ('vwap','last_price','price_vs_vwap','distance','bars')})
+        pack['status']='LIVE_DATA'
+    else:
+        pack['status']='UNAVAILABLE'; pack['note']='Daily/Session VWAP + AVWAP are ready, but no trustworthy reported volume is currently available. Nothing is fabricated.'
+    return pack
 
 def build_orderflow_context(futures_ctx):
     """True order flow requires aggressor/bid-ask volume. OHLCV alone is deliberately not mislabeled as order flow."""
@@ -1225,22 +1278,26 @@ def build_orderflow_context(futures_ctx):
     return {'status':'LIVE_DATA','state':state,'delta':round(delta,2),'imbalance':round(ratio,3),'sample_bars':len(recent),'note':'True order-flow context from connected bid/ask aggressor volume; confirmation context only.'}
 
 def apply_microstructure_context(mtf, vwap, orderflow):
-    """Annotate existing M1 points. Never create, delete or hard-veto a structural point."""
+    """V37 annotate existing M1 points with Daily/Session VWAP + objective AVWAP. Never create/delete/move/hard-veto a structural point."""
     m5=(mtf.get('M5') or {}).get('metrics') or {}; p=m5.get('m1_precision') or {}
-    vw=(vwap or {}).get('vwap'); of=(orderflow or {}).get('state')
+    m1atr=float(((mtf.get('M1') or {}).get('metrics') or {}).get('atr14') or 0)
+    daily=((vwap or {}).get('daily') or {}).get('vwap'); session=((vwap or {}).get('session') or {}).get('vwap'); av=(vwap or {}).get('avwap') or {}
+    bullav=(av.get('bullish') or {}).get('vwap'); bearav=(av.get('bearish') or {}).get('vwap'); of=(orderflow or {}).get('state')
     for z in p.get('candidates') or []:
-        side=str(z.get('side','')).upper(); lo=float(z.get('low',0)); hi=float(z.get('high',0)); mid=(lo+hi)/2
-        vstate='UNAVAILABLE'
-        if isinstance(vw,(int,float)):
-            # VWAP is context: a BUY below/near VWAP or SELL above/near VWAP is potentially useful location context.
-            tol=max(float(((mtf.get('M1') or {}).get('metrics') or {}).get('atr14') or 0)*0.35,0.15)
-            if lo-tol <= vw <= hi+tol:vstate='NEAR_ZONE'
-            elif side=='BUY' and mid<=vw:vstate='DISCOUNT_TO_VWAP'
-            elif side=='SELL' and mid>=vw:vstate='PREMIUM_TO_VWAP'
-            else:vstate='NON_CONFLUENT'
-        ostate='WAITING' if (orderflow or {}).get('status')!='LIVE_DATA' else ('SUPPORTIVE' if (side=='BUY' and of=='BUYERS_AGGRESSIVE') or (side=='SELL' and of=='SELLERS_AGGRESSIVE') else 'CONFLICTING' if (side=='BUY' and of=='SELLERS_AGGRESSIVE') or (side=='SELL' and of=='BUYERS_AGGRESSIVE') else 'NEUTRAL')
-        z['vwap_context']=vstate; z['orderflow_context']=ostate
-        z['microstructure_note']='VWAP/order flow annotate this already-created point; they do not manufacture or veto it.'
+        side=str(z.get('side','')).upper(); lo=float(z.get('low',0)); hi=float(z.get('high',0)); mid=(lo+hi)/2; tol=max(m1atr*.50,0.20)
+        vals=[('DAILY_VWAP',daily),('SESSION_VWAP',session),('AVWAP',bullav if side=='BUY' else bearav)]
+        near=[name for name,val in vals if isinstance(val,(int,float)) and lo-tol<=float(val)<=hi+tol]
+        available=[(name,float(val)) for name,val in vals if isinstance(val,(int,float))]
+        if near: state='SUPPORTIVE'
+        elif not available: state='UNAVAILABLE'
+        else:
+            adverse=all((val < lo-tol if side=='BUY' else val > hi+tol) for _,val in available)
+            state='CONFLICTING' if adverse else 'NEUTRAL'
+        z['vwap_context']=state
+        z['vwap_detail']={'daily_vwap':daily,'session_vwap':session,'avwap':bullav if side=='BUY' else bearav,'near_zone':near,'source':(vwap or {}).get('source'),'basis_adjustment':(vwap or {}).get('basis_adjustment',0)}
+        z['avwap_context']='SUPPORTIVE' if 'AVWAP' in near else 'UNAVAILABLE' if not isinstance((bullav if side=='BUY' else bearav),(int,float)) else 'NEUTRAL'
+        z['orderflow_context']='WAITING' if (orderflow or {}).get('status')!='LIVE_DATA' else ('SUPPORTIVE' if (side=='BUY' and of=='BUYERS_AGGRESSIVE') or (side=='SELL' and of=='SELLERS_AGGRESSIVE') else 'CONFLICTING' if (side=='BUY' and of=='SELLERS_AGGRESSIVE') or (side=='SELL' and of=='BUYERS_AGGRESSIVE') else 'NEUTRAL')
+        z['microstructure_note']='V37 VWAP/AVWAP annotate this already-created structural point only; they do not manufacture, move or veto it.'
     m5['m1_precision']=p
 
 def fetch_cftc_gold_positioning():
@@ -1445,7 +1502,7 @@ def quantify_zone_reaction(candles, side, lo, hi, atr):
     else: state='TESTING'; quality='UNCONFIRMED'
     return {'state':state,'quality':quality,'penetration_pct':round(pen,0),'closes_inside':inside,'closes_beyond':beyond,'reclaim_bars':reclaim,'displacement_atr':round(disp,2),'note':'Closed-M1 measurement only. Rejection quality is context, not an automatic trade entry.'}
 
-def build_m1_precision_engine(mtf):
+def build_m1_precision_engine(mtf, vwap_context=None):
     """V34.4 always-on M1 precision generator with independent pullback-state detection.
     H1/M15/M5 provide weighted context, but no longer hard-lock M1 direction.
     M1 may qualify aligned continuation points or stronger counter-context transition points.
@@ -1494,6 +1551,13 @@ def build_m1_precision_engine(mtf):
     tpo=build_tpo_profile(m1_candles,atr)
     initial_balance=build_initial_balance(m1_candles)
     rows=[]
+    ranked_pool=[]
+    vw=vwap_context or {}
+    daily_vw=((vw.get('daily') or {}).get('vwap'))
+    session_vw=((vw.get('session') or {}).get('vwap'))
+    avpack=vw.get('avwap') or {}
+    bull_av=((avpack.get('bullish') or {}).get('vwap'))
+    bear_av=((avpack.get('bearish') or {}).get('vwap'))
     for side in ('buy','sell'):
         bull=side=='buy'; own_bias=bm1 if bull else sm1; opp_bias=sm1 if bull else bm1
         micro_align=(bull and (m1st=='HH_HL' or m1mom.startswith('BULLISH') or 'BULLISH' in m1ev)) or ((not bull) and (m1st=='LL_LH' or m1mom.startswith('BEARISH') or 'BEARISH' in m1ev))
@@ -1537,15 +1601,46 @@ def build_m1_precision_engine(mtf):
             if any(not (hi<float(r['low'])-atr*.2 or lo>float(r['high'])+atr*.2) for r in bprs): seq_bonus+=3; seq_ev.append('BPR')
             if isinstance(lp.get('nearest_above' if bull else 'nearest_below'),(int,float)): seq_bonus+=2; seq_ev.append('liquidity path')
             ps=profile_session_context(side,lo,hi,tpo,initial_balance,atr)
-            # V36 profile/session evidence is deliberately small and NON-BLOCKING. Qualification threshold uses structural score only.
             structural_score=max(0,min(100,base+source_bonus+micro_bonus+proximity+context_bonus+pullback_bonus+inducement_bonus+min(12,seq_bonus)))
-            if structural_score<min_score: continue
-            score=max(0,min(100,structural_score+int(ps.get('bonus') or 0)))
+            # V37.1 candidate pool: keep weak/random zones out, but let legitimate near-qualified
+            # structures reach location ranking before the final qualification threshold.
+            if structural_score < max(52, min_score-14):
+                continue
+            tol=max(atr*.50,0.20)
+            side_av=bull_av if bull else bear_av
+            locs=[('DAILY_VWAP',daily_vw),('SESSION_VWAP',session_vw),('AVWAP',side_av)]
+            available=[(n,float(v)) for n,v in locs if isinstance(v,(int,float))]
+            near=[n for n,v in available if lo-tol <= v <= hi+tol]
+            vwap_bonus=0
+            if 'DAILY_VWAP' in near: vwap_bonus += 3
+            if 'SESSION_VWAP' in near: vwap_bonus += 4
+            if 'AVWAP' in near: vwap_bonus += 5
+            vwap_bonus=min(10,vwap_bonus)
+            if near:
+                vwstate='SUPPORTIVE'
+            elif not available:
+                vwstate='UNAVAILABLE'
+            else:
+                adverse=all((v < lo-tol if bull else v > hi+tol) for _,v in available)
+                vwstate='CONFLICTING' if adverse else 'NEUTRAL'
+                if adverse: vwap_bonus=-2
+            depth='SHALLOW' if datr<=1.5 else 'INTERMEDIATE' if datr<=3.25 else 'DEEP'
+            rank_score=max(0,min(100,structural_score+int(ps.get('bonus') or 0)+vwap_bonus))
             reaction=quantify_zone_reaction(m1_candles,side,lo,hi,atr)
             mode='CONTINUATION' if point_class.endswith('CONTINUATION') else 'TRANSITION'
-            rows.append({'side':side.upper(),'low':round(lo,2),'high':round(hi,2),'source':src,'score':score,'structural_score':structural_score,'gate_score':max(bull_context,bear_context),'context_score':bull_context if bull else bear_context,'distance_m1_atr':round(datr,2),'m1_structure':m1st,'m1_momentum':m1mom,'m1_event':m1ev,'status':'QUALIFIED_PRECISION_POINT','point_class':point_class,'mode':mode,'context_direction':context_direction,'inducement_context':ind,'sequence_context':{'bonus':min(12,seq_bonus),'evidence':seq_ev},'profile_session_context':ps,'acceptance_rejection':reaction,'note':f'Qualified fresh M1 {mode.lower()} precision point. V36 TPO/session evidence only ranks an already-qualified structural point; it cannot create or veto one. Acceptance/rejection activates after a test. It is a watch area, not an automatic entry.'})
+            item={'side':side.upper(),'low':round(lo,2),'high':round(hi,2),'source':src,'score':rank_score,'structural_score':structural_score,'ranking_score':rank_score,'gate_score':max(bull_context,bear_context),'context_score':bull_context if bull else bear_context,'distance_m1_atr':round(datr,2),'depth':depth,'m1_structure':m1st,'m1_momentum':m1mom,'m1_event':m1ev,'point_class':point_class,'mode':mode,'context_direction':context_direction,'inducement_context':ind,'sequence_context':{'bonus':min(12,seq_bonus),'evidence':seq_ev},'profile_session_context':ps,'acceptance_rejection':reaction,'vwap_context':vwstate,'avwap_context':'SUPPORTIVE' if 'AVWAP' in near else 'UNAVAILABLE' if not isinstance(side_av,(int,float)) else 'NEUTRAL','vwap_ranking_bonus':vwap_bonus,'vwap_detail':{'daily_vwap':daily_vw,'session_vwap':session_vw,'avwap':side_av,'near_zone':near,'source':vw.get('source'),'basis_adjustment':vw.get('basis_adjustment',0)}}
+            ranked_pool.append(dict(item, status='RANKED_STRUCTURAL_CANDIDATE'))
+            # Existing structural threshold still qualifies on its own. A near-qualified
+            # legitimate structure can only be promoted by actual available VWAP/AVWAP evidence.
+            qualifies = structural_score >= min_score or (available and rank_score >= min_score and structural_score >= min_score-10)
+            if not qualifies:
+                continue
+            item['status']='QUALIFIED_PRECISION_POINT'
+            item['note']=f'V37.1 qualified fresh M1 {mode.lower()} precision point after candidate ranking. VWAP/AVWAP add bounded location evidence only; they cannot create or move the zone.'
+            rows.append(item)
 
     rows.sort(key=lambda x:(x['score'],-x['distance_m1_atr']),reverse=True)
+    ranked_pool.sort(key=lambda x:(x['ranking_score'],x['structural_score'],-x['distance_m1_atr']),reverse=True)
     if rows:
         dirs=sorted(set(x['side'] for x in rows))
         direction=(dirs[0] if len(dirs)==1 else 'BOTH')
@@ -1553,7 +1648,7 @@ def build_m1_precision_engine(mtf):
     else:
         direction='SEARCHING_BOTH' if context_direction=='MIXED' else context_direction+'_CONTEXT'
         state='NO_FRESH_QUALIFIED_M1_POINT'
-    return {'state':state,'direction':direction,'context_direction':context_direction,'gate_score':max(bull_context,bear_context),'bull_gate':bull_context,'bear_gate':bear_context,'candidates':rows[:4],'m1_pullback':pullback_state,'tpo_profile':tpo,'initial_balance':initial_balance,'m5_structure':m5.get('structure'),'m5_momentum':m5.get('momentum'),'m5_pressure':m5.get('current_pressure'),'m15_structure':m15.get('structure'),'h1_structure':h1.get('structure'),'m1_structure':m1st,'m1_momentum':m1mom,'shock_caution':shock,'note':'V34.6 keeps always-on M1 and adds MSS, BPR/liquidity-void, failed-auction acceptance/rejection, nested dealing ranges, and liquidity-path context as supporting evidence only. It does not make these concepts mandatory. V34.5 keeps always-on M1 and pullback-state separation, and adds possible inducement as a small supporting relationship only. It never creates or vetoes a point. V34.4 always-on M1 search separates pullback-state detection from precision-point qualification. H1/M15/M5 remain weighted context, not a hard lock. A detected pullback can exist even when no fresh M1 point qualifies. Freshness and used-zone suppression remain unchanged.'}
+    return {'state':state,'direction':direction,'context_direction':context_direction,'gate_score':max(bull_context,bear_context),'bull_gate':bull_context,'bear_gate':bear_context,'candidates':rows[:4],'ranked_candidate_pool':ranked_pool[:8],'m1_pullback':pullback_state,'tpo_profile':tpo,'initial_balance':initial_balance,'m5_structure':m5.get('structure'),'m5_momentum':m5.get('momentum'),'m5_pressure':m5.get('current_pressure'),'m15_structure':m15.get('structure'),'h1_structure':h1.get('structure'),'m1_structure':m1st,'m1_momentum':m1mom,'shock_caution':shock,'note':'V34.6 keeps always-on M1 and adds MSS, BPR/liquidity-void, failed-auction acceptance/rejection, nested dealing ranges, and liquidity-path context as supporting evidence only. It does not make these concepts mandatory. V34.5 keeps always-on M1 and pullback-state separation, and adds possible inducement as a small supporting relationship only. It never creates or vetoes a point. V34.4 always-on M1 search separates pullback-state detection from precision-point qualification. H1/M15/M5 remain weighted context, not a hard lock. A detected pullback can exist even when no fresh M1 point qualifies. Freshness and used-zone suppression remain unchanged.'}
 
 def build_reaction_engine(m5):
     """V32 deterministic closed-M5 reaction state for zones currently being tracked.
@@ -1564,6 +1659,13 @@ def build_reaction_engine(m5):
     cp=float(m5.get('data_current_price') or 0)
     allz=m5.get('all_candidate_zones') or m5.get('candidate_zones') or {}
     rows=[]
+    ranked_pool=[]
+    vw=vwap_context or {}
+    daily_vw=((vw.get('daily') or {}).get('vwap'))
+    session_vw=((vw.get('session') or {}).get('vwap'))
+    avpack=vw.get('avwap') or {}
+    bull_av=((avpack.get('bullish') or {}).get('vwap'))
+    bear_av=((avpack.get('bearish') or {}).get('vwap'))
     for side in ('buy','sell'):
         for z in (allz.get(side) or [])[:8]:
             lo=float(z.get('low')); hi=float(z.get('high'))
@@ -1651,7 +1753,7 @@ def live_scan():
         apply_market_context(mtf,market_context)
         filter_fresh_candidates(mtf)
         mtf['M5']['metrics']['reaction_engine']=build_reaction_engine(mtf['M5']['metrics'])
-        mtf['M5']['metrics']['m1_precision']=build_m1_precision_engine(mtf)
+        mtf['M5']['metrics']['m1_precision']=build_m1_precision_engine(mtf, market_context.get('vwap_context',{}))
         apply_microstructure_context(mtf,market_context.get('vwap_context',{}),market_context.get('orderflow_context',{}))
         # V31: keep pullback state/candidate discovery separate from final display qualification.
         # This prevents a detected setup from silently disappearing between scans.
@@ -1676,11 +1778,11 @@ def live_scan():
         out=data_only_result(mtf,data_status,data_note,'NOT_USED_LIVE_DATA_MODE')
         out['mode']='LIVE_DATA_CONTEXT'
         out['gemini_status']='NOT_USED'
-        out['scanner_version']='V35 VWAP + ORDER FLOW READY'
+        out['scanner_version']='V37.1 CANDIDATE RANKING + VWAP/AVWAP'
         out['market_context']=market_context
         out['event_risk']=market_context.get('event_risk','UNKNOWN')
         out['data_only_summary']=out['data_only_summary'].replace('V26 maps','V30 maps')
-        out['note']='V35 preserves V34.6 structural point generation and adds VWAP location context plus an honest true-order-flow layer. VWAP is calculated only from real reported volume; order flow activates only when bid/ask aggressor volume exists. Neither layer creates, deletes or vetoes structural points.'
+        out['note']='V37.1 ranks a wider pool of legitimate M1 structural candidates before final qualification. Daily/Session VWAP and objective AVWAP may add bounded location evidence, but cannot create or move a zone. Without trustworthy volume the original structural threshold remains decisive.'
         return jsonify(out)
     except Exception as e:
         return jsonify({'error':'live_scan_failed','detail':str(e)[:1200]}),500
