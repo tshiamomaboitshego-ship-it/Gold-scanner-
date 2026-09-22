@@ -1980,6 +1980,58 @@ def v395_extra_m1_candidates(m1, candles, pullback_state):
         kept.append(z)
     return kept[:10]
 
+def v396_spike_intelligence(candles, atr, side=None, point_score=None, source=None, compression=None):
+    """V39.6 descriptive M1 spike intelligence.
+
+    Detects abnormal closed-candle expansion and attaches a cautious spike-potential
+    label to each precision point. It never creates, qualifies, moves or vetoes a point.
+    """
+    rows=(candles or [])[-30:]
+    atr=float(atr or 0)
+    if len(rows)<8 or atr<=0:
+        return {'status':'UNAVAILABLE','spike_detected':False,'severity':'NORMAL','type':'NONE','direction':'NONE',
+                'spike_potential':'UNKNOWN','action':'Normal V39.5 point rules apply.','non_blocking':True}
+    x=rows[-1]
+    o,h,l,c=(float(x[k]) for k in ('o','h','l','c'))
+    rng=max(0.0,h-l); body=abs(c-o); upper=max(0.0,h-max(o,c)); lower=max(0.0,min(o,c)-l)
+    prior=[max(0.0,float(q['h'])-float(q['l'])) for q in rows[-21:-1]]
+    normal=sum(prior)/len(prior) if prior else atr
+    baseline=max(normal,atr*.35,1e-9)
+    multiple=rng/baseline
+    range_atr=rng/atr; body_ratio=body/rng if rng else 0; upper_ratio=upper/rng if rng else 0; lower_ratio=lower/rng if rng else 0
+    direction='BULLISH' if c>o else 'BEARISH' if c<o else 'NEUTRAL'
+    severity='EXTREME' if multiple>=3.4 or range_atr>=2.8 else 'LARGE' if multiple>=2.35 or range_atr>=1.9 else 'ELEVATED' if multiple>=1.65 or range_atr>=1.35 else 'NORMAL'
+    detected=severity!='NORMAL'
+    stype='NONE'
+    if detected:
+        if upper_ratio>=.48 and upper_ratio>=body_ratio*1.25: stype='UPPER_WICK_REJECTION'
+        elif lower_ratio>=.48 and lower_ratio>=body_ratio*1.25: stype='LOWER_WICK_REJECTION'
+        elif body_ratio>=.64: stype='IMPULSE'
+        else: stype='MIXED_EXPANSION'
+    if severity=='EXTREME': action='STAND ASIDE — do not chase. Wait for volatility to settle, a pullback/retest, and fresh structure.'
+    elif severity=='LARGE': action='DO NOT CHASE — wait for a pullback/retest before using a fresh Candidate Ladder point.'
+    elif severity=='ELEVATED': action='CAUTION — let the move settle and prefer a clean pullback/retest.'
+    else: action='No abnormal M1 spike on the latest closed candle. Normal V39.5 point rules apply.'
+    # Potential is deliberately not a prediction. It describes how capable the point/context is
+    # of producing expansion if price reacts there.
+    score=int(point_score or 0); src=str(source or '')
+    p=0
+    if score>=78:p+=3
+    elif score>=70:p+=2
+    elif score>=66:p+=1
+    if any(k in src for k in ('BREAK_RETEST','DISPLACEMENT_ORIGIN','TRANSITION_RECLAIM')):p+=2
+    elif 'FVG' in src:p+=1
+    ce=str((compression or {}).get('state') or '')
+    if ce in ('COMPRESSION','RANGE_COMPRESSION'):p+=2
+    elif ce=='EXPANSION':p+=1
+    potential='HIGH' if p>=5 else 'MODERATE' if p>=3 else 'LOW'
+    aligned=(side and direction==str(side).upper() and stype=='IMPULSE' and detected)
+    return {'status':'LIVE_DATA','spike_detected':detected,'severity':severity,'type':stype,'direction':direction,
+            'range':round(rng,3),'normal_m1_range':round(normal,3),'range_multiple':round(multiple,2),'range_atr':round(range_atr,2),
+            'body_ratio_pct':round(body_ratio*100,1),'upper_wick_pct':round(upper_ratio*100,1),'lower_wick_pct':round(lower_ratio*100,1),
+            'spike_potential':potential,'potential_is_prediction':False,'same_direction_impulse':bool(aligned),'action':action,'non_blocking':True,
+            'note':'Spike potential is context, not a forecast. Spike intelligence cannot create, qualify, move or veto a V39.5 structural point.'}
+
 def build_m1_precision_engine(mtf, vwap_context=None):
     """V39.1 M1-FIRST precision generator.
     M1 owns setup detection, candidate generation, qualification and precision ranking.
@@ -2174,6 +2226,7 @@ def build_m1_precision_engine(mtf, vwap_context=None):
             local_point_class='M1_PRECISION_BREAK_RETEST' if route=='BREAK_RETEST' else 'M1_PRECISION_TRANSITION' if route=='TRANSITION' else point_class
             mode='BREAK_RETEST' if route=='BREAK_RETEST' else 'TRANSITION' if route=='TRANSITION' else ('CONTINUATION' if local_point_class.endswith('CONTINUATION') else 'TRANSITION')
             item={'side':side.upper(),'low':round(lo,2),'high':round(hi,2),'source':src,'score':rank_score,'structural_score':structural_score,'ranking_score':rank_score,'gate_score':max(bull_context,bear_context),'context_score':bull_context if bull else bear_context,'distance_m1_atr':round(datr,2),'depth':depth,'original_zone':{'low':round(original_lo,2),'high':round(original_hi,2)},'zone_refinement':refinement,'pullback_quality':pullback_quality,'pullback_geometry':pullback_geometry,'mathematical_cluster':math_cluster,'liquidity_target':liquidity_target,'path_obstacles':path_quality,'evidence_redundancy':redundancy,'m1_structure':m1st,'m1_momentum':m1mom,'m1_event':m1ev,'point_class':local_point_class,'mode':mode,'candidate_route':route,'context_direction':context_direction,'mtf_alignment':mtf_alignment,'htf_confluence':{'bonus':htf_confluence_bonus,'hits':htf_hits,'non_blocking':True},'inducement_context':ind,'sequence_context':{'bonus':min(12,seq_bonus),'evidence':seq_ev},'profile_session_context':ps,'acceptance_rejection':reaction,'price_action_sequence':pa_sequence,'setup_lifecycle':setup_lifecycle,'trap_failure':trap_failure,'compression_expansion':compression_expansion,'market_regime_v2':market_regime_v2,'vwap_context':vwstate,'avwap_context':'SUPPORTIVE' if 'AVWAP' in near else 'UNAVAILABLE' if not isinstance(side_av,(int,float)) else 'NEUTRAL','vwap_ranking_bonus':vwap_bonus,'pullback_bridge':bool(z.get('pullback_bridge')),'bridge_evidence':z.get('bridge_evidence') or {},'vwap_detail':{'daily_vwap':daily_vw,'session_vwap':session_vw,'avwap':side_av,'near_zone':near,'source':vw.get('source'),'basis_adjustment':vw.get('basis_adjustment',0)}}
+            item['spike_intelligence']=v396_spike_intelligence(m1_candles,atr,item['side'],rank_score,src,compression_expansion)
             diagnostics['ranked'] += 1
             # Dynamic classification, not a lower-quality automatic signal: legitimate near-qualified
             # structures remain visible as WATCH candidates while the same 66 structural floor remains
@@ -2206,7 +2259,7 @@ def build_m1_precision_engine(mtf, vwap_context=None):
     else:
         direction='SEARCHING_BOTH' if context_direction=='MIXED' else context_direction+'_CONTEXT'
         state='NO_FRESH_QUALIFIED_M1_POINT'
-    return {'state':state,'direction':direction,'context_direction':context_direction,'gate_score':max(bull_context,bear_context),'bull_gate':bull_context,'bear_gate':bear_context,'candidates':rows[:4],'ranked_candidate_pool':ranked_pool[:8],'m1_pullback':pullback_state,'pullback_quality':pullback_quality,'precision_engine_version':'V39.5_M1_CANDIDATE_LADDER_DIAGNOSTICS','candidate_diagnostics':diagnostics,'extra_route_candidates':extra_routes,'pullback_bridge_candidates':pullback_bridge,'compression_expansion':compression_expansion,'market_regime_v2':market_regime_v2,'tpo_profile':tpo,'initial_balance':initial_balance,'m5_structure':m5.get('structure'),'m5_momentum':m5.get('momentum'),'m5_pressure':m5.get('current_pressure'),'m15_structure':m15.get('structure'),'h1_structure':h1.get('structure'),'m1_structure':m1st,'m1_momentum':m1mom,'shock_caution':shock,'note':'V39.5 M1 CANDIDATE LADDER + DIAGNOSTICS: continuation pullback, break/retest and transition routes feed one ranked M1 candidate ladder. WATCH candidates expose near-qualified structure without pretending it is qualified. State integrity, memory and Regime 2.0 remain active.  M1 owns setup detection, candidate generation, qualification and precision ranking. GOOD/STRONG active pullbacks trigger a structural re-scan for fresh M1 FVG, displacement-origin and broken-structure retest candidates. M5/M15/H1 retain their structure, FVG/OB, liquidity and other concept analysis as non-blocking context/confluence only. Mathematical clustering, pullback geometry, micro-zone refinement, liquidity path/obstacles, redundancy control, freshness and Quant tracking remain active.'}
+    return {'state':state,'direction':direction,'context_direction':context_direction,'gate_score':max(bull_context,bear_context),'bull_gate':bull_context,'bear_gate':bear_context,'candidates':rows[:4],'ranked_candidate_pool':ranked_pool[:8],'m1_pullback':pullback_state,'pullback_quality':pullback_quality,'precision_engine_version':'V39.6_M1_CANDIDATE_LADDER_SPIKE_INTELLIGENCE','candidate_diagnostics':diagnostics,'extra_route_candidates':extra_routes,'pullback_bridge_candidates':pullback_bridge,'compression_expansion':compression_expansion,'market_regime_v2':market_regime_v2,'tpo_profile':tpo,'initial_balance':initial_balance,'m5_structure':m5.get('structure'),'m5_momentum':m5.get('momentum'),'m5_pressure':m5.get('current_pressure'),'m15_structure':m15.get('structure'),'h1_structure':h1.get('structure'),'m1_structure':m1st,'m1_momentum':m1mom,'shock_caution':shock,'spike_intelligence':v396_spike_intelligence(m1_candles,atr,None,None,None,compression_expansion),'note':'V39.6 SPIKE INTELLIGENCE EXPERIMENT built on verified V39.5 Candidate Ladder + Diagnostics. V39.5 qualification logic is preserved.  continuation pullback, break/retest and transition routes feed one ranked M1 candidate ladder. WATCH candidates expose near-qualified structure without pretending it is qualified. State integrity, memory and Regime 2.0 remain active.  M1 owns setup detection, candidate generation, qualification and precision ranking. GOOD/STRONG active pullbacks trigger a structural re-scan for fresh M1 FVG, displacement-origin and broken-structure retest candidates. M5/M15/H1 retain their structure, FVG/OB, liquidity and other concept analysis as non-blocking context/confluence only. Mathematical clustering, pullback geometry, micro-zone refinement, liquidity path/obstacles, redundancy control, freshness and Quant tracking remain active.'}
 
 def build_reaction_engine(m5):
     """V32 deterministic closed-M5 reaction state for zones currently being tracked.

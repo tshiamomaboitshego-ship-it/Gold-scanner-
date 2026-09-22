@@ -19,7 +19,7 @@ These states are analysis/forward-testing aids, not automatic entries or guarant
 - Setup Similarity Quant: compares the latest frozen precision setup with the nearest categorical cohort; remains INSUFFICIENT until sample size develops.
 All five are context/state/statistics layers. They do not invent zones or turn Quant statistics into probabilities.
 
-## V39.5 additions — Candidate Ladder + Diagnostics
+## V39.6 additions — Candidate Ladder + Diagnostics
 - **Pullback Candidate Ladder:** native M1 structure + Pullback Bridge candidates are ranked together as shallow/intermediate/deep areas.
 - **WATCH vs QUALIFIED:** legitimate near-qualified structure remains visible as WATCH instead of disappearing; WATCH is not an entry signal.
 - **Independent Break & Retest route:** closed-M1 break of a recent micro extreme can create a fresh first-retest candidate without requiring a classic continuation pullback.
@@ -27,3 +27,13 @@ All five are context/state/statistics layers. They do not invent zones or turn Q
 - **Candidate Diagnostics:** shows raw → fresh → distance-valid → ranked → WATCH → QUALIFIED counts plus rejection reasons and route counts.
 - The normal M1 structural qualification reference remains 66; this is not a blanket threshold reduction.
 - M5/M15/H1 remain non-blocking context. Gemini/screenshots are not required for normal scans.
+
+
+## V39.6 experimental addition — Point-linked Spike Intelligence
+- Built from the verified V39.5 Candidate Ladder + Diagnostics baseline.
+- Detects latest closed-M1 elevated, large and extreme expansion adaptively versus recent M1 range and ATR.
+- Classifies impulse, upper-wick rejection, lower-wick rejection and mixed expansion.
+- Every ranked/qualified M1 point gets LOW/MODERATE/HIGH spike potential plus the current spike context.
+- Large spikes show DO NOT CHASE / wait for pullback-retest guidance; extreme spikes advise standing aside until structure reforms.
+- Spike potential is context, not a prediction. It cannot create, qualify, move, or veto a point.
+- The V39.5 structural qualification floor and Candidate Ladder routes are preserved.
