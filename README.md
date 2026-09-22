@@ -1,39 +1,42 @@
-# Gold Scanner V39.3 — M1 Sequence + State + Trap Precision Quant Engine
+# Gold Scanner V40 — Pullback-Only Intelligence
 
-Built from V39.2 without removing the M1 Pullback Bridge, mathematical precision or forward Quant Engine.
+Built from the verified V39.5 Candidate Ladder + Diagnostics baseline.
 
-## Added in V39.3
-- **M1 Price-Action Sequence Engine**: closed-M1 sweep/rejection-reclaim → displacement → micro structure break → follow-through stages. It is reaction evidence only and never manufactures a zone.
-- **M1 Setup-State Machine**: CANDIDATE_FOUND → APPROACHING → TESTING → REJECTING → CONFIRMING → STRUCTURE_CONFIRMED, with failure/transition state when appropriate.
-- **Failed-Setup / Trap Detection**: detects closed-candle acceptance through a candidate, failed reclaim plus opposite displacement, and flags a possible opposite transition.
+## Mission
+One job only: identify clean XAUUSD continuation pullbacks and reject poor/failing retracements.
 
-M1 remains the primary setup/precision engine. M5/M15/H1 remain non-blocking context/confluence. Existing Pullback Bridge, mathematical clustering, micro-zone refinement, liquidity path/obstacle analysis, freshness/consumption and Quant tracking remain active.
+## Kept because they directly help pullbacks
+- M1 trend / swing structure
+- meaningful impulse detection
+- active pullback detection
+- retracement depth
+- fresh/consumed structural zones
+- FVG / order-block / swing / broken-structure retest evidence
+- Candidate Ladder: WATCH vs QUALIFIED
+- rejection / reclaim / continuation confirmation
+- invalidation and trap/failure detection
+- ATR-relative volatility
+- liquidity/path obstacles and room for continuation
+- diagnostics and forward tracking
+- M5/M15/H1 as non-blocking context only
 
-These states are analysis/forward-testing aids, not automatic entries or guarantees.
+## Added in V40
+- Pullback Quality: CLEAN / GOOD / MESSY / FAILING
+- Depth: SHALLOW / HEALTHY / DEEP / DANGEROUS
+- Pullback speed vs preceding impulse speed
+- Opposing-candle pressure
+- Pullback lifecycle
+- Explicit FAILED PULLBACK state
+- Continuation-restart detection
+- Chase protection context
+- Candidate scoring adjusted by pullback quality/failure risk
 
-## V39.4 additions
-- State integrity: acceptance-through invalidation cannot be overwritten by later PA confirmation; reclaim after invalidation is a separate state.
-- Persistent M1 state memory: phone localStorage keeps lifecycle history across scans and prevents silent state resets.
-- M1 Compression/Expansion Engine: closed-candle range contraction, overlap and expansion context.
-- M1 Market Regime 2.0: TRENDING / ORDERLY_TREND_OR_PULLBACK / COMPRESSION / EXPANSION_VOLATILITY_SHOCK / RANGE_OR_TRANSITION.
-- Setup Similarity Quant: compares the latest frozen precision setup with the nearest categorical cohort; remains INSUFFICIENT until sample size develops.
-All five are context/state/statistics layers. They do not invent zones or turn Quant statistics into probabilities.
+## Removed from entry generation
+- New Move Origin candidates
+- local/range origin entry candidates
+- independent transition/reversal entry route
+- transition/reclaim points that are not part of the active continuation pullback
 
-## V39.6 additions — Candidate Ladder + Diagnostics
-- **Pullback Candidate Ladder:** native M1 structure + Pullback Bridge candidates are ranked together as shallow/intermediate/deep areas.
-- **WATCH vs QUALIFIED:** legitimate near-qualified structure remains visible as WATCH instead of disappearing; WATCH is not an entry signal.
-- **Independent Break & Retest route:** closed-M1 break of a recent micro extreme can create a fresh first-retest candidate without requiring a classic continuation pullback.
-- **Independent Transition route:** liquidity sweep + reclaim + opposite displacement can create a transition/reversal retest candidate.
-- **Candidate Diagnostics:** shows raw → fresh → distance-valid → ranked → WATCH → QUALIFIED counts plus rejection reasons and route counts.
-- The normal M1 structural qualification reference remains 66; this is not a blanket threshold reduction.
-- M5/M15/H1 remain non-blocking context. Gemini/screenshots are not required for normal scans.
+Internal structure/liquidity calculations may remain where they help determine whether a pullback is healthy or failing; they do not create unrelated entries.
 
-
-## V39.6 experimental addition — Point-linked Spike Intelligence
-- Built from the verified V39.5 Candidate Ladder + Diagnostics baseline.
-- Detects latest closed-M1 elevated, large and extreme expansion adaptively versus recent M1 range and ATR.
-- Classifies impulse, upper-wick rejection, lower-wick rejection and mixed expansion.
-- Every ranked/qualified M1 point gets LOW/MODERATE/HIGH spike potential plus the current spike context.
-- Large spikes show DO NOT CHASE / wait for pullback-retest guidance; extreme spikes advise standing aside until structure reforms.
-- Spike potential is context, not a prediction. It cannot create, qualify, move, or veto a point.
-- The V39.5 structural qualification floor and Candidate Ladder routes are preserved.
+No score is a guarantee or probability of profit.
