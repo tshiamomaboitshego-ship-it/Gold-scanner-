@@ -1,5 +1,5 @@
 import os, json, base64, urllib.parse, urllib.request, statistics, time, csv, io
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from flask import Flask, request, jsonify, send_from_directory
 from google import genai
 from google.genai import types
@@ -2670,7 +2670,7 @@ def v412_locked_opportunity_tracker(m1, locked, current):
     else:
         status='LOCKED'
     touch_i=next((i for i,x in enumerate(candles) if float(x['l'])<=hi and float(x['h'])>=lo),None) if candles else None
-    triggered=False; trigger_ev=[]
+    triggered=False; trigger_time=None; trigger_ev=[]
     if touch_i is not None:
         status='ARMED'
         after=candles[touch_i:]
@@ -2683,7 +2683,7 @@ def v412_locked_opportunity_tracker(m1, locked, current):
             if i>0:
                 pc=float(after[i-1]['c']); follow=(c>pc if side=='BUY' else c<pc)
             if reclaim and directional and (body>=0.18*atr or follow):
-                triggered=True; trigger_ev=['zone tested','closed-M1 reclaim','directional close/follow-through']; break
+                triggered=True; trigger_time=x.get('t'); trigger_ev=['zone tested','closed-M1 reclaim','directional close/follow-through']; break
         if triggered: status='TRIGGERED'
     if tp1hit and not tp2hit: status='TP1_HIT'
     # Preserve the original point/risk plan. Current selector may keep finding alternatives,
@@ -2698,7 +2698,7 @@ def v412_locked_opportunity_tracker(m1, locked, current):
     return {'state':state,'decision':decision,'reason':reason,'best_point':bp,'alternatives_considered':(current or {}).get('alternatives_considered',0),
             'setup_families_checked':['PULLBACK','BREAK_RETEST','SWEEP_RECLAIM','CONSOLIDATION_BREAK'],
             'locked_lifecycle':{'id':locked.get('id'),'status':status,'side':side,'low':round(lo,2),'high':round(hi,2),'current_price':round(rp,2),'tp1_hit':tp1hit,'tp2_hit':tp2hit,
-                                'message':'Point remains locked until TP/SL/invalidation; new scans do not silently replace it.'},
+                                'trigger_time':trigger_time,'message':'Point remains locked until TP/SL/invalidation; new scans do not silently replace it.'},
             'selector_note':'V41.2 keeps the active point locked across scans; alternatives remain secondary until the lock ends.',
             'warning':'Scores rank evidence; they are not probabilities. Triggered opportunities can still lose.'}
 
@@ -3039,7 +3039,12 @@ V414_MONITOR_SECONDS = max(60, int(os.environ.get('AUTO_MONITOR_SECONDS', '300')
 V414_AUTO_ENABLED = str(os.environ.get('AUTO_MONITOR_ENABLED', 'false')).lower() in ('1','true','yes','on')
 # A TRIGGERED alert is considered stale after price has moved this fraction of the way from the entry zone to TP1.
 # Override in Render with V414_TRIGGER_MAX_PROGRESS (e.g. 0.15 = 15%).
-V414_TRIGGER_MAX_PROGRESS = min(0.50, max(0.05, float(os.environ.get('V414_TRIGGER_MAX_PROGRESS', '0.15') or 0.15)))
+V414_TRIGGER_MAX_PROGRESS = min(0.50, max(0.03, float(os.environ.get('V414_TRIGGER_MAX_PROGRESS', '0.10') or 0.10)))
+# Freshness is measured from the CLOSE of the M1 trigger candle (provider timestamps are candle-open times).
+# 45s is deliberately strict for a one-minute execution signal; override in Render if forward testing shows it is too strict.
+V414_TRIGGER_MAX_AGE_SECONDS = max(15, min(180, int(os.environ.get('V414_TRIGGER_MAX_AGE_SECONDS', '45') or 45)))
+# Never accept market data that is already stale. The deterministic feed exposes this flag/age in price_meta.
+V414_MAX_M1_FEED_AGE_MINUTES = max(1.0, min(5.0, float(os.environ.get('V414_MAX_M1_FEED_AGE_MINUTES', '2.0') or 2.0)))
 _v414_monitor_thread = None
 _v414_monitor_lock = threading.Lock()
 
@@ -3110,9 +3115,45 @@ def _v414_new_lock(out):
     return {'active':True,'id':f"{x.get('side')}-{x.get('low')}-{x.get('high')}-{t}",
             'side':x.get('side'),'low':x.get('low'),'high':x.get('high'),'source':x.get('source') or 'OPPORTUNITY',
             'best_point_score':x.get('best_point_score'),'structural_score':x.get('structural_score'),'risk_plan':r,
-            'selective_grade':g,'created_at':t,'last_seen':t,
+            'selective_grade':g,'created_at':t,'last_seen':t,'opportunity_id':None,
+            'trigger_time': t if o.get('state')=='ENTRY_QUALIFIED' else None,
             'status':'TRIGGERED' if o.get('state')=='ENTRY_QUALIFIED' else ('ARMED' if o.get('state')=='ARMED' else 'LOCKED')}
 
+
+
+def _v414_parse_provider_time(value):
+    """Parse provider candle time as UTC. Twelve Data timestamps used here are UTC-like and may be naive."""
+    if not value: return None
+    try:
+        v=str(value).strip().replace('Z','+00:00')
+        dt=datetime.fromisoformat(v)
+        if dt.tzinfo is None: dt=dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _v414_data_fresh(out):
+    pm=out.get('price_meta') or {}
+    if pm.get('m1_feed_stale') is True:
+        return False, 'M1 feed marked stale by provider pipeline'
+    try:
+        age=float(pm.get('m1_feed_age_minutes'))
+        if age > V414_MAX_M1_FEED_AGE_MINUTES:
+            return False, f'M1 feed age {age:.2f} min exceeds {V414_MAX_M1_FEED_AGE_MINUTES:.2f} min'
+    except (TypeError,ValueError):
+        pass
+    return True, 'fresh'
+
+
+def _v414_assign_opportunity_id(lock, state):
+    if not lock: return lock
+    if lock.get('opportunity_id'): return lock
+    seq=int(state.get('opportunity_sequence') or 0)+1
+    state['opportunity_sequence']=seq
+    side=str(lock.get('side') or 'X').upper()
+    lock['opportunity_id']=f"{side}-{seq:04d}"
+    return lock
 
 def _v414_event(out, state):
     p=out.get('m1_precision') or ((out.get('multi_timeframe_metrics') or {}).get('M5') or {}).get('m1_precision') or {}
@@ -3121,10 +3162,12 @@ def _v414_event(out, state):
     if not lock:
         lock=_v414_new_lock(out)
         if lock:
+            _v414_assign_opportunity_id(lock,state)
             state['locked_opportunity']=lock
             return 'LOCKED',lock,o
         return None,None,o
     status=str(life.get('status') or lock.get('status') or 'LOCKED').upper()
+    if life.get('trigger_time'): lock['trigger_time']=life.get('trigger_time')
     previous=str(state.get('last_alert_status') or '').upper()
     # Preserve lifecycle state server-side across automatic scans.
     lock['status']=status; lock['last_seen']=datetime.now(timezone.utc).isoformat(); state['locked_opportunity']=lock
@@ -3136,48 +3179,56 @@ def _v414_event(out, state):
 
 
 def _v414_trigger_freshness(out, event, lock):
-    """Prevent a delayed scheduler/cold-start from turning an old M1 trigger into a chase alert."""
+    """Final reliability gate immediately before an actionable TRIGGERED alert."""
     if event != 'TRIGGERED' or not lock:
         return event, lock
+    now=datetime.now(timezone.utc)
+    lock['alert_checked_at']=now.isoformat()
+
+    fresh,why=_v414_data_fresh(out)
+    if not fresh:
+        lock['freshness_status']='DATA_STALE'; lock['freshness_reason']=why
+        return 'DATA_STALE',lock
+
     try:
-        cp=float(out.get('current_price'))
-        lo=float(lock.get('low')); hi=float(lock.get('high'))
+        cp=float(out.get('current_price')); lo=float(lock.get('low')); hi=float(lock.get('high'))
     except (TypeError, ValueError):
-        # If a fresh reference price is unavailable, do not pretend the trigger is actionable.
-        lock['freshness_status']='UNKNOWN_PRICE'
-        return 'MISSED', lock
+        lock['freshness_status']='UNKNOWN_PRICE'; return 'MISSED', lock
 
     r=lock.get('risk_plan') or {}; side=str(lock.get('side') or '').upper()
-    try: sl=float(r.get('stop_loss')) if r.get('stop_loss') is not None else None
-    except (TypeError, ValueError): sl=None
-    try: tp1=float(r.get('tp1')) if r.get('tp1') is not None else None
-    except (TypeError, ValueError): tp1=None
-
+    def n(v):
+        try:return float(v) if v is not None else None
+        except (TypeError,ValueError):return None
+    sl=n(r.get('stop_loss')); tp1=n(r.get('tp1'))
     lock['alert_current_price']=round(cp,3)
-    lock['detected_at']=((out.get('price_meta') or {}).get('latest_m1_time') or lock.get('last_seen') or datetime.now(timezone.utc).isoformat())
-    lock['alert_checked_at']=datetime.now(timezone.utc).isoformat()
+    lock['detected_at']=lock.get('trigger_time') or ((out.get('price_meta') or {}).get('latest_m1_time')) or lock.get('last_seen')
 
-    # Crossing structural invalidation always wins over a stale trigger.
+    # Trigger age: provider M1 timestamp is candle OPEN, so add 60s to estimate the close that confirmed the trigger.
+    trigger_dt=_v414_parse_provider_time(lock.get('trigger_time'))
+    if trigger_dt is not None:
+        close_dt=trigger_dt+timedelta(seconds=60)
+        age=max(0.0,(now-close_dt).total_seconds())
+        lock['trigger_age_seconds']=round(age,1)
+        if age > V414_TRIGGER_MAX_AGE_SECONDS:
+            lock['freshness_status']='STALE_TRIGGER_AGE'
+            return 'MISSED',lock
+
+    # Structural invalidation has priority.
     if side=='BUY' and sl is not None and cp <= sl:
         lock['freshness_status']='INVALIDATED_BEFORE_ALERT'; return 'INVALIDATED',lock
     if side=='SELL' and sl is not None and cp >= sl:
         lock['freshness_status']='INVALIDATED_BEFORE_ALERT'; return 'INVALIDATED',lock
 
-    # If price moved back through the far side of the entry zone after confirmation,
-    # the closed-M1 trigger is no longer current even if structural SL has not yet broken.
+    # Adverse departure through the zone means the trigger is no longer current.
     if side=='BUY' and cp < lo:
         lock['freshness_status']='LEFT_ENTRY_ADVERSE'; return 'MISSED',lock
     if side=='SELL' and cp > hi:
         lock['freshness_status']='LEFT_ENTRY_ADVERSE'; return 'MISSED',lock
 
-    # Allow only a small amount of favorable movement beyond the zone. Once price has
-    # already travelled >= configured fraction toward TP1, label it MISSED instead of
-    # encouraging the user to chase a delayed notification.
+    # Favorable departure: allow only a small fraction of the path to TP1.
     progress=0.0
-    if side=='BUY' and cp > hi and tp1 is not None and tp1 > hi:
-        progress=(cp-hi)/(tp1-hi)
-    elif side=='SELL' and cp < lo and tp1 is not None and tp1 < lo:
-        progress=(lo-cp)/(lo-tp1)
+    if side=='BUY' and cp > hi and tp1 is not None and tp1 > hi: progress=(cp-hi)/(tp1-hi)
+    elif side=='SELL' and cp < lo and tp1 is not None and tp1 < lo: progress=(lo-cp)/(lo-tp1)
     lock['trigger_progress_to_tp1']=round(max(0.0,progress),4)
     if progress >= V414_TRIGGER_MAX_PROGRESS:
         lock['freshness_status']='MISSED_FAVORABLE_MOVE'; return 'MISSED',lock
@@ -3185,23 +3236,24 @@ def _v414_trigger_freshness(out, event, lock):
     lock['freshness_status']='ENTRY_AVAILABLE'
     return event,lock
 
-
 def _v414_message(event, lock, opp):
     r=(lock or {}).get('risk_plan') or {}; g=(lock or {}).get('selective_grade') or {}
     side=str((lock or {}).get('side') or '').upper(); lo=(lock or {}).get('low'); hi=(lock or {}).get('high')
     source=str((lock or {}).get('source') or 'OPPORTUNITY').replace('_',' ')
-    icons={'LOCKED':'🏆','ARMED':'🟠','TRIGGERED':'🟢','TP1_HIT':'🎯','TP2_HIT':'🎯','STOPPED':'❌','INVALIDATED':'❌','EXPIRED':'⌛','MISSED':'⚫'}
-    lines=[f"{icons.get(event,'📡')} GOLD SCANNER V41.4 — {event.replace('_',' ')}",f"{side} · {source} · Grade {g.get('grade','—')}",f"Zone: {lo}–{hi}"]
+    icons={'LOCKED':'🏆','ARMED':'🟠','TRIGGERED':'🟢','TP1_HIT':'🎯','TP2_HIT':'🎯','STOPPED':'❌','INVALIDATED':'❌','EXPIRED':'⌛','MISSED':'⚫','DATA_STALE':'⚠️'}
+    lines=[f"{icons.get(event,'📡')} GOLD SCANNER V41.4 — {event.replace('_',' ')}",f"Opportunity: {(lock or {}).get('opportunity_id') or (lock or {}).get('id','—')}",f"{side} · {source} · Grade {g.get('grade','—')}",f"Zone: {lo}–{hi}"]
     if r.get('stop_loss') is not None: lines.append(f"SL: {r.get('stop_loss')}")
     if r.get('tp1') is not None: lines.append(f"TP1: {r.get('tp1')}")
     if r.get('tp2') is not None: lines.append(f"TP2: {r.get('tp2')}")
     if (lock or {}).get('alert_current_price') is not None: lines.append(f"Current Gold: {(lock or {}).get('alert_current_price')}")
     if (lock or {}).get('detected_at'): lines.append(f"Detected M1: {(lock or {}).get('detected_at')} (provider time)")
     if (lock or {}).get('alert_checked_at'): lines.append(f"Freshness checked: {(lock or {}).get('alert_checked_at')} UTC")
+    if (lock or {}).get('trigger_age_seconds') is not None: lines.append(f"Trigger age after M1 close: {(lock or {}).get('trigger_age_seconds')}s")
     if event=='LOCKED': lines.append('Strong opportunity found. Waiting for price/trigger.')
     elif event=='ARMED': lines.append('Price is testing the locked area. Waiting for closed-M1 trigger.')
     elif event=='TRIGGERED': lines.append('ENTRY AVAILABLE — trigger is still near the qualified entry area. Do not chase if your broker price has already moved materially away.')
-    elif event=='MISSED': lines.append("ENTRY MISSED — DON'T CHASE. The trigger existed, but the latest price had already left the actionable entry area when the alert was checked.")
+    elif event=='MISSED': lines.append("ENTRY MISSED — DON'T CHASE. The trigger is stale or price has already left the actionable entry area. Waiting for a genuinely fresh opportunity.")
+    elif event=='DATA_STALE': lines.append("DATA STALE — NO SIGNAL. Market data was not fresh enough to validate this trigger. Waiting for fresh M1 data.")
     elif event in ('STOPPED','INVALIDATED'): lines.append('Opportunity is no longer valid. Do not reuse the old point.')
     elif event=='TP1_HIT': lines.append('TP1 reached; lifecycle remains active toward TP2 unless invalidated.')
     elif event=='TP2_HIT': lines.append('TP2 reached; opportunity lifecycle completed.')
@@ -3216,12 +3268,12 @@ def v414_monitor_tick(send_alerts=True):
         event,lock,opp=_v414_event(out,state)
         event,lock=_v414_trigger_freshness(out,event,lock)
         # A freshness downgrade completes the stale opportunity so it cannot be reused.
-        if event in ('MISSED','INVALIDATED') and lock and lock.get('freshness_status') in ('UNKNOWN_PRICE','LEFT_ENTRY_ADVERSE','MISSED_FAVORABLE_MOVE','INVALIDATED_BEFORE_ALERT'):
+        if event in ('MISSED','INVALIDATED','DATA_STALE') and lock and lock.get('freshness_status') in ('UNKNOWN_PRICE','LEFT_ENTRY_ADVERSE','MISSED_FAVORABLE_MOVE','INVALIDATED_BEFORE_ALERT','STALE_TRIGGER_AGE','DATA_STALE'):
             state['locked_opportunity']=None
         sent=None
         if event:
             # Deduplicate exact lifecycle event per locked opportunity.
-            event_id=f"{(lock or {}).get('id')}::{event}"
+            event_id=f"{(lock or {}).get('opportunity_id') or (lock or {}).get('id')}::{event}"
             if event_id!=state.get('last_alert_event_id'):
                 sent=_v414_telegram(_v414_message(event,lock,opp)) if send_alerts else {'ok':False,'detail':'alerts disabled for this tick'}
                 if sent.get('ok'):
