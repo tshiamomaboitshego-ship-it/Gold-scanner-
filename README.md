@@ -1,13 +1,31 @@
-# Gold Scanner V41.3 — Selective Opportunity Management
+# Gold Scanner V41.4 — Automatic Opportunity Alerts
 
-Built directly on V41.2 Adaptive Entry + Tracking.
+Built directly on V41.3. Manual Scan remains available.
 
-New in V41.3:
-- Selective evidence grade: A+ / A / B / WATCH. This is a ranking label, not a win probability.
-- Keeps V41.2 LOCKED → ARMED → TRIGGERED lifecycle and fast closed-M1 trigger.
-- Keeps the four approved opportunity families: Pullback, Break + Retest, Sweep + Reclaim, Consolidation Break.
-- Keeps structural SL, TP1 and TP2 attached to the locked opportunity.
-- Adds an optional position-size calculator that requires the user's own equity, risk %, and broker-specific USD P/L per $1 Gold move at 1.00 lot. No contract size is assumed.
-- Adds persistent phone-side opportunity lifecycle logging for later evaluation/Quant work.
+## New in V41.4
+- Telegram phone alerts without storing the bot token in source.
+- Server-side automatic opportunity lifecycle state for A/A+ opportunities.
+- Alerts on LOCKED, ARMED, TRIGGERED, TP1, TP2, STOPPED/INVALIDATED, EXPIRED/MISSED.
+- Duplicate-alert suppression.
+- `/api/alerts/test` test notification endpoint.
+- `/api/alerts/status` status endpoint.
+- `/api/alerts/tick` scheduler-friendly monitor endpoint.
+- Optional built-in background monitor.
 
-Important: A+ does not mean guaranteed or high-probability profit. It only means the current rules found unusually strong evidence relative to other candidates. Position sizing must be verified against the broker's contract size, minimum volume and volume step.
+## Required environment variable
+`TELEGRAM_BOT_TOKEN` = the private token from BotFather. Never put it in source or share it.
+
+The configured default chat id is `6747412656`. You can override it with:
+`TELEGRAM_CHAT_ID=...`
+
+## Automatic monitor
+Set:
+`AUTO_MONITOR_ENABLED=true`
+`AUTO_MONITOR_SECONDS=300`
+
+A sleeping/free host cannot wake itself. For a host that sleeps, keep `AUTO_MONITOR_ENABLED=false` and call `POST /api/alerts/tick` from a reliable external scheduler. Optionally protect it with `MONITOR_TICK_SECRET` and send that value in the `X-Monitor-Secret` header.
+
+Monitor frequency consumes market-data API quota. Choose the interval to fit your data-provider limits. Manual Scan continues to work regardless of automatic monitoring.
+
+## Important
+Grades rank evidence, not win probability. Notifications are decision-support alerts, not guaranteed profitable signals and do not execute trades.

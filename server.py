@@ -2828,7 +2828,7 @@ def live_scan():
         out=data_only_result(mtf,data_status,data_note,'NOT_USED_LIVE_DATA_MODE')
         out['mode']='LIVE_DATA_CONTEXT'
         out['gemini_status']='NOT_USED'
-        out['scanner_version']='V41.3 SELECTIVE OPPORTUNITY MANAGEMENT'
+        out['scanner_version']='V41.4 AUTOMATIC OPPORTUNITY ALERTS'
         out['market_context']=market_context
         out['event_risk']=market_context.get('event_risk','UNKNOWN')
         out['data_only_summary']=out['data_only_summary'].replace('V26 maps','V30 maps')
@@ -3027,3 +3027,189 @@ def replay():
     except Exception as e:return jsonify({'error':'replay_failed','detail':str(e)[:800]}),500
 
 if __name__=='__main__':app.run(host='0.0.0.0',port=int(os.environ.get('PORT',8080)))
+
+# ================= V41.4 AUTOMATIC OPPORTUNITY ALERTS =================
+# Telegram token is NEVER stored in source. Configure TELEGRAM_BOT_TOKEN privately.
+# The chat id is not a credential; it can be overridden with TELEGRAM_CHAT_ID.
+import threading
+
+V414_STATE_FILE = os.environ.get('V414_STATE_FILE', '/tmp/gold_scanner_v414_monitor.json')
+V414_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '6747412656')
+V414_MONITOR_SECONDS = max(60, int(os.environ.get('AUTO_MONITOR_SECONDS', '300') or 300))
+V414_AUTO_ENABLED = str(os.environ.get('AUTO_MONITOR_ENABLED', 'false')).lower() in ('1','true','yes','on')
+_v414_monitor_thread = None
+_v414_monitor_lock = threading.Lock()
+
+
+def _v414_load_state():
+    try:
+        with open(V414_STATE_FILE, 'r', encoding='utf-8') as f:
+            x=json.load(f)
+            return x if isinstance(x,dict) else {}
+    except Exception:
+        return {}
+
+
+def _v414_save_state(x):
+    try:
+        tmp=V414_STATE_FILE+'.tmp'
+        with open(tmp,'w',encoding='utf-8') as f: json.dump(x,f,ensure_ascii=False,indent=2)
+        os.replace(tmp,V414_STATE_FILE)
+    except Exception:
+        pass
+
+
+def _v414_telegram(text):
+    token=(os.environ.get('TELEGRAM_BOT_TOKEN') or '').strip()
+    chat=(os.environ.get('TELEGRAM_CHAT_ID') or V414_CHAT_ID or '').strip()
+    if not token or not chat:
+        return {'ok':False,'detail':'TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not configured'}
+    url=f'https://api.telegram.org/bot{token}/sendMessage'
+    data=urllib.parse.urlencode({'chat_id':chat,'text':text,'disable_web_page_preview':'true'}).encode()
+    try:
+        req=urllib.request.Request(url,data=data,method='POST',headers={'Content-Type':'application/x-www-form-urlencoded','User-Agent':'GoldScannerV41.4/1.0'})
+        with urllib.request.urlopen(req,timeout=12) as r:
+            body=json.loads(r.read().decode('utf-8','replace'))
+        return {'ok':bool(body.get('ok')),'detail':'sent' if body.get('ok') else str(body)[:300]}
+    except Exception as e:
+        return {'ok':False,'detail':str(e)[:300]}
+
+
+def _v414_scan(locked=None):
+    """Run the same deterministic live-data pipeline as the manual Scan button."""
+    mtf,data_status,data_note=fetch_multitimeframe()
+    if data_status not in ('LIVE_DATA','PARTIAL_DATA'):
+        raise RuntimeError('market_data_unavailable: '+str(data_note))
+    market_context=build_market_context(mtf)
+    apply_market_context(mtf,market_context)
+    filter_fresh_candidates(mtf)
+    mtf['M5']['metrics']['reaction_engine']=build_reaction_engine(mtf['M5']['metrics'])
+    mtf['M5']['metrics']['m1_precision']=build_m1_precision_engine(mtf, market_context.get('vwap_context',{}))
+    p=mtf['M5']['metrics'].get('m1_precision') or {}
+    p['hybrid_opportunity']=v412_locked_opportunity_tracker((mtf.get('M1') or {}).get('metrics') or {}, locked, p.get('hybrid_opportunity') or {})
+    mtf['M5']['metrics']['m1_precision']=p
+    apply_microstructure_context(mtf,market_context.get('vwap_context',{}),market_context.get('orderflow_context',{}))
+    out=data_only_result(mtf,data_status,data_note,'NOT_USED_LIVE_DATA_MODE')
+    out['mode']='LIVE_DATA_CONTEXT'; out['gemini_status']='NOT_USED'; out['scanner_version']='V41.4 AUTOMATIC OPPORTUNITY ALERTS'
+    out['market_context']=market_context; out['event_risk']=market_context.get('event_risk','UNKNOWN')
+    return out
+
+
+def _v414_new_lock(out):
+    p=out.get('m1_precision') or ((out.get('multi_timeframe_metrics') or {}).get('M5') or {}).get('m1_precision') or {}
+    o=p.get('hybrid_opportunity') or {}; x=o.get('best_point') or {}; g=x.get('selective_grade') or {}; r=x.get('risk_plan') or {}
+    # Automatic alerts are intentionally selective. Manual Scan still shows all grades.
+    if str(g.get('grade') or '') not in ('A','A+'):
+        return None
+    if not x or str(o.get('state') or '') not in ('DEVELOPING','ARMED','CONFIRMING','ENTRY_QUALIFIED'):
+        return None
+    t=((out.get('price_meta') or {}).get('latest_m1_time')) or datetime.now(timezone.utc).isoformat()
+    return {'active':True,'id':f"{x.get('side')}-{x.get('low')}-{x.get('high')}-{t}",
+            'side':x.get('side'),'low':x.get('low'),'high':x.get('high'),'source':x.get('source') or 'OPPORTUNITY',
+            'best_point_score':x.get('best_point_score'),'structural_score':x.get('structural_score'),'risk_plan':r,
+            'selective_grade':g,'created_at':t,'last_seen':t,
+            'status':'TRIGGERED' if o.get('state')=='ENTRY_QUALIFIED' else ('ARMED' if o.get('state')=='ARMED' else 'LOCKED')}
+
+
+def _v414_event(out, state):
+    p=out.get('m1_precision') or ((out.get('multi_timeframe_metrics') or {}).get('M5') or {}).get('m1_precision') or {}
+    o=p.get('hybrid_opportunity') or {}; life=o.get('locked_lifecycle') or {}; x=o.get('best_point') or {}
+    lock=state.get('locked_opportunity')
+    if not lock:
+        lock=_v414_new_lock(out)
+        if lock:
+            state['locked_opportunity']=lock
+            return 'LOCKED',lock,o
+        return None,None,o
+    status=str(life.get('status') or lock.get('status') or 'LOCKED').upper()
+    previous=str(state.get('last_alert_status') or '').upper()
+    # Preserve lifecycle state server-side across automatic scans.
+    lock['status']=status; lock['last_seen']=datetime.now(timezone.utc).isoformat(); state['locked_opportunity']=lock
+    if status in ('STOPPED','INVALIDATED','TP2_HIT','EXPIRED','MISSED'):
+        state['locked_opportunity']=None
+    if status!=previous and status in ('ARMED','TRIGGERED','TP1_HIT','TP2_HIT','STOPPED','INVALIDATED','EXPIRED','MISSED'):
+        return status,lock,o
+    return None,lock,o
+
+
+def _v414_message(event, lock, opp):
+    r=(lock or {}).get('risk_plan') or {}; g=(lock or {}).get('selective_grade') or {}
+    side=str((lock or {}).get('side') or '').upper(); lo=(lock or {}).get('low'); hi=(lock or {}).get('high')
+    source=str((lock or {}).get('source') or 'OPPORTUNITY').replace('_',' ')
+    icons={'LOCKED':'🏆','ARMED':'🟠','TRIGGERED':'🟢','TP1_HIT':'🎯','TP2_HIT':'🎯','STOPPED':'❌','INVALIDATED':'❌','EXPIRED':'⌛','MISSED':'⚠️'}
+    lines=[f"{icons.get(event,'📡')} GOLD SCANNER V41.4 — {event.replace('_',' ')}",f"{side} · {source} · Grade {g.get('grade','—')}",f"Zone: {lo}–{hi}"]
+    if r.get('stop_loss') is not None: lines.append(f"SL: {r.get('stop_loss')}")
+    if r.get('tp1') is not None: lines.append(f"TP1: {r.get('tp1')}")
+    if r.get('tp2') is not None: lines.append(f"TP2: {r.get('tp2')}")
+    if event=='LOCKED': lines.append('Strong opportunity found. Waiting for price/trigger.')
+    elif event=='ARMED': lines.append('Price is testing the locked area. Waiting for closed-M1 trigger.')
+    elif event=='TRIGGERED': lines.append('Fast closed-M1 trigger detected. This is not a guarantee of profit.')
+    elif event in ('STOPPED','INVALIDATED'): lines.append('Opportunity is no longer valid. Do not reuse the old point.')
+    elif event=='TP1_HIT': lines.append('TP1 reached; lifecycle remains active toward TP2 unless invalidated.')
+    elif event=='TP2_HIT': lines.append('TP2 reached; opportunity lifecycle completed.')
+    return '\n'.join(lines)
+
+
+def v414_monitor_tick(send_alerts=True):
+    """One automatic monitor cycle. Safe to call from a cron/scheduler endpoint or background loop."""
+    with _v414_monitor_lock:
+        state=_v414_load_state(); locked=state.get('locked_opportunity')
+        out=_v414_scan(locked)
+        event,lock,opp=_v414_event(out,state)
+        sent=None
+        if event:
+            # Deduplicate exact lifecycle event per locked opportunity.
+            event_id=f"{(lock or {}).get('id')}::{event}"
+            if event_id!=state.get('last_alert_event_id'):
+                sent=_v414_telegram(_v414_message(event,lock,opp)) if send_alerts else {'ok':False,'detail':'alerts disabled for this tick'}
+                if sent.get('ok'):
+                    state['last_alert_event_id']=event_id; state['last_alert_status']=event
+        state['last_tick']=datetime.now(timezone.utc).isoformat(); state['last_error']=None
+        state['last_market_price']=out.get('current_price'); _v414_save_state(state)
+        return {'ok':True,'event':event,'telegram':sent,'state':state,'scanner_version':'V41.4 AUTOMATIC OPPORTUNITY ALERTS'}
+
+
+def _v414_loop():
+    while True:
+        try:
+            v414_monitor_tick(send_alerts=True)
+        except Exception as e:
+            s=_v414_load_state(); s['last_error']=str(e)[:500]; s['last_tick']=datetime.now(timezone.utc).isoformat(); _v414_save_state(s)
+        time.sleep(V414_MONITOR_SECONDS)
+
+
+def _v414_start_thread_once():
+    global _v414_monitor_thread
+    if not V414_AUTO_ENABLED: return
+    if _v414_monitor_thread and _v414_monitor_thread.is_alive(): return
+    _v414_monitor_thread=threading.Thread(target=_v414_loop,name='v414-auto-monitor',daemon=True)
+    _v414_monitor_thread.start()
+
+
+@app.post('/api/alerts/test')
+def v414_test_alert():
+    result=_v414_telegram('✅ Gold Scanner V41.4 connected. Automatic opportunity alerts are ready.')
+    return jsonify(result), (200 if result.get('ok') else 503)
+
+
+@app.route('/api/alerts/status',methods=['GET'])
+def v414_alert_status():
+    s=_v414_load_state()
+    return jsonify({'scanner_version':'V41.4 AUTOMATIC OPPORTUNITY ALERTS','telegram_configured':bool((os.environ.get('TELEGRAM_BOT_TOKEN') or '').strip() and (os.environ.get('TELEGRAM_CHAT_ID') or V414_CHAT_ID).strip()),
+                    'auto_monitor_enabled':V414_AUTO_ENABLED,'monitor_seconds':V414_MONITOR_SECONDS,'state':s})
+
+
+@app.post('/api/alerts/tick')
+def v414_alert_tick():
+    # Optional shared secret protects externally scheduled ticks when configured.
+    secret=(os.environ.get('MONITOR_TICK_SECRET') or '').strip()
+    supplied=(request.headers.get('X-Monitor-Secret') or request.args.get('secret') or '').strip()
+    if secret and supplied!=secret:
+        return jsonify({'ok':False,'detail':'unauthorized'}),401
+    try:
+        return jsonify(v414_monitor_tick(send_alerts=True))
+    except Exception as e:
+        return jsonify({'ok':False,'detail':str(e)[:500]}),500
+
+
+_v414_start_thread_once()
