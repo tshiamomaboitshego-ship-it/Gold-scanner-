@@ -29,3 +29,8 @@ Monitor frequency consumes market-data API quota. Choose the interval to fit you
 
 ## Important
 Grades rank evidence, not win probability. Notifications are decision-support alerts, not guaranteed profitable signals and do not execute trades.
+
+## V41.4 stale-trigger protection (2026-09-28)
+Automatic TRIGGERED alerts now perform a final current-price freshness check immediately before Telegram delivery. If price has already crossed structural invalidation, the alert becomes INVALIDATED. If price has moved back through the entry zone or has already travelled too far toward TP1, the alert becomes MISSED — DON'T CHASE. Trigger alerts also include current Gold price, provider M1 detection time, and the UTC freshness-check time.
+
+The default maximum favorable progress before a trigger is considered missed is 15% of the distance from the entry-zone edge to TP1. It can be changed with the optional Render environment variable `V414_TRIGGER_MAX_PROGRESS` (accepted range 0.05–0.50). This is a stale-alert guard, not a profitability estimate.
