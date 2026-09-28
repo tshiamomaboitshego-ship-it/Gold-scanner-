@@ -187,7 +187,9 @@ def image_part(data_url):
 _DATA_CACHE = {}
 _DATA_CACHE_FILE = os.environ.get('MARKET_DATA_CACHE_FILE','/tmp/gold_scanner_market_cache.json')
 _PROVIDER_BACKOFF_FILE = os.environ.get('MARKET_DATA_BACKOFF_FILE','/tmp/gold_scanner_provider_backoff.json')
-_CACHE_TTLS = {'1min':55, '5min':240, '15min':720, '1h':3000, 'price':60, 'DXY':720, 'FRED':21600, 'CFTC':43200, 'futures':720, 'vwap':120, 'orderflow':30}
+_CACHE_TTLS = {'1min':58, '5min':240, '15min':720, '1h':3000, 'price':60, 'DXY':720, 'FRED':21600, 'CFTC':43200, 'futures':720, 'vwap':120, 'orderflow':30}
+_M1_PRIMARY_KEY = 'xau:m1_primary'
+_M1_PRIMARY_OUTPUTSIZE = max(1800, min(5000, int(os.environ.get('M1_PRIMARY_OUTPUTSIZE','3000') or 3000)))
 
 def _disk_cache_load():
     try:
@@ -258,34 +260,57 @@ def fetch_tf(interval, outputsize):
         if stale is not None:return stale,'STALE_CACHE',f'Provider unavailable/rate-limited; using cached {interval} data · age {stale_age}s · {str(e)[:120]}'
         return None,'DATA_UNAVAILABLE',str(e)[:220]
 
-def fetch_reference_price():
-    """Fresh provider reference when affordable; cached fallback prevents 429 storms."""
-    key=os.environ.get('TWELVE_DATA_API_KEY','').strip()
-    if not key:return None,'UNAVAILABLE','TWELVE_DATA_API_KEY not configured'
-    cached,age=_cache_get('xau:price')
-    if cached is not None:return cached,'CACHED_REFERENCE',f'Cached reference · age {age}s'
-    # Avoid a fifth provider request every monitor cycle: the newest M1 close is
-    # sufficiently fresh for lifecycle proximity checks and is already paid for.
-    m1, m1_age=_cache_get('xau:1min:180',allow_stale=True)
-    if m1 and m1_age is not None and m1_age<=90:
-        price=float(m1[-1]['c']); _cache_put('xau:price',price,_CACHE_TTLS['price'])
-        return price,'M1_REFERENCE',f'Latest M1 close reference · market-cache age {m1_age}s'
+def _resample_m1(candles, minutes):
+    """Build CLOSED higher-timeframe OHLC from the shared M1 series locally.
+    Incomplete current buckets are dropped so derived context never pretends a forming bar is closed.
+    """
+    if not candles or minutes <= 1:
+        return list(candles or [])
+    buckets={}
+    now=datetime.now(timezone.utc)
+    for x in candles:
+        try:
+            dt=datetime.fromisoformat(str(x['t']).replace('T',' ')).replace(tzinfo=timezone.utc)
+            epoch=int(dt.timestamp())
+            b=(epoch//(minutes*60))*(minutes*60)
+            z=buckets.setdefault(b, {'t':datetime.fromtimestamp(b,timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
+                                     'o':float(x['o']),'h':float(x['h']),'l':float(x['l']),'c':float(x['c'])})
+            z['h']=max(z['h'],float(x['h'])); z['l']=min(z['l'],float(x['l'])); z['c']=float(x['c'])
+            if x.get('v') is not None:z['v']=float(z.get('v',0))+float(x.get('v') or 0)
+        except Exception:
+            continue
+    current_bucket=(int(now.timestamp())//(minutes*60))*(minutes*60)
+    return [buckets[k] for k in sorted(buckets) if k < current_bucket]
+
+def _get_primary_m1():
+    """One-provider-call market-data engine. All scanner timeframes derive from this shared M1 store."""
+    cached,age=_cache_get(_M1_PRIMARY_KEY)
+    if cached is not None:
+        return cached,'CACHED_DATA',f'Shared M1 store · cache age {age}s'
     wait=_provider_backoff_remaining()
     if wait>0:
-        stale,stale_age=_cache_get('xau:price',allow_stale=True)
-        if stale is not None:return stale,'STALE_REFERENCE',f'Provider cooldown active ({wait:.0f}s); cached reference age {stale_age}s'
-        return None,'UNAVAILABLE',f'Provider cooldown active ({wait:.0f}s); no reference available'
-    q=urllib.parse.urlencode({'symbol':'XAU/USD','apikey':key})
-    try:
-        with urllib.request.urlopen('https://api.twelvedata.com/price?'+q, timeout=10) as resp:d=json.loads(resp.read().decode())
-        if d.get('status')=='error':raise RuntimeError(d.get('message','Twelve Data price error'))
-        price=float(d.get('price')); _cache_put('xau:price',price,_CACHE_TTLS['price'])
-        return price,'LIVE_REFERENCE','Twelve Data /price reference'
-    except Exception as e:
-        if _is_rate_error(e):_provider_set_backoff(75)
-        stale,stale_age=_cache_get('xau:price',allow_stale=True)
-        if stale is not None:return stale,'STALE_REFERENCE',f'Using cached reference · age {stale_age}s · {str(e)[:100]}'
-        return None,'UNAVAILABLE',str(e)[:220]
+        stale,stale_age=_cache_get(_M1_PRIMARY_KEY,allow_stale=True)
+        if stale is not None:
+            return stale,'STALE_CACHE',f'Provider cooldown active ({wait:.0f}s); shared M1 store age {stale_age}s'
+        return None,'RATE_LIMIT_BACKOFF',f'Provider cooldown active ({wait:.0f}s); waiting to bootstrap shared M1 store'
+    c,st,note=fetch_tf('1min',_M1_PRIMARY_OUTPUTSIZE)
+    if c:
+        _cache_put(_M1_PRIMARY_KEY,c,_CACHE_TTLS['1min'])
+        # Canonical aliases let older lifecycle/reference code reuse the same payload without another request.
+        _cache_put('xau:1min:180',c[-180:],_CACHE_TTLS['1min'])
+        _cache_put('xau:price',float(c[-1]['c']),_CACHE_TTLS['price'])
+    return c,st,note
+
+def fetch_reference_price():
+    """Reference price from the shared M1 store first; /price is fallback only."""
+    m1,m1_age=_cache_get(_M1_PRIMARY_KEY,allow_stale=True)
+    if m1 and m1_age is not None and m1_age<=120:
+        price=float(m1[-1]['c']); _cache_put('xau:price',price,_CACHE_TTLS['price'])
+        return price,'M1_REFERENCE',f'Shared M1 close reference · cache age {m1_age}s'
+    cached,age=_cache_get('xau:price',allow_stale=True)
+    if cached is not None and age is not None and age<=120:
+        return cached,'CACHED_REFERENCE',f'Cached reference · age {age}s'
+    return None,'UNAVAILABLE','No sufficiently fresh shared M1 reference available'
 
 def candle_age_minutes(candles):
     if not candles:return None
@@ -314,27 +339,47 @@ def reanchor_candidates(mtf, reference_price):
         bydist=sorted(arr,key=lambda x:x.get('distance_atr',999)); labels=['SHALLOW','INTERMEDIATE','DEEP','DEEPER']
         for i,z in enumerate(bydist):z['depth']=labels[min(i,len(labels)-1)]
         arr.sort(key=lambda x:(x.get('opportunity_score',0),x.get('rank_score',0)),reverse=True)
-    m5['opportunity_map']={'current_price':round(float(reference_price),3),'market_phase':m5.get('market_phase','UNCLEAR'),'buy_watch_areas':((m5.get('candidate_zones') or {}).get('buy') or []),'sell_watch_areas':((m5.get('candidate_zones') or {}).get('sell') or []),'purpose':'Ahead-of-price watch areas anchored to provider reference price. Not predictions.'}
+    m5['opportunity_map']={'current_price':round(float(reference_price),3),'market_phase':m5.get('market_phase','UNCLEAR'),'buy_watch_areas':((m5.get('candidate_zones') or {}).get('buy') or []),'sell_watch_areas':((m5.get('candidate_zones') or {}).get('sell') or []),'purpose':'Ahead-of-price watch areas anchored to shared M1 reference. Not predictions.'}
 
 def fetch_multitimeframe():
-    specs={'M1':('1min',180),'M5':('5min',240),'M15':('15min',240),'H1':('1h',240)}
-    out={}; statuses=[]; notes=[]
-    for tf,(interval,n) in specs.items():
-        c,st,note=fetch_tf(interval,n); out[tf]={'candles':c,'status':st,'note':note,'metrics':analytics(c) if c else {}}; statuses.append(st); notes.append(tf+': '+note)
-    overall='LIVE_DATA' if all(x in ('LIVE_DATA','CACHED_DATA') for x in statuses) else 'PARTIAL_DATA' if any(x in ('LIVE_DATA','CACHED_DATA','STALE_CACHE') for x in statuses) else statuses[0] if statuses else 'DATA_UNAVAILABLE'
-    if any(x in ('LIVE_DATA','CACHED_DATA','STALE_CACHE') for x in statuses): enrich_mtf_candidates(out)
+    """V42.4 R0 data engine: ONE primary M1 provider request, locally derived M5/M15/H1.
+    This prevents four independent timeframe calls from exhausting the free provider budget.
+    """
+    m1,st,note=_get_primary_m1()
+    out={}; notes=[]
+    if not m1:
+        for tf in ('M1','M5','M15','H1'):
+            out[tf]={'candles':None,'status':st,'note':note,'metrics':{}}
+            notes.append(tf+': '+note)
+        ref,ref_status,ref_note=fetch_reference_price()
+        out['_price_meta']={'reference_price':ref,'reference_status':ref_status,'reference_note':ref_note,
+            'latest_m5_time':None,'m5_feed_age_minutes':None,'m5_feed_stale':True,
+            'latest_m1_time':None,'m1_feed_age_minutes':None,'m1_feed_stale':True,
+            'phase1_test_eligible':False,'market_data_inactive':True,
+            'market_data_note':'DATA WAIT — shared M1 store is not available yet.',
+            'data_engine':'V42.4_R0_M1_SHARED','provider_requests_this_scan':0 if st=='RATE_LIMIT_BACKOFF' else 1}
+        return out,st,' | '.join(notes)+' | PRICE: '+ref_note
+    frames={'M1':m1[-180:], 'M5':_resample_m1(m1,5)[-240:], 'M15':_resample_m1(m1,15)[-240:], 'H1':_resample_m1(m1,60)[-240:]}
+    for tf,c in frames.items():
+        status=st if tf=='M1' else ('DERIVED_DATA' if c else 'DATA_UNAVAILABLE')
+        n=note if tf=='M1' else f'Locally derived {tf} from shared M1 store · {len(c)} closed bars'
+        out[tf]={'candles':c,'status':status,'note':n,'metrics':analytics(c) if c else {}}
+        notes.append(tf+': '+n)
+    if any(frames.values()): enrich_mtf_candidates(out)
     ref,ref_status,ref_note=fetch_reference_price()
     if ref is not None: reanchor_candidates(out,ref)
-    m5c=(out.get('M5') or {}).get('candles') or []
-    m1c=(out.get('M1') or {}).get('candles') or []
-    age=candle_age_minutes(m5c)
-    m1_age=candle_age_minutes(m1c)
-    # Phase-1 data-quality guard: this does not alter structural point generation.
-    # It only marks scans ineligible for the forward-test log when the execution feeds are stale.
-    m5_stale=bool(age is None or age>8)
-    m1_stale=bool(m1_age is None or m1_age>3)
+    m5c=frames['M5']; m1c=frames['M1']
+    age=candle_age_minutes(m5c); m1_age=candle_age_minutes(m1c)
+    m5_stale=bool(age is None or age>8); m1_stale=bool(m1_age is None or m1_age>3)
     test_eligible=not (m5_stale or m1_stale)
-    out['_price_meta']={'reference_price':round(ref,3) if ref is not None else None,'reference_status':ref_status,'reference_note':ref_note,'latest_m5_time':m5c[-1]['t'] if m5c else None,'m5_feed_age_minutes':age,'m5_feed_stale':m5_stale,'latest_m1_time':m1c[-1]['t'] if m1c else None,'m1_feed_age_minutes':m1_age,'m1_feed_stale':m1_stale,'phase1_test_eligible':test_eligible,'market_data_inactive':bool(age is not None and age>12),'market_data_note':'MARKET / DATA FEED INACTIVE — analysis uses last available closed candles; lifecycle resumes with fresh M5 data.' if age is not None and age>12 else 'Fresh M5 data available.'}
+    overall='LIVE_DATA' if st in ('LIVE_DATA','CACHED_DATA') and test_eligible else 'PARTIAL_DATA'
+    out['_price_meta']={'reference_price':round(ref,3) if ref is not None else None,'reference_status':ref_status,'reference_note':ref_note,
+        'latest_m5_time':m5c[-1]['t'] if m5c else None,'m5_feed_age_minutes':age,'m5_feed_stale':m5_stale,
+        'latest_m1_time':m1c[-1]['t'] if m1c else None,'m1_feed_age_minutes':m1_age,'m1_feed_stale':m1_stale,
+        'phase1_test_eligible':test_eligible,'market_data_inactive':bool(m1_age is None or m1_age>5),
+        'market_data_note':'Fresh shared M1 data available; M5/M15/H1 derived locally.' if test_eligible else 'Shared data available but execution feed is stale; no fresh trigger should be issued.',
+        'data_engine':'V42.4_R0_M1_SHARED','provider_requests_this_scan':0 if st in ('CACHED_DATA','STALE_CACHE') else 1,
+        'derived_timeframes':['M5','M15','H1'],'primary_store_bars':len(m1)}
     return out,overall,' | '.join(notes)+' | PRICE: '+ref_note
 
 def analytics(c):
@@ -2892,12 +2937,24 @@ def live_scan():
         out=data_only_result(mtf,data_status,data_note,'NOT_USED_LIVE_DATA_MODE')
         out['mode']='LIVE_DATA_CONTEXT'
         out['gemini_status']='NOT_USED'
-        out['scanner_version']='V42.3 CONTEXT INTELLIGENCE SUITE'
+        out['scanner_version']='V42.4 R0 MARKET DATA ENGINE'
         out['market_context']=market_context
         out['event_risk']=market_context.get('event_risk','UNKNOWN')
         out['v42_early_map']=v42_early_location_map(out)
         out['data_only_summary']=out['data_only_summary'].replace('V26 maps','V30 maps')
         out['note']='V39 combines the forward-only Quant Engine with mathematical level clustering, pullback geometry, micro-zone refinement, liquidity path/obstacle analysis and evidence redundancy control. Statistics never create or move a zone. VWAP/AVWAP remain optional external context when unavailable server-side.'
+        # Optional Telegram report uses the ALREADY-COMPUTED scan: no extra provider request.
+        if payload.get('notify_telegram'):
+            secret=(os.environ.get('MONITOR_TICK_SECRET') or '').strip()
+            supplied=(request.headers.get('X-Monitor-Secret') or '').strip()
+            if secret and supplied!=secret:
+                out['manual_telegram']={'ok':False,'detail':'Monitor Secret not accepted; market scan completed.'}
+            else:
+                try:
+                    sent=_v414_telegram(_v423_scan_report_message(out))
+                    out['manual_telegram']={'ok':bool(sent.get('ok')),'detail':str(sent.get('detail') or '')[:150]}
+                except Exception as notify_error:
+                    out['manual_telegram']={'ok':False,'detail':str(notify_error)[:150]}
         return jsonify(out)
     except Exception as e:
         return jsonify({'error':'live_scan_failed','detail':str(e)[:1200]}),500
@@ -3276,7 +3333,7 @@ import threading
 V414_STATE_FILE = os.environ.get('V414_STATE_FILE', '/tmp/gold_scanner_v414_monitor.json')
 V414_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '6747412656')
 V414_MONITOR_SECONDS = max(60, int(os.environ.get('AUTO_MONITOR_SECONDS', '300') or 300))
-V414_AUTO_ENABLED = str(os.environ.get('AUTO_MONITOR_ENABLED', 'false')).lower() in ('1','true','yes','on')
+V414_AUTO_ENABLED = False  # Manual-only build: no background scanner, regardless of environment
 # A TRIGGERED alert is considered stale after price has moved this fraction of the way from the entry zone to TP1.
 # Override in Render with V414_TRIGGER_MAX_PROGRESS (e.g. 0.15 = 15%).
 V414_TRIGGER_MAX_PROGRESS = min(0.50, max(0.03, float(os.environ.get('V414_TRIGGER_MAX_PROGRESS', '0.10') or 0.10)))
@@ -3315,7 +3372,7 @@ def _v414_telegram(text):
     url=f'https://api.telegram.org/bot{token}/sendMessage'
     data=urllib.parse.urlencode({'chat_id':chat,'text':text,'disable_web_page_preview':'true'}).encode()
     try:
-        req=urllib.request.Request(url,data=data,method='POST',headers={'Content-Type':'application/x-www-form-urlencoded','User-Agent':'GoldScannerV42.3.1/1.0'})
+        req=urllib.request.Request(url,data=data,method='POST',headers={'Content-Type':'application/x-www-form-urlencoded','User-Agent':'GoldScannerV42.4/1.0'})
         with urllib.request.urlopen(req,timeout=12) as r:
             body=json.loads(r.read().decode('utf-8','replace'))
         return {'ok':bool(body.get('ok')),'detail':'sent' if body.get('ok') else str(body)[:300]}
@@ -3341,7 +3398,7 @@ def _v414_scan(locked=None):
     out['mode']='LIVE_DATA_CONTEXT'; out['gemini_status']='NOT_USED'; out['scanner_version']='V41.4 AUTOMATIC OPPORTUNITY ALERTS'
     out['market_context']=market_context; out['event_risk']=market_context.get('event_risk','UNKNOWN')
     out['v42_early_map']=v42_early_location_map(out)
-    out['scanner_version']='V42.3 CONTEXT INTELLIGENCE SUITE'
+    out['scanner_version']='V42.4 R0 MARKET DATA ENGINE'
     return out
 
 
@@ -3578,7 +3635,7 @@ def _v415_passive_regime(out):
 def _v415_observation(out=None,event=None,lock=None,state=None,status='SCANNED',detail=None):
     now=datetime.now(timezone.utc).isoformat()
     state=state or {}
-    row={'observed_at':now,'scanner_version':'V42.3.1 TELEGRAM SCAN REPORT','status':status,'event':event,
+    row={'observed_at':now,'scanner_version':'V42.4 R0 MARKET DATA ENGINE','status':status,'event':event,
          'detail':detail,'opportunity_id':(lock or {}).get('opportunity_id'),
          'locked_status':(lock or {}).get('status'),'side':(lock or {}).get('side'),
          'zone_low':(lock or {}).get('low'),'zone_high':(lock or {}).get('high')}
@@ -3649,7 +3706,7 @@ def v414_monitor_tick(send_alerts=True):
             state['last_tick']=datetime.now(timezone.utc).isoformat(); state['last_error']=None
             _v414_save_state(state)
             _v415_append(_v415_observation(event='AUTO_OFF',state=state,status='PAUSED'))
-            return {'ok':True,'event':'AUTO_OFF','telegram':None,'state':state,'scanner_version':'V42.3.1 TELEGRAM SCAN REPORT'}
+            return {'ok':True,'event':'AUTO_OFF','telegram':None,'state':state,'scanner_version':'V42.4 R0 MARKET DATA ENGINE'}
         locked=state.get('locked_opportunity')
         try:
             out=_v414_scan(locked)
@@ -3665,7 +3722,7 @@ def v414_monitor_tick(send_alerts=True):
                 _v414_save_state(state)
                 _v415_append(_v415_observation(event='DATA_WAIT',state=state,status='DATA_WAIT',detail=detail[:500]))
                 return {'ok':True,'event':'DATA_WAIT','telegram':None,'detail':detail[:500],
-                        'state':state,'scanner_version':'V42.3.1 TELEGRAM SCAN REPORT'}
+                        'state':state,'scanner_version':'V42.4 R0 MARKET DATA ENGINE'}
             raise
         event,lock,opp=_v414_event(out,state)
         event,lock=_v414_trigger_freshness(out,event,lock)
@@ -3685,7 +3742,7 @@ def v414_monitor_tick(send_alerts=True):
         state['last_tick']=datetime.now(timezone.utc).isoformat(); state['last_error']=None
         state['last_market_price']=out.get('current_price'); _v414_save_state(state)
         _v415_append(_v415_observation(out=out,event=event,lock=lock,state=state,status='SCANNED'))
-        return {'ok':True,'event':event,'telegram':sent,'state':state,'scanner_version':'V42.3.1 TELEGRAM SCAN REPORT'}
+        return {'ok':True,'event':event,'telegram':sent,'state':state,'scanner_version':'V42.4 R0 MARKET DATA ENGINE'}
 
 
 def _v414_loop():
@@ -3714,7 +3771,7 @@ def v414_test_alert():
 @app.route('/api/alerts/status',methods=['GET'])
 def v414_alert_status():
     s=_v414_load_state()
-    return jsonify({'scanner_version':'V42.3.1 TELEGRAM SCAN REPORT','telegram_configured':bool((os.environ.get('TELEGRAM_BOT_TOKEN') or '').strip() and (os.environ.get('TELEGRAM_CHAT_ID') or V414_CHAT_ID).strip()),
+    return jsonify({'scanner_version':'V42.4 R0 MARKET DATA ENGINE','telegram_configured':bool((os.environ.get('TELEGRAM_BOT_TOKEN') or '').strip() and (os.environ.get('TELEGRAM_CHAT_ID') or V414_CHAT_ID).strip()),
                     'auto_monitor_enabled':bool(s.get('user_auto_enabled', True)),'background_thread_enabled':V414_AUTO_ENABLED,'monitor_seconds':V414_MONITOR_SECONDS,'state':s})
 
 
@@ -3753,7 +3810,7 @@ def v415_diagnostics():
     for r in rows:
         key=r.get('event') or 'NO_EVENT'; counts[key]=counts.get(key,0)+1
     latest=rows[-1] if rows else None
-    return jsonify({'ok':True,'scanner_version':'V42.3.1 TELEGRAM SCAN REPORT','passive_only':False,
+    return jsonify({'ok':True,'scanner_version':'V42.4 R0 MARKET DATA ENGINE','passive_only':False,
                     'architecture':'MAP -> LOCK -> WAIT -> REACT -> CONFIRM -> TRIGGER',
                     'count':len(rows),'event_counts':counts,'latest':latest,'observations':rows})
 
@@ -3772,7 +3829,7 @@ def _v423_scan_report_message(out):
     pm=out.get('price_meta') or {}
     regime=_v415_passive_regime(out)
     lines=[
-        '🧠 V42.3 SCAN REPORT — DIAGNOSTIC ONLY',
+        '🧠 V42.4 SCAN REPORT — DIAGNOSTIC ONLY',
         f"Gold: {out.get('current_price','—')}",
         f"Data: {out.get('data_status','—')} · M1 age: {pm.get('m1_feed_age_minutes','—')} min",
         f"Regime: {regime.get('label','—')}",
@@ -3802,11 +3859,11 @@ def v423_scan_report():
         msg=_v423_scan_report_message(out)
         sent=_v414_telegram(msg)
         _v415_append(_v415_observation(out=out,event='DIAGNOSTIC_REPORT',state=state,status='SCANNED'))
-        return jsonify({'ok':bool(sent.get('ok')),'telegram':sent,'report':msg,'scanner_version':'V42.3.1 TELEGRAM SCAN REPORT'}), (200 if sent.get('ok') else 503)
+        return jsonify({'ok':bool(sent.get('ok')),'telegram':sent,'report':msg,'scanner_version':'V42.4 R0 MARKET DATA ENGINE'}), (200 if sent.get('ok') else 503)
     except RuntimeError as e:
         detail=str(e)
         if detail.startswith('market_data_unavailable:'):
-            msg='⚠️ V42.3 SCAN REPORT — DATA WAIT\n'+detail[:700]+'\nNo trade signal was evaluated.'
+            msg='⚠️ V42.4 SCAN REPORT — DATA WAIT\n'+detail[:700]+'\nNo trade signal was evaluated.'
             sent=_v414_telegram(msg)
             return jsonify({'ok':bool(sent.get('ok')),'event':'DATA_WAIT','telegram':sent,'detail':detail[:500]}), (200 if sent.get('ok') else 503)
         raise
@@ -3816,6 +3873,7 @@ def v423_scan_report():
 
 @app.post('/api/alerts/tick')
 def v414_alert_tick():
+    return jsonify({'ok':False,'event':'MANUAL_ONLY','detail':'Automatic tick disabled. Use SCAN MARKET.'}),410
     # Optional shared secret protects externally scheduled ticks when configured.
     secret=(os.environ.get('MONITOR_TICK_SECRET') or '').strip()
     supplied=(request.headers.get('X-Monitor-Secret') or request.args.get('secret') or '').strip()
