@@ -18,3 +18,7 @@ Use the same Render service and environment variables as V41.5. Keep `TELEGRAM_B
 
 ## Diagnostics
 On the scanner page tap **REFRESH LIVE DIAGNOSTICS**. The browser asks for the existing Monitor Secret if it is not already stored locally. Do not share that secret.
+
+
+## V42.3 Context Intelligence Suite
+Adds seven coordinated intelligence layers: proximity, passive market regime, price path, location strength, reaction, liquidity/obstacle, and failure intelligence. These layers rank/map/monitor opportunities; they do not turn weak locations into trades. Final TRIGGERED confirmation remains strict and closed-M1 based.
