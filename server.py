@@ -182,19 +182,52 @@ def image_part(data_url):
     return types.Part.from_bytes(data=base64.b64decode(body), mime_type=mime)
 
 # V30 FINAL: provider-rate protection. Cache is per Render worker and intentionally conservative.
+# Provider cache is persisted in /tmp so gunicorn workers and repeated cron requests
+# share the same recent market data instead of each spending provider credits.
 _DATA_CACHE = {}
+_DATA_CACHE_FILE = os.environ.get('MARKET_DATA_CACHE_FILE','/tmp/gold_scanner_market_cache.json')
+_PROVIDER_BACKOFF_FILE = os.environ.get('MARKET_DATA_BACKOFF_FILE','/tmp/gold_scanner_provider_backoff.json')
 _CACHE_TTLS = {'1min':55, '5min':240, '15min':720, '1h':3000, 'price':60, 'DXY':720, 'FRED':21600, 'CFTC':43200, 'futures':720, 'vwap':120, 'orderflow':30}
+
+def _disk_cache_load():
+    try:
+        with open(_DATA_CACHE_FILE,'r',encoding='utf-8') as f:
+            x=json.load(f)
+            return x if isinstance(x,dict) else {}
+    except Exception:return {}
+
+def _disk_cache_save(cache):
+    try:
+        tmp=_DATA_CACHE_FILE+'.tmp.'+str(os.getpid())
+        with open(tmp,'w',encoding='utf-8') as f:json.dump(cache,f,separators=(',',':'))
+        os.replace(tmp,_DATA_CACHE_FILE)
+    except Exception:pass
+
+def _provider_backoff_remaining():
+    try:
+        with open(_PROVIDER_BACKOFF_FILE,'r',encoding='utf-8') as f:x=json.load(f)
+        return max(0.0,float(x.get('until',0))-time.time())
+    except Exception:return 0.0
+
+def _provider_set_backoff(seconds=75):
+    try:
+        with open(_PROVIDER_BACKOFF_FILE,'w',encoding='utf-8') as f:json.dump({'until':time.time()+seconds},f)
+    except Exception:pass
 
 def _cache_get(key, allow_stale=False):
     item=_DATA_CACHE.get(key)
+    disk=_disk_cache_load().get(key)
+    if disk and (not item or float(disk.get('ts',0))>float(item.get('ts',0))):
+        item=disk; _DATA_CACHE[key]=disk
     if not item:return None, None
-    age=max(0,time.time()-item['ts'])
-    if allow_stale or age<=item['ttl']:
+    age=max(0,time.time()-float(item['ts']))
+    if allow_stale or age<=float(item['ttl']):
         return item['value'], round(age,1)
     return None, round(age,1)
 
 def _cache_put(key, value, ttl):
-    _DATA_CACHE[key]={'value':value,'ts':time.time(),'ttl':ttl}
+    item={'value':value,'ts':time.time(),'ttl':ttl}; _DATA_CACHE[key]=item
+    disk=_disk_cache_load(); disk[key]=item; _disk_cache_save(disk)
     return value
 
 def _is_rate_error(text):
@@ -205,6 +238,11 @@ def fetch_tf(interval, outputsize):
     if not key: return None, 'DATA_UNAVAILABLE', 'TWELVE_DATA_API_KEY not configured'
     ck=f'xau:{interval}:{outputsize}'; cached,age=_cache_get(ck)
     if cached is not None:return cached,'CACHED_DATA',f'Cached Twelve Data XAU/USD {interval} · cache age {age}s'
+    wait=_provider_backoff_remaining()
+    if wait>0:
+        stale,stale_age=_cache_get(ck,allow_stale=True)
+        if stale is not None:return stale,'STALE_CACHE',f'Provider cooldown active ({wait:.0f}s); using cached {interval} data · age {stale_age}s'
+        return None,'RATE_LIMIT_BACKOFF',f'Provider cooldown active ({wait:.0f}s); no cached {interval} data yet'
     q=urllib.parse.urlencode({'symbol':'XAU/USD','interval':interval,'outputsize':outputsize,'timezone':'UTC','apikey':key})
     try:
         with urllib.request.urlopen('https://api.twelvedata.com/time_series?'+q, timeout=10) as resp:d=json.loads(resp.read().decode())
@@ -215,6 +253,7 @@ def fetch_tf(interval, outputsize):
         _cache_put(ck,candles,_CACHE_TTLS.get(interval,300))
         return candles,'LIVE_DATA',f'Twelve Data XAU/USD {interval}'
     except Exception as e:
+        if _is_rate_error(e):_provider_set_backoff(75)
         stale,stale_age=_cache_get(ck,allow_stale=True)
         if stale is not None:return stale,'STALE_CACHE',f'Provider unavailable/rate-limited; using cached {interval} data · age {stale_age}s · {str(e)[:120]}'
         return None,'DATA_UNAVAILABLE',str(e)[:220]
@@ -225,6 +264,17 @@ def fetch_reference_price():
     if not key:return None,'UNAVAILABLE','TWELVE_DATA_API_KEY not configured'
     cached,age=_cache_get('xau:price')
     if cached is not None:return cached,'CACHED_REFERENCE',f'Cached reference · age {age}s'
+    # Avoid a fifth provider request every monitor cycle: the newest M1 close is
+    # sufficiently fresh for lifecycle proximity checks and is already paid for.
+    m1, m1_age=_cache_get('xau:1min:180',allow_stale=True)
+    if m1 and m1_age is not None and m1_age<=90:
+        price=float(m1[-1]['c']); _cache_put('xau:price',price,_CACHE_TTLS['price'])
+        return price,'M1_REFERENCE',f'Latest M1 close reference · market-cache age {m1_age}s'
+    wait=_provider_backoff_remaining()
+    if wait>0:
+        stale,stale_age=_cache_get('xau:price',allow_stale=True)
+        if stale is not None:return stale,'STALE_REFERENCE',f'Provider cooldown active ({wait:.0f}s); cached reference age {stale_age}s'
+        return None,'UNAVAILABLE',f'Provider cooldown active ({wait:.0f}s); no reference available'
     q=urllib.parse.urlencode({'symbol':'XAU/USD','apikey':key})
     try:
         with urllib.request.urlopen('https://api.twelvedata.com/price?'+q, timeout=10) as resp:d=json.loads(resp.read().decode())
@@ -232,6 +282,7 @@ def fetch_reference_price():
         price=float(d.get('price')); _cache_put('xau:price',price,_CACHE_TTLS['price'])
         return price,'LIVE_REFERENCE','Twelve Data /price reference'
     except Exception as e:
+        if _is_rate_error(e):_provider_set_backoff(75)
         stale,stale_age=_cache_get('xau:price',allow_stale=True)
         if stale is not None:return stale,'STALE_REFERENCE',f'Using cached reference · age {stale_age}s · {str(e)[:100]}'
         return None,'UNAVAILABLE',str(e)[:220]
