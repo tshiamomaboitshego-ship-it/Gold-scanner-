@@ -2892,9 +2892,10 @@ def live_scan():
         out=data_only_result(mtf,data_status,data_note,'NOT_USED_LIVE_DATA_MODE')
         out['mode']='LIVE_DATA_CONTEXT'
         out['gemini_status']='NOT_USED'
-        out['scanner_version']='V41.4 AUTOMATIC OPPORTUNITY ALERTS'
+        out['scanner_version']='V42 EARLY LOCATION INTELLIGENCE'
         out['market_context']=market_context
         out['event_risk']=market_context.get('event_risk','UNKNOWN')
+        out['v42_early_map']=v42_early_location_map(out)
         out['data_only_summary']=out['data_only_summary'].replace('V26 maps','V30 maps')
         out['note']='V39 combines the forward-only Quant Engine with mathematical level clustering, pullback geometry, micro-zone refinement, liquidity path/obstacle analysis and evidence redundancy control. Statistics never create or move a zone. VWAP/AVWAP remain optional external context when unavailable server-side.'
         return jsonify(out)
@@ -3092,6 +3093,60 @@ def replay():
 
 if __name__=='__main__':app.run(host='0.0.0.0',port=int(os.environ.get('PORT',8080)))
 
+
+# ================= V42 EARLY LOCATION INTELLIGENCE =================
+# Philosophy: map important locations BEFORE price reaches them, then react to what price actually does there.
+# This is deterministic decision support, not a price predictor and not a profitability guarantee.
+
+def v42_early_location_map(out):
+    """Build a forward location map from already-computed M1 candidates.
+    A mapped location must still be ahead of live price. Mapping does not equal an entry.
+    """
+    p=out.get('m1_precision') or ((out.get('multi_timeframe_metrics') or {}).get('M5') or {}).get('m1_precision') or {}
+    m1=((out.get('multi_timeframe_metrics') or {}).get('M1') or {}).get('metrics') or {}
+    try: cp=float(out.get('current_price'))
+    except (TypeError,ValueError): cp=None
+    try: atr=float(m1.get('atr14') or 0)
+    except (TypeError,ValueError): atr=0.0
+    pool=list(p.get('ranked_candidate_pool') or [])
+    mapped=[]; rejected={}
+    def rej(k): rejected[k]=rejected.get(k,0)+1
+    for raw in pool:
+        c=dict(raw)
+        try: lo=float(c.get('low')); hi=float(c.get('high'))
+        except (TypeError,ValueError): rej('BAD_LEVEL'); continue
+        if hi < lo: lo,hi=hi,lo
+        side=str(c.get('side') or '').upper()
+        if cp is None or side not in ('BUY','SELL'): rej('NO_LIVE_REFERENCE'); continue
+        # The point must still be in front of price. V42 does not rediscover a move after it happened.
+        if side=='BUY' and hi >= cp: rej('NOT_AHEAD_OF_PRICE'); continue
+        if side=='SELL' and lo <= cp: rej('NOT_AHEAD_OF_PRICE'); continue
+        dist=(cp-hi if side=='BUY' else lo-cp)
+        datr=(dist/atr) if atr>0 else None
+        if datr is not None and datr>5.0: rej('TOO_FAR'); continue
+        life=str(((c.get('setup_lifecycle') or {}).get('state')) or '').upper()
+        if life in ('INVALIDATED','FAILED_TRAP_TRANSITION','RECLAIM_AFTER_INVALIDATION'):
+            rej('INVALIDATED'); continue
+        if ((c.get('trap_failure') or {}).get('opposite_transition')):
+            rej('OPPOSITE_TRANSITION'); continue
+        if str(((c.get('pullback_intelligence') or {}).get('state')) or '')=='FAILED_PULLBACK':
+            rej('FAILED_PULLBACK'); continue
+        c['risk_plan']=v41_structural_risk_targets(m1,c)
+        # Grade the LOCATION evidence only. No confirmation bonus is invented here.
+        c['best_point_score']=round(float(c.get('ranking_score') or c.get('score') or 0),1)
+        c['selective_grade']=v413_selective_grade(c)
+        c['map_status']='MAPPED_AHEAD'
+        c['distance_price']=round(dist,3)
+        c['distance_m1_atr_ahead']=round(datr,2) if datr is not None else None
+        c['map_reason']='Important structural location mapped before price reaches it. Wait for reaction; this is not an entry.'
+        mapped.append(c)
+    mapped.sort(key=lambda c:(float((c.get('selective_grade') or {}).get('score') or 0),float(c.get('ranking_score') or 0),-(float(c.get('distance_m1_atr_ahead') or 99))),reverse=True)
+    best=mapped[0] if mapped else None
+    return {'version':'V42_EARLY_LOCATION_INTELLIGENCE','philosophy':'MAP -> LOCK -> WAIT -> REACT -> CONFIRM -> TRIGGER',
+            'current_price':cp,'mapped_count':len(mapped),'rejected':rejected,'best_location':best,
+            'locations':mapped[:6],
+            'note':'Mapped locations are planning areas, not predictions or entry signals. Price reaction decides whether a location becomes actionable.'}
+
 # ================= V41.4 AUTOMATIC OPPORTUNITY ALERTS =================
 # Telegram token is NEVER stored in source. Configure TELEGRAM_BOT_TOKEN privately.
 # The chat id is not a credential; it can be overridden with TELEGRAM_CHAT_ID.
@@ -3139,7 +3194,7 @@ def _v414_telegram(text):
     url=f'https://api.telegram.org/bot{token}/sendMessage'
     data=urllib.parse.urlencode({'chat_id':chat,'text':text,'disable_web_page_preview':'true'}).encode()
     try:
-        req=urllib.request.Request(url,data=data,method='POST',headers={'Content-Type':'application/x-www-form-urlencoded','User-Agent':'GoldScannerV41.4/1.0'})
+        req=urllib.request.Request(url,data=data,method='POST',headers={'Content-Type':'application/x-www-form-urlencoded','User-Agent':'GoldScannerV42/1.0'})
         with urllib.request.urlopen(req,timeout=12) as r:
             body=json.loads(r.read().decode('utf-8','replace'))
         return {'ok':bool(body.get('ok')),'detail':'sent' if body.get('ok') else str(body)[:300]}
@@ -3164,6 +3219,8 @@ def _v414_scan(locked=None):
     out=data_only_result(mtf,data_status,data_note,'NOT_USED_LIVE_DATA_MODE')
     out['mode']='LIVE_DATA_CONTEXT'; out['gemini_status']='NOT_USED'; out['scanner_version']='V41.4 AUTOMATIC OPPORTUNITY ALERTS'
     out['market_context']=market_context; out['event_risk']=market_context.get('event_risk','UNKNOWN')
+    out['v42_early_map']=v42_early_location_map(out)
+    out['scanner_version']='V42 EARLY LOCATION INTELLIGENCE'
     return out
 
 
@@ -3196,6 +3253,17 @@ def _v414_discovery_fresh(out, lock):
 def _v414_new_lock(out):
     p=out.get('m1_precision') or ((out.get('multi_timeframe_metrics') or {}).get('M5') or {}).get('m1_precision') or {}
     o=p.get('hybrid_opportunity') or {}; x=o.get('best_point') or {}; g=x.get('selective_grade') or {}; r=x.get('risk_plan') or {}
+    # V42 first tries to lock a strong location BEFORE price reaches it. This avoids waiting for a delayed
+    # confirmation candle merely to discover the location. Reaction/confirmation rules remain separate.
+    em=out.get('v42_early_map') or {}; early=em.get('best_location') or {}; eg=early.get('selective_grade') or {}
+    if early and str(eg.get('grade') or '') in ('A','A+'):
+        t=((out.get('price_meta') or {}).get('latest_m1_time')) or datetime.now(timezone.utc).isoformat()
+        return {'active':True,'id':f"{early.get('side')}-{early.get('low')}-{early.get('high')}-{t}",
+                'side':early.get('side'),'low':early.get('low'),'high':early.get('high'),'source':early.get('source') or 'EARLY_LOCATION',
+                'best_point_score':early.get('best_point_score'),'structural_score':early.get('structural_score'),'risk_plan':early.get('risk_plan') or {},
+                'selective_grade':eg,'created_at':t,'last_seen':t,'opportunity_id':None,'trigger_time':None,
+                'status':'LOCKED','v42_early_location':True,'mapped_distance_m1_atr':early.get('distance_m1_atr_ahead')}
+    # Fallback: retain the proven V41.5 selector when no A/A+ ahead-of-price location exists.
     # Automatic alerts are intentionally selective. Manual Scan still shows all grades.
     if str(g.get('grade') or '') not in ('A','A+'):
         return None
@@ -3338,7 +3406,7 @@ def _v414_message(event, lock, opp):
     side=str((lock or {}).get('side') or '').upper(); lo=(lock or {}).get('low'); hi=(lock or {}).get('high')
     source=str((lock or {}).get('source') or 'OPPORTUNITY').replace('_',' ')
     icons={'LOCKED':'🏆','ARMED':'🟠','TRIGGERED':'🟢','TP1_HIT':'🎯','TP2_HIT':'🎯','STOPPED':'❌','INVALIDATED':'❌','EXPIRED':'⌛','MISSED':'⚫','DATA_STALE':'⚠️'}
-    lines=[f"{icons.get(event,'📡')} GOLD SCANNER V41.4 — {event.replace('_',' ')}",f"Opportunity: {(lock or {}).get('opportunity_id') or (lock or {}).get('id','—')}",f"{side} · {source} · Grade {g.get('grade','—')}",f"Zone: {lo}–{hi}"]
+    lines=[f"{icons.get(event,'📡')} GOLD SCANNER V42 — {event.replace('_',' ')}",f"Opportunity: {(lock or {}).get('opportunity_id') or (lock or {}).get('id','—')}",f"{side} · {source} · Grade {g.get('grade','—')}",f"Zone: {lo}–{hi}"]
     if r.get('stop_loss') is not None: lines.append(f"SL: {r.get('stop_loss')}")
     if r.get('tp1') is not None: lines.append(f"TP1: {r.get('tp1')}")
     if r.get('tp2') is not None: lines.append(f"TP2: {r.get('tp2')}")
@@ -3346,7 +3414,7 @@ def _v414_message(event, lock, opp):
     if (lock or {}).get('detected_at'): lines.append(f"Detected M1: {(lock or {}).get('detected_at')} (provider time)")
     if (lock or {}).get('alert_checked_at'): lines.append(f"Freshness checked: {(lock or {}).get('alert_checked_at')} UTC")
     if (lock or {}).get('trigger_age_seconds') is not None: lines.append(f"Trigger age after M1 close: {(lock or {}).get('trigger_age_seconds')}s")
-    if event=='LOCKED': lines.append('Strong opportunity found. Waiting for price/trigger.')
+    if event=='LOCKED': lines.append('Location mapped early. NO ENTRY — waiting for price to reach the area, react, and confirm.')
     elif event=='ARMED': lines.append('Price is testing the locked area. Waiting for closed-M1 trigger.')
     elif event=='TRIGGERED': lines.append('ENTRY AVAILABLE — trigger is still near the qualified entry area. Do not chase if your broker price has already moved materially away.')
     elif event=='MISSED': lines.append("ENTRY MISSED — DON'T CHASE. The trigger is stale or price has already left the actionable entry area. Waiting for a genuinely fresh opportunity.")
@@ -3387,7 +3455,7 @@ def _v415_passive_regime(out):
 def _v415_observation(out=None,event=None,lock=None,state=None,status='SCANNED',detail=None):
     now=datetime.now(timezone.utc).isoformat()
     state=state or {}
-    row={'observed_at':now,'scanner_version':'V41.5 OBSERVABILITY','status':status,'event':event,
+    row={'observed_at':now,'scanner_version':'V42 EARLY LOCATION INTELLIGENCE','status':status,'event':event,
          'detail':detail,'opportunity_id':(lock or {}).get('opportunity_id'),
          'locked_status':(lock or {}).get('status'),'side':(lock or {}).get('side'),
          'zone_low':(lock or {}).get('low'),'zone_high':(lock or {}).get('high')}
@@ -3408,7 +3476,10 @@ def _v415_observation(out=None,event=None,lock=None,state=None,status='SCANNED',
                                   'source':bp.get('source'),'score':bp.get('best_point_score'),
                                   'structural_score':bp.get('structural_score'),
                                   'grade':(bp.get('selective_grade') or {}).get('grade')} if bp else None,
-                    'last_discovery_rejection':state.get('last_discovery_rejection')})
+                    'last_discovery_rejection':state.get('last_discovery_rejection'),
+                    'v42_early_map':{'mapped_count':(out.get('v42_early_map') or {}).get('mapped_count',0),
+                                     'rejected':(out.get('v42_early_map') or {}).get('rejected') or {},
+                                     'best_location':(out.get('v42_early_map') or {}).get('best_location')}})
     return row
 
 
@@ -3447,7 +3518,7 @@ def v414_monitor_tick(send_alerts=True):
             state['last_tick']=datetime.now(timezone.utc).isoformat(); state['last_error']=None
             _v414_save_state(state)
             _v415_append(_v415_observation(event='AUTO_OFF',state=state,status='PAUSED'))
-            return {'ok':True,'event':'AUTO_OFF','telegram':None,'state':state,'scanner_version':'V41.5 OBSERVABILITY'}
+            return {'ok':True,'event':'AUTO_OFF','telegram':None,'state':state,'scanner_version':'V42 EARLY LOCATION INTELLIGENCE'}
         locked=state.get('locked_opportunity')
         try:
             out=_v414_scan(locked)
@@ -3463,7 +3534,7 @@ def v414_monitor_tick(send_alerts=True):
                 _v414_save_state(state)
                 _v415_append(_v415_observation(event='DATA_WAIT',state=state,status='DATA_WAIT',detail=detail[:500]))
                 return {'ok':True,'event':'DATA_WAIT','telegram':None,'detail':detail[:500],
-                        'state':state,'scanner_version':'V41.5 OBSERVABILITY'}
+                        'state':state,'scanner_version':'V42 EARLY LOCATION INTELLIGENCE'}
             raise
         event,lock,opp=_v414_event(out,state)
         event,lock=_v414_trigger_freshness(out,event,lock)
@@ -3483,7 +3554,7 @@ def v414_monitor_tick(send_alerts=True):
         state['last_tick']=datetime.now(timezone.utc).isoformat(); state['last_error']=None
         state['last_market_price']=out.get('current_price'); _v414_save_state(state)
         _v415_append(_v415_observation(out=out,event=event,lock=lock,state=state,status='SCANNED'))
-        return {'ok':True,'event':event,'telegram':sent,'state':state,'scanner_version':'V41.5 OBSERVABILITY'}
+        return {'ok':True,'event':event,'telegram':sent,'state':state,'scanner_version':'V42 EARLY LOCATION INTELLIGENCE'}
 
 
 def _v414_loop():
@@ -3512,7 +3583,7 @@ def v414_test_alert():
 @app.route('/api/alerts/status',methods=['GET'])
 def v414_alert_status():
     s=_v414_load_state()
-    return jsonify({'scanner_version':'V41.4 AUTOMATIC OPPORTUNITY ALERTS','telegram_configured':bool((os.environ.get('TELEGRAM_BOT_TOKEN') or '').strip() and (os.environ.get('TELEGRAM_CHAT_ID') or V414_CHAT_ID).strip()),
+    return jsonify({'scanner_version':'V42 EARLY LOCATION INTELLIGENCE','telegram_configured':bool((os.environ.get('TELEGRAM_BOT_TOKEN') or '').strip() and (os.environ.get('TELEGRAM_CHAT_ID') or V414_CHAT_ID).strip()),
                     'auto_monitor_enabled':bool(s.get('user_auto_enabled', True)),'background_thread_enabled':V414_AUTO_ENABLED,'monitor_seconds':V414_MONITOR_SECONDS,'state':s})
 
 
@@ -3550,8 +3621,10 @@ def v415_diagnostics():
     counts={}
     for r in rows:
         key=r.get('event') or 'NO_EVENT'; counts[key]=counts.get(key,0)+1
-    return jsonify({'ok':True,'scanner_version':'V41.5 OBSERVABILITY','passive_only':True,
-                    'decision_logic_changed':False,'count':len(rows),'event_counts':counts,'observations':rows})
+    latest=rows[-1] if rows else None
+    return jsonify({'ok':True,'scanner_version':'V42 EARLY LOCATION INTELLIGENCE','passive_only':False,
+                    'architecture':'MAP -> LOCK -> WAIT -> REACT -> CONFIRM -> TRIGGER',
+                    'count':len(rows),'event_counts':counts,'latest':latest,'observations':rows})
 
 
 @app.post('/api/alerts/tick')
