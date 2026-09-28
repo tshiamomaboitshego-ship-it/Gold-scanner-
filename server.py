@@ -2322,6 +2322,9 @@ def build_m1_precision_engine(mtf, vwap_context=None):
 
     rows.sort(key=lambda x:(x['score'],-x['distance_m1_atr']),reverse=True)
     ranked_pool.sort(key=lambda x:(x['ranking_score'],x['structural_score'],-x['distance_m1_atr']),reverse=True)
+    # V41 hybrid layer: select one best existing V40.1 point; never create a new zone.
+    _precision_shell={'ranked_candidate_pool':ranked_pool}
+    hybrid_opportunity=v41_hybrid_opportunity(m1,_precision_shell)
     if rows:
         dirs=sorted(set(x['side'] for x in rows))
         direction=(dirs[0] if len(dirs)==1 else 'BOTH')
@@ -2329,7 +2332,268 @@ def build_m1_precision_engine(mtf, vwap_context=None):
     else:
         direction='SEARCHING_BOTH' if context_direction=='MIXED' else context_direction+'_CONTEXT'
         state='NO_FRESH_QUALIFIED_M1_POINT'
-    return {'state':state,'direction':direction,'context_direction':context_direction,'gate_score':max(bull_context,bear_context),'bull_gate':bull_context,'bear_gate':bear_context,'candidates':rows[:4],'ranked_candidate_pool':ranked_pool[:8],'m1_pullback':pullback_state,'pullback_quality':pullback_quality,'precision_engine_version':'V40.1_ESSENTIAL_PULLBACKS','candidate_diagnostics':diagnostics,'pullback_route_candidates':extra_routes,'pullback_intelligence':pullback_intelligence,'pullback_bridge_candidates':pullback_bridge,'compression_expansion':compression_expansion,'market_regime_v2':market_regime_v2,'tpo_profile':tpo,'initial_balance':initial_balance,'m5_structure':m5.get('structure'),'m5_momentum':m5.get('momentum'),'m5_pressure':m5.get('current_pressure'),'m15_structure':m15.get('structure'),'h1_structure':h1.get('structure'),'m1_structure':m1st,'m1_momentum':m1mom,'shock_caution':shock,'note':'V40 PULLBACK-ONLY: the scanner only searches continuation pullbacks. New-move-origin and transition/reversal entry routes are removed. Pullback quality, depth, speed, opposing pressure, lifecycle, failure risk, continuation restart, freshness, Candidate Ladder and diagnostics remain active.'}
+    return {'state':state,'direction':direction,'context_direction':context_direction,'gate_score':max(bull_context,bear_context),'bull_gate':bull_context,'bear_gate':bear_context,'candidates':rows[:4],'ranked_candidate_pool':ranked_pool[:8],'m1_pullback':pullback_state,'pullback_quality':pullback_quality,'precision_engine_version':'V41.1_MULTI_SETUP_HYBRID','hybrid_opportunity':hybrid_opportunity,'candidate_diagnostics':diagnostics,'pullback_route_candidates':extra_routes,'pullback_intelligence':pullback_intelligence,'pullback_bridge_candidates':pullback_bridge,'compression_expansion':compression_expansion,'market_regime_v2':market_regime_v2,'tpo_profile':tpo,'initial_balance':initial_balance,'m5_structure':m5.get('structure'),'m5_momentum':m5.get('momentum'),'m5_pressure':m5.get('current_pressure'),'m15_structure':m15.get('structure'),'h1_structure':h1.get('structure'),'m1_structure':m1st,'m1_momentum':m1mom,'shock_caution':shock,'note':'V41.1 MULTI-SETUP HYBRID: V40.1 pullbacks remain intact and compete with strict Break+Retest, Sweep+Reclaim, and Consolidation-Break routes. One Best-Point Selector, confirmation layer, and structural SL/TP plan govern the final opportunity.'}
+
+
+# ===== V41 HYBRID OPPORTUNITY ENGINE =====
+def v41_structural_risk_targets(m1, candidate):
+    """Create structure-aware invalidation and targets for one selected M1 pullback point.
+    The stop sits beyond recent invalidating structure plus an ATR buffer. TP1/TP2 prefer
+    exposed structural/liquidity objectives; R-multiple fallbacks are clearly labelled.
+    """
+    candles=((m1 or {}).get('latest_closed_candles') or [])[-80:]
+    atr=float((m1 or {}).get('atr14') or 0) or 1.0
+    side=str((candidate or {}).get('side') or '').upper()
+    lo=float(candidate.get('low') or 0); hi=float(candidate.get('high') or 0)
+    if side not in ('BUY','SELL') or hi < lo:
+        return {'status':'UNAVAILABLE'}
+    entry=round((lo+hi)/2,2)
+    # Prefer local swing structure around/behind the candidate; never place the stop inside the zone.
+    recent=candles[-18:]
+    if side=='BUY':
+        behind=[float(x['l']) for x in recent if float(x['l']) <= hi]
+        structural=min(behind) if behind else lo
+        sl=min(lo-0.12*atr, structural-0.10*atr)
+    else:
+        behind=[float(x['h']) for x in recent if float(x['h']) >= lo]
+        structural=max(behind) if behind else hi
+        sl=max(hi+0.12*atr, structural+0.10*atr)
+    risk=abs(entry-sl)
+    if risk < max(0.10*atr,0.01):
+        risk=max(0.10*atr,0.01); sl=entry-risk if side=='BUY' else entry+risk
+
+    # Gather real structural/liquidity objectives in the favorable direction.
+    targets=[]
+    lt=(candidate or {}).get('liquidity_target') or {}
+    if isinstance(lt.get('target'),(int,float)): targets.append((float(lt['target']),'EXPOSED_LIQUIDITY'))
+    ext=(m1 or {}).get('external_liquidity') or {}; internal=(m1 or {}).get('internal_liquidity') or {}; path=(m1 or {}).get('liquidity_path') or {}
+    keys=('swing_highs','equal_highs','minor_highs') if side=='BUY' else ('swing_lows','equal_lows','minor_lows')
+    for pack in (ext,internal):
+        for k in keys:
+            for v in (pack.get(k) or []):
+                try: targets.append((float(v),k.upper()))
+                except (TypeError,ValueError): pass
+    pv=path.get('nearest_above' if side=='BUY' else 'nearest_below')
+    if isinstance(pv,(int,float)): targets.append((float(pv),'LIQUIDITY_PATH'))
+    # Recent closed-candle swing extremes are structural objectives too.
+    for x in candles[-40:]:
+        v=float(x['h'] if side=='BUY' else x['l'])
+        if (v>entry if side=='BUY' else v<entry): targets.append((v,'RECENT_STRUCTURE'))
+    # Dedupe, keep only objectives with at least modest room beyond entry.
+    filt=[]
+    for v,src in targets:
+        if (side=='BUY' and v<=entry+0.35*risk) or (side=='SELL' and v>=entry-0.35*risk): continue
+        if not any(abs(v-q[0])<=0.08*atr for q in filt): filt.append((v,src))
+    filt.sort(key=lambda q:q[0], reverse=(side=='SELL'))
+    if side=='SELL': filt=sorted(filt,key=lambda q:abs(q[0]-entry))
+    else: filt=sorted(filt,key=lambda q:abs(q[0]-entry))
+
+    # TP1 prefers first structural objective at >=1R; TP2 prefers next at >=1.8R.
+    def rr(v): return abs(v-entry)/risk if risk else 0
+    t1=next((q for q in filt if rr(q[0])>=1.0),None)
+    t2=next((q for q in filt if rr(q[0])>=1.8 and (not t1 or abs(q[0]-entry)>abs(t1[0]-entry)+0.10*atr)),None)
+    if t1 is None:
+        t1=(entry+(1.5*risk if side=='BUY' else -1.5*risk),'R_FALLBACK_1_5R')
+    if t2 is None:
+        t2=(entry+(2.5*risk if side=='BUY' else -2.5*risk),'R_FALLBACK_2_5R')
+    nearest_obstacle=None
+    po=(candidate or {}).get('path_obstacles') or {}
+    if po.get('obstacles'):
+        nearest_obstacle='PATH_OBSTACLES_PRESENT'
+    return {
+        'status':'READY','entry_reference':entry,'entry_zone':{'low':round(lo,2),'high':round(hi,2)},
+        'stop_loss':round(sl,2),'stop_basis':'RECENT_INVALIDATING_STRUCTURE_PLUS_ATR_BUFFER',
+        'risk_price':round(risk,2),
+        'tp1':round(t1[0],2),'tp1_basis':t1[1],'tp1_rr':round(rr(t1[0]),2),
+        'tp2':round(t2[0],2),'tp2_basis':t2[1],'tp2_rr':round(rr(t2[0]),2),
+        'path_warning':nearest_obstacle,
+        'note':'SL/TP are structural planning levels, not guarantees. Position size must be chosen separately.'
+    }
+
+def v41_entry_confirmation(candidate):
+    """Turn existing closed-M1 reaction evidence into a strict entry state.
+    A location alone is never an entry. Failed/invalidated setups are hard-blocked.
+    """
+    life=(candidate or {}).get('setup_lifecycle') or {}
+    pa=(candidate or {}).get('price_action_sequence') or {}
+    react=(candidate or {}).get('acceptance_rejection') or {}
+    trap=(candidate or {}).get('trap_failure') or {}
+    tc=(candidate or {}).get('trap_candle_confirmation') or {}
+    state=str(life.get('state') or 'CANDIDATE_FOUND')
+    if state in ('INVALIDATED','FAILED_TRAP_TRANSITION','RECLAIM_AFTER_INVALIDATION') or trap.get('opposite_transition') or str(react.get('state'))=='ACCEPTANCE_THROUGH':
+        return {'state':'FAILED','confirmed':False,'score':0,'evidence':['setup invalidated / acceptance through point'],'missing':[]}
+    stage=int(pa.get('stage') or 0)
+    evidence=[]
+    if str(react.get('state')) in ('FAST_REJECTION_RECLAIM','RECLAIM'): evidence.append('closed-M1 rejection/reclaim')
+    if tc.get('detected'): evidence.append('trap+candle confirmation')
+    steps=pa.get('steps') or {}
+    if steps.get('displacement'): evidence.append('continuation displacement')
+    if steps.get('micro_structure_break'): evidence.append('micro structure break')
+    if steps.get('follow_through'): evidence.append('follow-through')
+    score=min(100, stage*16 + (14 if 'closed-M1 rejection/reclaim' in evidence else 0) + (8 if tc.get('detected') else 0))
+    touched=state not in ('CANDIDATE_FOUND','APPROACHING')
+    # Strict: require the point to be tested plus displacement and micro-structure evidence.
+    confirmed=touched and stage>=3 and bool(steps.get('displacement')) and (bool(steps.get('micro_structure_break')) or str(react.get('state'))=='FAST_REJECTION_RECLAIM')
+    if confirmed:
+        out='ENTRY_CONFIRMED'
+    elif not touched:
+        out='WAITING_FOR_PRICE'
+    elif stage>=1:
+        out='CONFIRMING'
+    else:
+        out='TESTING_POINT'
+    missing=[]
+    if not touched: missing.append('price has not tested point')
+    if not steps.get('displacement'): missing.append('continuation displacement')
+    if not steps.get('micro_structure_break') and str(react.get('state'))!='FAST_REJECTION_RECLAIM': missing.append('micro structure break / fast reclaim')
+    return {'state':out,'confirmed':confirmed,'score':score,'evidence':evidence,'missing':missing[:3]}
+
+
+
+# ===== V41.1 MULTI-SETUP HYBRID ROUTES =====
+def v411_multi_setup_candidates(m1):
+    """Generate strict non-pullback opportunity candidates from closed M1 candles.
+    Routes: break+retest, liquidity sweep+reclaim, consolidation break+confirmation.
+    These compete with V40.1 pullbacks; they do not bypass confirmation or invalidation.
+    """
+    candles=((m1 or {}).get('latest_closed_candles') or [])[-100:]
+    atr=float((m1 or {}).get('atr14') or 0) or 1.0
+    if len(candles)<18: return []
+    out=[]
+    def C(x,k):
+        try:return float(x[k])
+        except:return 0.0
+    def add(side,lo,hi,src,score,evidence,confirmed=False,invalid=False):
+        if hi<lo: lo,hi=hi,lo
+        out.append({'side':side,'low':round(lo,2),'high':round(hi,2),'source':src,
+          'score':score,'ranking_score':score,'structural_score':score,'status':'HYBRID_ROUTE_CANDIDATE',
+          'distance_m1_atr':round(abs(((lo+hi)/2)-C(candles[-1],'c'))/atr,2),
+          'hybrid_route':True,'hybrid_evidence':evidence,'route_confirmed':bool(confirmed),
+          'route_invalidated':bool(invalid),'setup_lifecycle':{'state':'CONFIRMED' if confirmed else 'APPROACHING'},
+          'path_obstacles':{},'liquidity_target':{}})
+
+    # 1) Break + retest: meaningful close through prior 8-bar structure, then a fresh test/reclaim.
+    for i in range(max(9,len(candles)-16),len(candles)-1):
+        pre=candles[max(0,i-8):i]
+        if len(pre)<6: continue
+        ph=max(C(x,'h') for x in pre); pl=min(C(x,'l') for x in pre)
+        b=candles[i]; body=abs(C(b,'c')-C(b,'o'))
+        for side,level,broken in [('BUY',ph,C(b,'c')>ph+0.08*atr),('SELL',pl,C(b,'c')<pl-0.08*atr)]:
+            if not broken or body<0.45*atr: continue
+            after=candles[i+1:]
+            if not after: continue
+            width=max(0.10*atr, min(0.28*atr, body*0.22))
+            lo,hi=level-width,level+width
+            tested=False; reclaim=False; invalid=False
+            for x in after:
+                tested |= C(x,'l')<=hi and C(x,'h')>=lo
+                if side=='BUY':
+                    reclaim |= tested and C(x,'c')>level and C(x,'c')>C(x,'o')
+                    invalid |= C(x,'c')<lo-0.18*atr
+                else:
+                    reclaim |= tested and C(x,'c')<level and C(x,'c')<C(x,'o')
+                    invalid |= C(x,'c')>hi+0.18*atr
+            if tested and not invalid:
+                add(side,lo,hi,'BREAK_RETEST_'+side,72+(8 if reclaim else 0),
+                    {'break_level':round(level,2),'displacement_body_atr':round(body/atr,2),'retest':True,'reclaim':reclaim},reclaim,False)
+
+    # 2) Liquidity sweep + reclaim: sweep a prior local extreme and close back through it.
+    for i in range(max(8,len(candles)-10),len(candles)):
+        pre=candles[max(0,i-7):i]
+        if len(pre)<5: continue
+        x=candles[i]; ph=max(C(q,'h') for q in pre); pl=min(C(q,'l') for q in pre)
+        rng=max(C(x,'h')-C(x,'l'),0.01); body=abs(C(x,'c')-C(x,'o'))
+        if C(x,'l')<pl-0.06*atr and C(x,'c')>pl and C(x,'c')>C(x,'o') and body>=0.18*atr:
+            w=max(0.08*atr,min(0.22*atr,rng*0.22)); add('BUY',pl-w,pl+w,'SWEEP_RECLAIM_BUY',82,
+              {'swept_level':round(pl,2),'reclaim_close':True,'candle_body_atr':round(body/atr,2)},True,False)
+        if C(x,'h')>ph+0.06*atr and C(x,'c')<ph and C(x,'c')<C(x,'o') and body>=0.18*atr:
+            w=max(0.08*atr,min(0.22*atr,rng*0.22)); add('SELL',ph-w,ph+w,'SWEEP_RECLAIM_SELL',82,
+              {'swept_level':round(ph,2),'reclaim_close':True,'candle_body_atr':round(body/atr,2)},True,False)
+
+    # 3) Consolidation break + confirmation: compact 5-8 bar box followed by meaningful close outside.
+    for n in range(5,9):
+        if len(candles)<n+2: continue
+        base=candles[-(n+2):-2]; br=candles[-2]; follow=candles[-1]
+        top=max(C(x,'h') for x in base); bot=min(C(x,'l') for x in base); box=top-bot
+        if box>1.15*atr: continue
+        bbody=abs(C(br,'c')-C(br,'o'))
+        if C(br,'c')>top+0.08*atr and bbody>=0.48*atr:
+            confirmed=C(follow,'c')>top and C(follow,'l')>bot
+            w=max(0.10*atr,min(0.25*atr,box*0.18)); add('BUY',top-w,top+w,'CONSOLIDATION_BREAK_BUY',70+(8 if confirmed else 0),
+              {'box_low':round(bot,2),'box_high':round(top,2),'break_body_atr':round(bbody/atr,2),'follow_through':confirmed},confirmed,False)
+        if C(br,'c')<bot-0.08*atr and bbody>=0.48*atr:
+            confirmed=C(follow,'c')<bot and C(follow,'h')<top
+            w=max(0.10*atr,min(0.25*atr,box*0.18)); add('SELL',bot-w,bot+w,'CONSOLIDATION_BREAK_SELL',70+(8 if confirmed else 0),
+              {'box_low':round(bot,2),'box_high':round(top,2),'break_body_atr':round(bbody/atr,2),'follow_through':confirmed},confirmed,False)
+    # Dedupe same route/side near same price; keep strongest.
+    out.sort(key=lambda z:z['ranking_score'],reverse=True); keep=[]
+    for z in out:
+        mid=(z['low']+z['high'])/2
+        if any(z['side']==q['side'] and z['source']==q['source'] and abs(mid-(q['low']+q['high'])/2)<0.22*atr for q in keep): continue
+        keep.append(z)
+    return keep[:8]
+
+
+def v411_entry_confirmation(candidate):
+    """Shared confirmation interface for pullback and V41.1 non-pullback routes."""
+    if candidate.get('route_invalidated'):
+        return {'state':'FAILED','confirmed':False,'score':0,'evidence':['route invalidated'],'missing':[]}
+    if candidate.get('hybrid_route'):
+        ev=candidate.get('hybrid_evidence') or {}
+        confirmed=bool(candidate.get('route_confirmed'))
+        if confirmed:
+            return {'state':'ENTRY_CONFIRMED','confirmed':True,'score':82,'evidence':[candidate.get('source'),'closed-M1 route confirmation'],'missing':[]}
+        return {'state':'CONFIRMING','confirmed':False,'score':48,'evidence':[candidate.get('source')],'missing':['route confirmation / follow-through']}
+    return v41_entry_confirmation(candidate)
+
+def v41_hybrid_opportunity(m1, precision):
+    """V41.1 Best-Point Selector across four approved setup families.
+    Pullbacks remain V40.1-native. Three strict non-pullback routes compete under one selector.
+    """
+    pullbacks=list((precision or {}).get('ranked_candidate_pool') or [])
+    routes=v411_multi_setup_candidates(m1)
+    pool=pullbacks+routes
+    if not pool:
+        return {'state':'NO_TRADE','decision':'NO TRADE','reason':'No approved setup currently produced a valid candidate.','best_point':None,'setup_families_checked':['PULLBACK','BREAK_RETEST','SWEEP_RECLAIM','CONSOLIDATION_BREAK']}
+    valid=[]
+    for c0 in pool:
+        c=dict(c0)
+        life=str(((c.get('setup_lifecycle') or {}).get('state')) or '')
+        if life in ('INVALIDATED','FAILED_TRAP_TRANSITION','RECLAIM_AFTER_INVALIDATION') or c.get('route_invalidated'): continue
+        if ((c.get('trap_failure') or {}).get('opposite_transition')): continue
+        if str(((c.get('pullback_intelligence') or {}).get('state')) or '')=='FAILED_PULLBACK': continue
+        base=float(c.get('ranking_score') or c.get('score') or 0)
+        conf=v411_entry_confirmation(c)
+        selection=base
+        if not c.get('hybrid_route'):
+            pq=str(((c.get('pullback_intelligence') or {}).get('quality')) or '')
+            if pq=='CLEAN': selection+=7
+            elif pq=='GOOD': selection+=3
+            if str(c.get('status'))=='QUALIFIED_PRECISION_POINT': selection+=5
+            if (c.get('essential_pullback_evidence') or {}): selection+=3
+        if (c.get('path_obstacles') or {}).get('clean_path'): selection+=4
+        selection+=min(10,float(conf.get('score') or 0)*0.10)
+        c['entry_confirmation']=conf; c['best_point_score']=round(min(100,selection),1)
+        valid.append(c)
+    if not valid:
+        return {'state':'NO_TRADE','decision':'NO TRADE','reason':'All current candidates failed or were invalidated.','best_point':None}
+    valid.sort(key=lambda c:(c['best_point_score'],float(c.get('structural_score') or 0),-float(c.get('distance_m1_atr') or 99)),reverse=True)
+    best=valid[0]; best['risk_plan']=v41_structural_risk_targets(m1,best)
+    conf=best['entry_confirmation']; route=bool(best.get('hybrid_route'))
+    base_qualified=(str(best.get('status'))=='QUALIFIED_PRECISION_POINT') if not route else True
+    if conf.get('state')=='FAILED':
+        state='NO_TRADE'; decision='NO TRADE'; reason='Best candidate failed confirmation.'
+    elif conf.get('confirmed') and base_qualified:
+        state='ENTRY_QUALIFIED'; decision=f"{best.get('side')} OPPORTUNITY — QUALIFIED"; reason='Best approved setup passed its closed-M1 confirmation rules.'
+    elif conf.get('state')=='WAITING_FOR_PRICE':
+        state='DEVELOPING'; decision='WAIT'; reason='Best point selected; waiting for price to reach it.'
+    else:
+        state='CONFIRMING'; decision='WAIT'; reason='Best setup exists, but entry confirmation is incomplete.'
+    return {'state':state,'decision':decision,'reason':reason,'best_point':best,'alternatives_considered':len(valid)-1,
+      'setup_families_checked':['PULLBACK','BREAK_RETEST','SWEEP_RECLAIM','CONSOLIDATION_BREAK'],
+      'route_candidate_count':len(routes),
+      'selector_note':'One selector compares approved pullback and non-pullback setup candidates. Only the strongest surviving point is surfaced.',
+      'warning':'Scores rank evidence; they are not probabilities. QUALIFIED opportunities can still lose.'}
 
 def build_reaction_engine(m5):
     """V32 deterministic closed-M5 reaction state for zones currently being tracked.
