@@ -2892,7 +2892,7 @@ def live_scan():
         out=data_only_result(mtf,data_status,data_note,'NOT_USED_LIVE_DATA_MODE')
         out['mode']='LIVE_DATA_CONTEXT'
         out['gemini_status']='NOT_USED'
-        out['scanner_version']='V42 EARLY LOCATION INTELLIGENCE'
+        out['scanner_version']='V42.1 ACTIVE PRICE AREA'
         out['market_context']=market_context
         out['event_risk']=market_context.get('event_risk','UNKNOWN')
         out['v42_early_map']=v42_early_location_map(out)
@@ -3094,13 +3094,14 @@ def replay():
 if __name__=='__main__':app.run(host='0.0.0.0',port=int(os.environ.get('PORT',8080)))
 
 
-# ================= V42 EARLY LOCATION INTELLIGENCE =================
+# ================= V42.1 ACTIVE PRICE AREA =================
 # Philosophy: map important locations BEFORE price reaches them, then react to what price actually does there.
 # This is deterministic decision support, not a price predictor and not a profitability guarantee.
 
 def v42_early_location_map(out):
-    """Build a forward location map from already-computed M1 candidates.
-    A mapped location must still be ahead of live price. Mapping does not equal an entry.
+    """V42.1 Active Price Area / Proximity Intelligence.
+    Map the market broadly, but spend attention on quality locations near the live price and in its current path.
+    Proximity is a ranking aid only: it never turns a weak location into an entry.
     """
     p=out.get('m1_precision') or ((out.get('multi_timeframe_metrics') or {}).get('M5') or {}).get('m1_precision') or {}
     m1=((out.get('multi_timeframe_metrics') or {}).get('M1') or {}).get('metrics') or {}
@@ -3108,9 +3109,26 @@ def v42_early_location_map(out):
     except (TypeError,ValueError): cp=None
     try: atr=float(m1.get('atr14') or 0)
     except (TypeError,ValueError): atr=0.0
+    momentum=str(m1.get('momentum') or p.get('m1_momentum') or 'UNCLEAR').upper()
+    pressure=str(m1.get('current_pressure') or 'UNCLEAR').upper()
     pool=list(p.get('ranked_candidate_pool') or [])
     mapped=[]; rejected={}
     def rej(k): rejected[k]=rejected.get(k,0)+1
+    def attention_tier(datr):
+        if datr is None: return 'BACKGROUND'
+        if datr <= 0.75: return 'ACTIVE'
+        if datr <= 2.0: return 'APPROACHING'
+        return 'BACKGROUND'
+    def path_state(side):
+        # This describes current travel, not a prediction. A SELL above price is being approached by bullish travel;
+        # a BUY below price is being approached by bearish travel.
+        bull=('BULLISH' in momentum) or ('BULLISH' in pressure)
+        bear=('BEARISH' in momentum) or ('BEARISH' in pressure)
+        if side=='SELL' and bull: return 'PRICE_TRAVELLING_TOWARD'
+        if side=='BUY' and bear: return 'PRICE_TRAVELLING_TOWARD'
+        if side=='SELL' and bear: return 'PRICE_TRAVELLING_AWAY'
+        if side=='BUY' and bull: return 'PRICE_TRAVELLING_AWAY'
+        return 'PATH_UNCLEAR'
     for raw in pool:
         c=dict(raw)
         try: lo=float(c.get('low')); hi=float(c.get('high'))
@@ -3118,7 +3136,6 @@ def v42_early_location_map(out):
         if hi < lo: lo,hi=hi,lo
         side=str(c.get('side') or '').upper()
         if cp is None or side not in ('BUY','SELL'): rej('NO_LIVE_REFERENCE'); continue
-        # The point must still be in front of price. V42 does not rediscover a move after it happened.
         if side=='BUY' and hi >= cp: rej('NOT_AHEAD_OF_PRICE'); continue
         if side=='SELL' and lo <= cp: rej('NOT_AHEAD_OF_PRICE'); continue
         dist=(cp-hi if side=='BUY' else lo-cp)
@@ -3132,20 +3149,33 @@ def v42_early_location_map(out):
         if str(((c.get('pullback_intelligence') or {}).get('state')) or '')=='FAILED_PULLBACK':
             rej('FAILED_PULLBACK'); continue
         c['risk_plan']=v41_structural_risk_targets(m1,c)
-        # Grade the LOCATION evidence only. No confirmation bonus is invented here.
         c['best_point_score']=round(float(c.get('ranking_score') or c.get('score') or 0),1)
         c['selective_grade']=v413_selective_grade(c)
+        tier=attention_tier(datr); path=path_state(side)
+        proximity_bonus=12 if tier=='ACTIVE' else 6 if tier=='APPROACHING' else 0
+        path_bonus=5 if path=='PRICE_TRAVELLING_TOWARD' else -2 if path=='PRICE_TRAVELLING_AWAY' else 0
+        quality=float((c.get('selective_grade') or {}).get('score') or c.get('ranking_score') or 0)
+        c['attention_tier']=tier
+        c['price_path']=path
+        c['attention_score']=round(quality+proximity_bonus+path_bonus,1)
         c['map_status']='MAPPED_AHEAD'
         c['distance_price']=round(dist,3)
         c['distance_m1_atr_ahead']=round(datr,2) if datr is not None else None
-        c['map_reason']='Important structural location mapped before price reaches it. Wait for reaction; this is not an entry.'
+        c['map_reason']='Mapped before arrival. Attention follows live price; reaction and confirmation still decide whether it becomes actionable.'
         mapped.append(c)
-    mapped.sort(key=lambda c:(float((c.get('selective_grade') or {}).get('score') or 0),float(c.get('ranking_score') or 0),-(float(c.get('distance_m1_atr_ahead') or 99))),reverse=True)
+    # Quality remains the base requirement; proximity/path determine where V42 spends attention among valid mapped locations.
+    mapped.sort(key=lambda c:(float(c.get('attention_score') or 0),float((c.get('selective_grade') or {}).get('score') or 0),float(c.get('ranking_score') or 0)),reverse=True)
+    active=[c for c in mapped if c.get('attention_tier')=='ACTIVE']
+    approaching=[c for c in mapped if c.get('attention_tier')=='APPROACHING']
+    background=[c for c in mapped if c.get('attention_tier')=='BACKGROUND']
     best=mapped[0] if mapped else None
-    return {'version':'V42_EARLY_LOCATION_INTELLIGENCE','philosophy':'MAP -> LOCK -> WAIT -> REACT -> CONFIRM -> TRIGGER',
-            'current_price':cp,'mapped_count':len(mapped),'rejected':rejected,'best_location':best,
-            'locations':mapped[:6],
-            'note':'Mapped locations are planning areas, not predictions or entry signals. Price reaction decides whether a location becomes actionable.'}
+    return {'version':'V42.1_ACTIVE_PRICE_AREA','philosophy':'MAP MARKET -> FOLLOW PRICE -> PRIORITIZE NEARBY QUALITY -> LOCK -> REACT -> CONFIRM -> TRIGGER',
+            'current_price':cp,'m1_atr':round(atr,3) if atr else None,'m1_momentum':momentum,'m1_pressure':pressure,
+            'active_radius_atr':0.75,'approaching_radius_atr':2.0,'background_limit_atr':5.0,
+            'mapped_count':len(mapped),'active_count':len(active),'approaching_count':len(approaching),'background_count':len(background),
+            'rejected':rejected,'best_location':best,'active_locations':active[:4],'approaching_locations':approaching[:4],
+            'background_locations':background[:4],'locations':mapped[:8],
+            'note':'Closest does not automatically win. Quality must still qualify; proximity and current price path only focus scanner attention.'}
 
 # ================= V41.4 AUTOMATIC OPPORTUNITY ALERTS =================
 # Telegram token is NEVER stored in source. Configure TELEGRAM_BOT_TOKEN privately.
@@ -3194,7 +3224,7 @@ def _v414_telegram(text):
     url=f'https://api.telegram.org/bot{token}/sendMessage'
     data=urllib.parse.urlencode({'chat_id':chat,'text':text,'disable_web_page_preview':'true'}).encode()
     try:
-        req=urllib.request.Request(url,data=data,method='POST',headers={'Content-Type':'application/x-www-form-urlencoded','User-Agent':'GoldScannerV42/1.0'})
+        req=urllib.request.Request(url,data=data,method='POST',headers={'Content-Type':'application/x-www-form-urlencoded','User-Agent':'GoldScannerV42.1/1.0'})
         with urllib.request.urlopen(req,timeout=12) as r:
             body=json.loads(r.read().decode('utf-8','replace'))
         return {'ok':bool(body.get('ok')),'detail':'sent' if body.get('ok') else str(body)[:300]}
@@ -3220,7 +3250,7 @@ def _v414_scan(locked=None):
     out['mode']='LIVE_DATA_CONTEXT'; out['gemini_status']='NOT_USED'; out['scanner_version']='V41.4 AUTOMATIC OPPORTUNITY ALERTS'
     out['market_context']=market_context; out['event_risk']=market_context.get('event_risk','UNKNOWN')
     out['v42_early_map']=v42_early_location_map(out)
-    out['scanner_version']='V42 EARLY LOCATION INTELLIGENCE'
+    out['scanner_version']='V42.1 ACTIVE PRICE AREA'
     return out
 
 
@@ -3455,7 +3485,7 @@ def _v415_passive_regime(out):
 def _v415_observation(out=None,event=None,lock=None,state=None,status='SCANNED',detail=None):
     now=datetime.now(timezone.utc).isoformat()
     state=state or {}
-    row={'observed_at':now,'scanner_version':'V42 EARLY LOCATION INTELLIGENCE','status':status,'event':event,
+    row={'observed_at':now,'scanner_version':'V42.1 ACTIVE PRICE AREA','status':status,'event':event,
          'detail':detail,'opportunity_id':(lock or {}).get('opportunity_id'),
          'locked_status':(lock or {}).get('status'),'side':(lock or {}).get('side'),
          'zone_low':(lock or {}).get('low'),'zone_high':(lock or {}).get('high')}
@@ -3478,6 +3508,11 @@ def _v415_observation(out=None,event=None,lock=None,state=None,status='SCANNED',
                                   'grade':(bp.get('selective_grade') or {}).get('grade')} if bp else None,
                     'last_discovery_rejection':state.get('last_discovery_rejection'),
                     'v42_early_map':{'mapped_count':(out.get('v42_early_map') or {}).get('mapped_count',0),
+                                     'active_count':(out.get('v42_early_map') or {}).get('active_count',0),
+                                     'approaching_count':(out.get('v42_early_map') or {}).get('approaching_count',0),
+                                     'background_count':(out.get('v42_early_map') or {}).get('background_count',0),
+                                     'm1_atr':(out.get('v42_early_map') or {}).get('m1_atr'),
+                                     'm1_momentum':(out.get('v42_early_map') or {}).get('m1_momentum'),
                                      'rejected':(out.get('v42_early_map') or {}).get('rejected') or {},
                                      'best_location':(out.get('v42_early_map') or {}).get('best_location')}})
     return row
@@ -3487,7 +3522,7 @@ def _v415_append(row):
     """Best-effort rolling JSONL logger. Logging failure can never block a trading scan."""
     try:
         with open(V415_LOG_FILE,'a',encoding='utf-8') as f:
-            f.write(json.dumps(row,ensure_ascii=False,separators=(',',':'))+'\\n')
+            f.write(json.dumps(row,ensure_ascii=False,separators=(',',':'))+'\n')
         # Keep bounded on the free Render filesystem.
         with open(V415_LOG_FILE,'r',encoding='utf-8') as f:
             lines=f.readlines()
@@ -3518,7 +3553,7 @@ def v414_monitor_tick(send_alerts=True):
             state['last_tick']=datetime.now(timezone.utc).isoformat(); state['last_error']=None
             _v414_save_state(state)
             _v415_append(_v415_observation(event='AUTO_OFF',state=state,status='PAUSED'))
-            return {'ok':True,'event':'AUTO_OFF','telegram':None,'state':state,'scanner_version':'V42 EARLY LOCATION INTELLIGENCE'}
+            return {'ok':True,'event':'AUTO_OFF','telegram':None,'state':state,'scanner_version':'V42.1 ACTIVE PRICE AREA'}
         locked=state.get('locked_opportunity')
         try:
             out=_v414_scan(locked)
@@ -3534,7 +3569,7 @@ def v414_monitor_tick(send_alerts=True):
                 _v414_save_state(state)
                 _v415_append(_v415_observation(event='DATA_WAIT',state=state,status='DATA_WAIT',detail=detail[:500]))
                 return {'ok':True,'event':'DATA_WAIT','telegram':None,'detail':detail[:500],
-                        'state':state,'scanner_version':'V42 EARLY LOCATION INTELLIGENCE'}
+                        'state':state,'scanner_version':'V42.1 ACTIVE PRICE AREA'}
             raise
         event,lock,opp=_v414_event(out,state)
         event,lock=_v414_trigger_freshness(out,event,lock)
@@ -3554,7 +3589,7 @@ def v414_monitor_tick(send_alerts=True):
         state['last_tick']=datetime.now(timezone.utc).isoformat(); state['last_error']=None
         state['last_market_price']=out.get('current_price'); _v414_save_state(state)
         _v415_append(_v415_observation(out=out,event=event,lock=lock,state=state,status='SCANNED'))
-        return {'ok':True,'event':event,'telegram':sent,'state':state,'scanner_version':'V42 EARLY LOCATION INTELLIGENCE'}
+        return {'ok':True,'event':event,'telegram':sent,'state':state,'scanner_version':'V42.1 ACTIVE PRICE AREA'}
 
 
 def _v414_loop():
@@ -3583,7 +3618,7 @@ def v414_test_alert():
 @app.route('/api/alerts/status',methods=['GET'])
 def v414_alert_status():
     s=_v414_load_state()
-    return jsonify({'scanner_version':'V42 EARLY LOCATION INTELLIGENCE','telegram_configured':bool((os.environ.get('TELEGRAM_BOT_TOKEN') or '').strip() and (os.environ.get('TELEGRAM_CHAT_ID') or V414_CHAT_ID).strip()),
+    return jsonify({'scanner_version':'V42.1 ACTIVE PRICE AREA','telegram_configured':bool((os.environ.get('TELEGRAM_BOT_TOKEN') or '').strip() and (os.environ.get('TELEGRAM_CHAT_ID') or V414_CHAT_ID).strip()),
                     'auto_monitor_enabled':bool(s.get('user_auto_enabled', True)),'background_thread_enabled':V414_AUTO_ENABLED,'monitor_seconds':V414_MONITOR_SECONDS,'state':s})
 
 
@@ -3622,7 +3657,7 @@ def v415_diagnostics():
     for r in rows:
         key=r.get('event') or 'NO_EVENT'; counts[key]=counts.get(key,0)+1
     latest=rows[-1] if rows else None
-    return jsonify({'ok':True,'scanner_version':'V42 EARLY LOCATION INTELLIGENCE','passive_only':False,
+    return jsonify({'ok':True,'scanner_version':'V42.1 ACTIVE PRICE AREA','passive_only':False,
                     'architecture':'MAP -> LOCK -> WAIT -> REACT -> CONFIRM -> TRIGGER',
                     'count':len(rows),'event_counts':counts,'latest':latest,'observations':rows})
 
