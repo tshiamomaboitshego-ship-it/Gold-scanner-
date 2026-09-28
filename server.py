@@ -2332,7 +2332,7 @@ def build_m1_precision_engine(mtf, vwap_context=None):
     else:
         direction='SEARCHING_BOTH' if context_direction=='MIXED' else context_direction+'_CONTEXT'
         state='NO_FRESH_QUALIFIED_M1_POINT'
-    return {'state':state,'direction':direction,'context_direction':context_direction,'gate_score':max(bull_context,bear_context),'bull_gate':bull_context,'bear_gate':bear_context,'candidates':rows[:4],'ranked_candidate_pool':ranked_pool[:8],'m1_pullback':pullback_state,'pullback_quality':pullback_quality,'precision_engine_version':'V41.2_ADAPTIVE_ENTRY_TRACKING','hybrid_opportunity':hybrid_opportunity,'candidate_diagnostics':diagnostics,'pullback_route_candidates':extra_routes,'pullback_intelligence':pullback_intelligence,'pullback_bridge_candidates':pullback_bridge,'compression_expansion':compression_expansion,'market_regime_v2':market_regime_v2,'tpo_profile':tpo,'initial_balance':initial_balance,'m5_structure':m5.get('structure'),'m5_momentum':m5.get('momentum'),'m5_pressure':m5.get('current_pressure'),'m15_structure':m15.get('structure'),'h1_structure':h1.get('structure'),'m1_structure':m1st,'m1_momentum':m1mom,'shock_caution':shock,'note':'V41.2 ADAPTIVE ENTRY + TRACKING: V41.1 multi-setup discovery remains intact. A selected opportunity can be locked across scans, armed at the zone, triggered by fast closed-M1 evidence, and tracked through TP/SL/invalidation instead of silently disappearing.'}
+    return {'state':state,'direction':direction,'context_direction':context_direction,'gate_score':max(bull_context,bear_context),'bull_gate':bull_context,'bear_gate':bear_context,'candidates':rows[:4],'ranked_candidate_pool':ranked_pool[:8],'m1_pullback':pullback_state,'pullback_quality':pullback_quality,'precision_engine_version':'V41.3_SELECTIVE_OPPORTUNITY_MANAGEMENT','hybrid_opportunity':hybrid_opportunity,'candidate_diagnostics':diagnostics,'pullback_route_candidates':extra_routes,'pullback_intelligence':pullback_intelligence,'pullback_bridge_candidates':pullback_bridge,'compression_expansion':compression_expansion,'market_regime_v2':market_regime_v2,'tpo_profile':tpo,'initial_balance':initial_balance,'m5_structure':m5.get('structure'),'m5_momentum':m5.get('momentum'),'m5_pressure':m5.get('current_pressure'),'m15_structure':m15.get('structure'),'h1_structure':h1.get('structure'),'m1_structure':m1st,'m1_momentum':m1mom,'shock_caution':shock,'note':'V41.3 SELECTIVE OPPORTUNITY MANAGEMENT: V41.1 multi-setup discovery remains intact. A selected opportunity can be locked across scans, armed at the zone, triggered by fast closed-M1 evidence, and tracked through TP/SL/invalidation instead of silently disappearing.'}
 
 
 # ===== V41 HYBRID OPPORTUNITY ENGINE =====
@@ -2582,7 +2582,7 @@ def v41_hybrid_opportunity(m1, precision):
     if not valid:
         return {'state':'NO_TRADE','decision':'NO TRADE','reason':'All current candidates failed or were invalidated.','best_point':None}
     valid.sort(key=lambda c:(c['best_point_score'],float(c.get('structural_score') or 0),-float(c.get('distance_m1_atr') or 99)),reverse=True)
-    best=valid[0]; best['risk_plan']=v41_structural_risk_targets(m1,best)
+    best=valid[0]; best['risk_plan']=v41_structural_risk_targets(m1,best); best['selective_grade']=v413_selective_grade(best)
     conf=best['entry_confirmation']; route=bool(best.get('hybrid_route'))
     base_qualified=(str(best.get('status'))=='QUALIFIED_PRECISION_POINT') if not route else True
     if conf.get('state')=='FAILED':
@@ -2598,6 +2598,33 @@ def v41_hybrid_opportunity(m1, precision):
       'route_candidate_count':len(routes),
       'selector_note':'One selector compares approved pullback and non-pullback setup candidates. Only the strongest surviving point is surfaced.',
       'warning':'Scores rank evidence; they are not probabilities. QUALIFIED opportunities can still lose.'}
+
+
+
+def v413_selective_grade(best, market_context=None):
+    """Evidence grade for selectivity, not a win probability.
+    Keeps location quality separate from the fast trigger. It does not invent a point.
+    """
+    if not isinstance(best,dict):
+        return {'grade':'NONE','score':0,'a_plus':False,'reasons':['no selected point']}
+    score=float(best.get('best_point_score') or best.get('structural_score') or 0)
+    reasons=[]
+    conf=best.get('entry_confirmation') or {}
+    rp=best.get('risk_plan') or {}
+    if float(best.get('structural_score') or 0)>=75: score+=5; reasons.append('strong structure')
+    if (best.get('path_obstacles') or {}).get('clean_path'): score+=4; reasons.append('clean continuation path')
+    q=str(((best.get('pullback_intelligence') or {}).get('quality')) or '')
+    if q=='CLEAN': score+=4; reasons.append('clean pullback')
+    elif q=='GOOD': score+=2; reasons.append('good pullback')
+    if float(rp.get('tp1_rr') or 0)>=1.5: score+=3; reasons.append('TP1 offers >=1.5R')
+    if float(rp.get('tp2_rr') or 0)>=2.0: score+=2; reasons.append('TP2 offers >=2R')
+    if conf.get('confirmed'): score+=3; reasons.append('fast trigger confirmed')
+    event=str((market_context or {}).get('event_risk') or 'UNKNOWN')
+    if event=='HIGH': score-=12; reasons.append('high event risk')
+    score=max(0,min(100,score))
+    grade='A+' if score>=85 else 'A' if score>=76 else 'B' if score>=68 else 'WATCH'
+    return {'grade':grade,'score':round(score,1),'a_plus':grade=='A+','reasons':reasons,
+            'note':'Selective grade ranks evidence only; it is not a probability or guarantee.'}
 
 def v412_locked_opportunity_tracker(m1, locked, current):
     """Track one phone-locked opportunity across scans.
@@ -2663,7 +2690,7 @@ def v412_locked_opportunity_tracker(m1, locked, current):
     # but it cannot silently replace this active opportunity.
     bp={'side':side,'low':round(lo,2),'high':round(hi,2),'source':locked.get('source') or 'LOCKED_OPPORTUNITY',
         'best_point_score':locked.get('best_point_score'),'structural_score':locked.get('structural_score'),
-        'risk_plan':risk,'entry_confirmation':{'state':'ENTRY_CONFIRMED' if triggered else ('ARMED_TESTING' if touch_i is not None else 'WAITING_FOR_PRICE'),
+        'risk_plan':risk,'selective_grade':locked.get('selective_grade') or v413_selective_grade({'best_point_score':locked.get('best_point_score'),'structural_score':locked.get('structural_score'),'risk_plan':risk}),'entry_confirmation':{'state':'ENTRY_CONFIRMED' if triggered else ('ARMED_TESTING' if touch_i is not None else 'WAITING_FOR_PRICE'),
         'confirmed':triggered,'score':82 if triggered else (55 if touch_i is not None else 25),'evidence':trigger_ev,'missing':[] if triggered else ['fast closed-M1 trigger']}}
     decision=(f'{side} OPPORTUNITY — TRIGGERED' if triggered else ('WAIT — ARMED' if touch_i is not None else 'WAIT — LOCKED'))
     state='ENTRY_QUALIFIED' if triggered else ('ARMED' if touch_i is not None else 'DEVELOPING')
@@ -2801,7 +2828,7 @@ def live_scan():
         out=data_only_result(mtf,data_status,data_note,'NOT_USED_LIVE_DATA_MODE')
         out['mode']='LIVE_DATA_CONTEXT'
         out['gemini_status']='NOT_USED'
-        out['scanner_version']='V41.2 ADAPTIVE ENTRY + TRACKING'
+        out['scanner_version']='V41.3 SELECTIVE OPPORTUNITY MANAGEMENT'
         out['market_context']=market_context
         out['event_risk']=market_context.get('event_risk','UNKNOWN')
         out['data_only_summary']=out['data_only_summary'].replace('V26 maps','V30 maps')

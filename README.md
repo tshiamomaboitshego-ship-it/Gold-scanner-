@@ -1,17 +1,13 @@
-# Gold Scanner V41.2 — Adaptive Entry + Opportunity Tracking
+# Gold Scanner V41.3 — Selective Opportunity Management
 
-Built directly from V41.1 Multi-Setup Hybrid. V40.1 pullback intelligence and the V41.1 setup families remain intact.
+Built directly on V41.2 Adaptive Entry + Tracking.
 
-## V41.2 changes
-- Locks the selected best opportunity across later phone scans instead of silently replacing/disappearing it.
-- Two-stage timing: LOCATION QUALITY first, then a compact closed-M1 FAST TRIGGER after price tests the locked point.
-- Lifecycle: LOCKED → ARMED → TRIGGERED → TP1/TP2 or STOPPED/INVALIDATED.
-- Existing structural SL, TP1 and TP2 travel with the locked setup.
-- Pullback, Break+Retest, Sweep+Reclaim and Consolidation-Break discovery remain available.
-- New candidates stay secondary while an active locked setup is alive.
-- Existing forward-test/quant logging remains; scores are evidence rankings, not win probabilities.
+New in V41.3:
+- Selective evidence grade: A+ / A / B / WATCH. This is a ranking label, not a win probability.
+- Keeps V41.2 LOCKED → ARMED → TRIGGERED lifecycle and fast closed-M1 trigger.
+- Keeps the four approved opportunity families: Pullback, Break + Retest, Sweep + Reclaim, Consolidation Break.
+- Keeps structural SL, TP1 and TP2 attached to the locked opportunity.
+- Adds an optional position-size calculator that requires the user's own equity, risk %, and broker-specific USD P/L per $1 Gold move at 1.00 lot. No contract size is assumed.
+- Adds persistent phone-side opportunity lifecycle logging for later evaluation/Quant work.
 
-## Fast trigger
-After a high-quality point is selected and tested, V41.2 can trigger from compact closed-M1 evidence (reclaim plus directional close/follow-through, trap+candle, or directional restart evidence) rather than repeatedly requiring the entire original filter stack.
-
-This is an experimental decision-support scanner. Triggered/qualified setups can still lose.
+Important: A+ does not mean guaranteed or high-probability profit. It only means the current rules found unusually strong evidence relative to other candidates. Position sizing must be verified against the broker's contract size, minimum volume and volume step.
