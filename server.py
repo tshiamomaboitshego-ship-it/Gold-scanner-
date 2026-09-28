@@ -1,4 +1,4 @@
-import os, json, base64, urllib.parse, urllib.request, statistics, time, csv, io
+import os, json, base64, urllib.parse, urllib.request, statistics, time, csv, io, traceback
 from datetime import datetime, timezone, timedelta
 from flask import Flask, request, jsonify, send_from_directory
 from google import genai
@@ -3366,7 +3366,21 @@ def v414_monitor_tick(send_alerts=True):
             _v414_save_state(state)
             return {'ok':True,'event':'AUTO_OFF','telegram':None,'state':state,'scanner_version':'V41.4 AUTOMATIC OPPORTUNITY ALERTS'}
         locked=state.get('locked_opportunity')
-        out=_v414_scan(locked)
+        try:
+            out=_v414_scan(locked)
+        except RuntimeError as e:
+            # Market-data outages/rate limits are expected operational states, not server crashes.
+            # Keep cron healthy (HTTP 200), preserve the active opportunity, and wait for fresh data.
+            detail=str(e)
+            if detail.startswith('market_data_unavailable:'):
+                state['last_tick']=datetime.now(timezone.utc).isoformat()
+                state['last_error']=None
+                state['last_data_wait']=detail[:1000]
+                state['last_data_wait_at']=state['last_tick']
+                _v414_save_state(state)
+                return {'ok':True,'event':'DATA_WAIT','telegram':None,'detail':detail[:500],
+                        'state':state,'scanner_version':'V41.4 AUTOMATIC OPPORTUNITY ALERTS'}
+            raise
         event,lock,opp=_v414_event(out,state)
         event,lock=_v414_trigger_freshness(out,event,lock)
         if event=='TRIGGERED' and lock:
@@ -3447,9 +3461,16 @@ def v414_alert_tick():
     if secret and supplied!=secret:
         return jsonify({'ok':False,'detail':'unauthorized'}),401
     try:
-        return jsonify(v414_monitor_tick(send_alerts=True))
+        result=v414_monitor_tick(send_alerts=True)
+        return jsonify(result),200
     except Exception as e:
-        return jsonify({'ok':False,'detail':str(e)[:500]}),500
+        # Unexpected programming/runtime failures must be visible in Render logs.
+        traceback.print_exc()
+        s=_v414_load_state()
+        s['last_error']=f'{type(e).__name__}: {str(e)}'[:1000]
+        s['last_tick']=datetime.now(timezone.utc).isoformat()
+        _v414_save_state(s)
+        return jsonify({'ok':False,'error':'monitor_tick_failed','type':type(e).__name__,'detail':str(e)[:500]}),500
 
 
 _v414_start_thread_once()
