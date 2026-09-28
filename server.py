@@ -2655,37 +2655,50 @@ def v412_locked_opportunity_tracker(m1, locked, current):
         try:return float(risk.get(k))
         except (TypeError,ValueError):return None
     sl,tp1,tp2=num('stop_loss'),num('tp1'),num('tp2')
-    # Hard lifecycle events use traded candle extremes, not candidate ranking.
-    if candles and sl is not None:
-        stopped=any((float(x['l'])<=sl if side=='BUY' else float(x['h'])>=sl) for x in candles)
-        if stopped:
-            return {'state':'NO_TRADE','decision':'NO TRADE','reason':'Locked opportunity hit its structural stop/invalidation.','best_point':None,
-                    'locked_lifecycle':{'id':locked.get('id'),'status':'STOPPED','side':side,'low':lo,'high':hi,'stop_loss':sl,'message':'STOPPED / INVALIDATED — do not reuse this point.'}}
-    tp1hit=bool(candles and tp1 is not None and any((float(x['h'])>=tp1 if side=='BUY' else float(x['l'])<=tp1) for x in candles))
-    tp2hit=bool(candles and tp2 is not None and any((float(x['h'])>=tp2 if side=='BUY' else float(x['l'])<=tp2) for x in candles))
-    if tp2hit:
-        status='TP2_HIT'
-    elif tp1hit:
-        status='TP1_HIT'
-    else:
-        status='LOCKED'
+    # Lifecycle ordering is strict: LOCKED -> ARMED -> TRIGGERED -> TP/SL.
+    # A level touching TP before a valid trigger is NOT a completed trade.
+    status='LOCKED'
     touch_i=next((i for i,x in enumerate(candles) if float(x['l'])<=hi and float(x['h'])>=lo),None) if candles else None
-    triggered=False; trigger_time=None; trigger_ev=[]
+    triggered=bool(locked.get('has_triggered')); trigger_time=locked.get('trigger_time'); trigger_ev=[]
+    trigger_i=None
     if touch_i is not None:
         status='ARMED'
         after=candles[touch_i:]
-        for i,x in enumerate(after):
-            o,c,h,l=map(float,(x['o'],x['c'],x['h'],x['l']))
-            body=abs(c-o)
-            reclaim=(c>hi if side=='BUY' else c<lo)
-            directional=(c>o if side=='BUY' else c<o)
-            follow=False
-            if i>0:
-                pc=float(after[i-1]['c']); follow=(c>pc if side=='BUY' else c<pc)
-            if reclaim and directional and (body>=0.18*atr or follow):
-                triggered=True; trigger_time=x.get('t'); trigger_ev=['zone tested','closed-M1 reclaim','directional close/follow-through']; break
+        if not triggered:
+            for i,x in enumerate(after):
+                o,c,h,l=map(float,(x['o'],x['c'],x['h'],x['l']))
+                body=abs(c-o)
+                reclaim=(c>hi if side=='BUY' else c<lo)
+                directional=(c>o if side=='BUY' else c<o)
+                follow=False
+                if i>0:
+                    pc=float(after[i-1]['c']); follow=(c>pc if side=='BUY' else c<pc)
+                if reclaim and directional and (body>=0.18*atr or follow):
+                    triggered=True; trigger_i=touch_i+i; trigger_time=x.get('t'); trigger_ev=['zone tested','closed-M1 reclaim','directional close/follow-through']; break
+        else:
+            # Find the persisted trigger candle so TP/SL checks only use later candles.
+            trigger_i=next((i for i,x in enumerate(candles) if str(x.get('t') or '')>=str(trigger_time or '')), touch_i)
         if triggered: status='TRIGGERED'
-    if tp1hit and not tp2hit: status='TP1_HIT'
+
+    tp1hit=False; tp2hit=False
+    if triggered:
+        post_trigger=candles[(trigger_i if trigger_i is not None else touch_i or 0):]
+        # Structural stop is a STOP only after an accepted trigger.
+        if post_trigger and sl is not None:
+            stopped=any((float(x['l'])<=sl if side=='BUY' else float(x['h'])>=sl) for x in post_trigger)
+            if stopped:
+                return {'state':'NO_TRADE','decision':'NO TRADE','reason':'Triggered opportunity hit its structural stop/invalidation.','best_point':None,
+                        'locked_lifecycle':{'id':locked.get('id'),'status':'STOPPED','side':side,'low':lo,'high':hi,'stop_loss':sl,'trigger_time':trigger_time,'message':'STOPPED — triggered opportunity completed at structural invalidation.'}}
+        tp1hit=bool(post_trigger and tp1 is not None and any((float(x['h'])>=tp1 if side=='BUY' else float(x['l'])<=tp1) for x in post_trigger))
+        tp2hit=bool(post_trigger and tp2 is not None and any((float(x['h'])>=tp2 if side=='BUY' else float(x['l'])<=tp2) for x in post_trigger))
+        if tp2hit: status='TP2_HIT'
+        elif tp1hit: status='TP1_HIT'
+    elif candles and sl is not None:
+        # Before trigger, crossing structural invalidation simply kills the idea; it was never a trade.
+        invalidated=any((float(x['l'])<=sl if side=='BUY' else float(x['h'])>=sl) for x in candles)
+        if invalidated:
+            return {'state':'NO_TRADE','decision':'NO TRADE','reason':'Untriggered locked opportunity was invalidated.','best_point':None,
+                    'locked_lifecycle':{'id':locked.get('id'),'status':'INVALIDATED','side':side,'low':lo,'high':hi,'stop_loss':sl,'message':'INVALIDATED BEFORE TRIGGER — no trade result is counted.'}}
     # Preserve the original point/risk plan. Current selector may keep finding alternatives,
     # but it cannot silently replace this active opportunity.
     bp={'side':side,'low':round(lo,2),'high':round(hi,2),'source':locked.get('source') or 'LOCKED_OPPORTUNITY',
@@ -3103,6 +3116,32 @@ def _v414_scan(locked=None):
     return out
 
 
+def _v414_discovery_fresh(out, lock):
+    """Reject a newly discovered point if the live reference price shows its move is already underway/consumed.
+    Existing candidate generation already suppresses used zones; this is the final automatic-alert guard.
+    """
+    try:
+        cp=float(out.get('current_price')); lo=float(lock.get('low')); hi=float(lock.get('high'))
+    except (TypeError,ValueError):
+        return False,'missing live price'
+    side=str(lock.get('side') or '').upper(); r=lock.get('risk_plan') or {}
+    try: tp1=float(r.get('tp1'))
+    except (TypeError,ValueError): tp1=None
+    # A new point must still be at/ahead of its entry, not already materially through it.
+    if side=='BUY':
+        if cp < lo: return False,'price already traded adversely through BUY zone before lock'
+        if cp > hi:
+            if tp1 is None or tp1<=hi: return False,'BUY point already behind live price'
+            if (cp-hi)/(tp1-hi) >= 0.05: return False,'BUY move already progressed before discovery'
+    elif side=='SELL':
+        if cp > hi: return False,'price already traded adversely through SELL zone before lock'
+        if cp < lo:
+            if tp1 is None or tp1>=lo: return False,'SELL point already behind live price'
+            if (lo-cp)/(lo-tp1) >= 0.05: return False,'SELL move already progressed before discovery'
+    else: return False,'invalid side'
+    return True,'fresh'
+
+
 def _v414_new_lock(out):
     p=out.get('m1_precision') or ((out.get('multi_timeframe_metrics') or {}).get('M5') or {}).get('m1_precision') or {}
     o=p.get('hybrid_opportunity') or {}; x=o.get('best_point') or {}; g=x.get('selective_grade') or {}; r=x.get('risk_plan') or {}
@@ -3162,12 +3201,19 @@ def _v414_event(out, state):
     if not lock:
         lock=_v414_new_lock(out)
         if lock:
+            fresh,why=_v414_discovery_fresh(out,lock)
+            if not fresh:
+                state['last_discovery_rejection']={'at':datetime.now(timezone.utc).isoformat(),'reason':why,'side':lock.get('side'),'low':lock.get('low'),'high':lock.get('high')}
+                return None,None,o
             _v414_assign_opportunity_id(lock,state)
             state['locked_opportunity']=lock
             return 'LOCKED',lock,o
         return None,None,o
     status=str(life.get('status') or lock.get('status') or 'LOCKED').upper()
     if life.get('trigger_time'): lock['trigger_time']=life.get('trigger_time')
+    # Defense in depth: target results are impossible until this exact opportunity has an accepted trigger.
+    if status in ('TP1_HIT','TP2_HIT') and not lock.get('has_triggered'):
+        status='ARMED' if life.get('current_price') is not None else 'LOCKED'
     previous=str(state.get('last_alert_status') or '').upper()
     # Preserve lifecycle state server-side across automatic scans.
     lock['status']=status; lock['last_seen']=datetime.now(timezone.utc).isoformat(); state['locked_opportunity']=lock
@@ -3263,10 +3309,17 @@ def _v414_message(event, lock, opp):
 def v414_monitor_tick(send_alerts=True):
     """One automatic monitor cycle. Safe to call from a cron/scheduler endpoint or background loop."""
     with _v414_monitor_lock:
-        state=_v414_load_state(); locked=state.get('locked_opportunity')
+        state=_v414_load_state()
+        if state.get('user_auto_enabled', True) is False:
+            state['last_tick']=datetime.now(timezone.utc).isoformat(); state['last_error']=None
+            _v414_save_state(state)
+            return {'ok':True,'event':'AUTO_OFF','telegram':None,'state':state,'scanner_version':'V41.4 AUTOMATIC OPPORTUNITY ALERTS'}
+        locked=state.get('locked_opportunity')
         out=_v414_scan(locked)
         event,lock,opp=_v414_event(out,state)
         event,lock=_v414_trigger_freshness(out,event,lock)
+        if event=='TRIGGERED' and lock:
+            lock['has_triggered']=True; lock['status']='TRIGGERED'; state['locked_opportunity']=lock
         # A freshness downgrade completes the stale opportunity so it cannot be reused.
         if event in ('MISSED','INVALIDATED','DATA_STALE') and lock and lock.get('freshness_status') in ('UNKNOWN_PRICE','LEFT_ENTRY_ADVERSE','MISSED_FAVORABLE_MOVE','INVALIDATED_BEFORE_ALERT','STALE_TRIGGER_AGE','DATA_STALE'):
             state['locked_opportunity']=None
@@ -3310,7 +3363,29 @@ def v414_test_alert():
 def v414_alert_status():
     s=_v414_load_state()
     return jsonify({'scanner_version':'V41.4 AUTOMATIC OPPORTUNITY ALERTS','telegram_configured':bool((os.environ.get('TELEGRAM_BOT_TOKEN') or '').strip() and (os.environ.get('TELEGRAM_CHAT_ID') or V414_CHAT_ID).strip()),
-                    'auto_monitor_enabled':V414_AUTO_ENABLED,'monitor_seconds':V414_MONITOR_SECONDS,'state':s})
+                    'auto_monitor_enabled':bool(s.get('user_auto_enabled', True)),'background_thread_enabled':V414_AUTO_ENABLED,'monitor_seconds':V414_MONITOR_SECONDS,'state':s})
+
+
+@app.post('/api/alerts/toggle')
+def v414_alert_toggle():
+    # Uses the same private control secret as the external scheduler. The browser asks once and stores it locally.
+    secret=(os.environ.get('MONITOR_TICK_SECRET') or '').strip()
+    payload=request.get_json(silent=True) or {}
+    supplied=(request.headers.get('X-Monitor-Secret') or payload.get('secret') or '').strip()
+    if secret and supplied!=secret:
+        return jsonify({'ok':False,'detail':'unauthorized'}),401
+    enabled=bool(payload.get('enabled'))
+    with _v414_monitor_lock:
+        state=_v414_load_state(); state['user_auto_enabled']=enabled
+        state['auto_changed_at']=datetime.now(timezone.utc).isoformat()
+        if not enabled:
+            # OFF means OFF: discard active lifecycle so ON always starts with a fresh opportunity.
+            state['locked_opportunity']=None; state['last_alert_status']=None; state['last_alert_event_id']=None
+        else:
+            state['locked_opportunity']=None; state['last_alert_status']=None; state['last_alert_event_id']=None
+            state['enabled_fresh_start_at']=datetime.now(timezone.utc).isoformat()
+        _v414_save_state(state)
+    return jsonify({'ok':True,'auto_monitor_enabled':enabled,'fresh_start':True})
 
 
 @app.post('/api/alerts/tick')

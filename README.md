@@ -39,3 +39,10 @@ The default maximum favorable progress before a trigger is considered missed is 
 Automatic alerts now add a final execution-reliability gate: unique opportunity IDs, strict M1 trigger-age validation, stale-feed blocking, tighter favorable-move/chase protection, adverse zone-departure rejection, structural invalidation priority, and trigger/freshness timestamps in Telegram. A stale or delayed trigger is closed as MISSED/DATA STALE instead of being reused. One active locked opportunity remains authoritative until terminal lifecycle state.
 
 Optional Render overrides: `V414_TRIGGER_MAX_AGE_SECONDS` (default 45 seconds after the trigger M1 candle closes), `V414_TRIGGER_MAX_PROGRESS` (default 0.10 of zone-to-TP1 distance), and `V414_MAX_M1_FEED_AGE_MINUTES` (default 2.0).
+
+## V41.4 reliability/quality-control patch
+- Automatic ON/OFF control added to the phone UI. OFF makes scheduled `/api/alerts/tick` calls return without scanning or Telegram alerts; Manual Scan still works. Turning ON clears old lifecycle state and starts fresh.
+- The switch is protected by the same `MONITOR_TICK_SECRET`; the phone asks once and stores it in local browser storage.
+- Strict lifecycle ordering: TP1/TP2 and STOPPED are only possible after the exact opportunity has an accepted TRIGGERED state. An untriggered setup crossing invalidation is INVALIDATED, not a losing trade.
+- New-lock discovery freshness guard rejects automatic alerts when live price shows the move has already materially progressed or traded adversely through the proposed entry before discovery.
+- Existing trigger-age, market-data freshness, structural invalidation and don't-chase guards remain active.
