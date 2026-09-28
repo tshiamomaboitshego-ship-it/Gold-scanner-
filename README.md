@@ -1,15 +1,17 @@
-# Gold Scanner V41 — Essential Pullbacks
-Built from V40 Pullback-Only Intelligence.
+# Gold Scanner V41.2 — Adaptive Entry + Opportunity Tracking
 
-Adds only three pullback-specific ideas:
-1. S&R Switch — broken resistance/support becomes a fresh continuation retest location.
-2. Return to Minor Consolidation — compact pre-displacement base can become a pullback location.
-3. Trap + Candle — confirmation only; a sweep and closed-candle reclaim strengthens an existing point.
+Built directly from V41.1 Multi-Setup Hybrid. V40.1 pullback intelligence and the V41.1 setup families remain intact.
 
-Everything remains continuation-pullback only. No reversal/origin entries were reintroduced.
-Existing V40 pullback quality, depth, speed, opposing pressure, lifecycle, failure blocking,
-freshness, Candidate Ladder, WATCH/QUALIFIED, break/retest, continuation restart,
-chase protection and diagnostics remain.
+## V41.2 changes
+- Locks the selected best opportunity across later phone scans instead of silently replacing/disappearing it.
+- Two-stage timing: LOCATION QUALITY first, then a compact closed-M1 FAST TRIGGER after price tests the locked point.
+- Lifecycle: LOCKED → ARMED → TRIGGERED → TP1/TP2 or STOPPED/INVALIDATED.
+- Existing structural SL, TP1 and TP2 travel with the locked setup.
+- Pullback, Break+Retest, Sweep+Reclaim and Consolidation-Break discovery remain available.
+- New candidates stay secondary while an active locked setup is alive.
+- Existing forward-test/quant logging remains; scores are evidence rankings, not win probabilities.
 
-## V41.1 Multi-Setup Hybrid Opportunity
-Adds three strict opportunity routes alongside the preserved V40.1 pullback engine: Break + Retest, Liquidity Sweep + Reclaim, and Consolidation Break + Confirmation. All approved candidates compete in one Best-Point Selector. The final layer requires route-specific closed-M1 confirmation and attaches structure-aware SL, TP1 and TP2 planning levels. Scores are rankings, not win probabilities, and QUALIFIED does not guarantee profit.
+## Fast trigger
+After a high-quality point is selected and tested, V41.2 can trigger from compact closed-M1 evidence (reclaim plus directional close/follow-through, trap+candle, or directional restart evidence) rather than repeatedly requiring the entire original filter stack.
+
+This is an experimental decision-support scanner. Triggered/qualified setups can still lose.

@@ -2332,7 +2332,7 @@ def build_m1_precision_engine(mtf, vwap_context=None):
     else:
         direction='SEARCHING_BOTH' if context_direction=='MIXED' else context_direction+'_CONTEXT'
         state='NO_FRESH_QUALIFIED_M1_POINT'
-    return {'state':state,'direction':direction,'context_direction':context_direction,'gate_score':max(bull_context,bear_context),'bull_gate':bull_context,'bear_gate':bear_context,'candidates':rows[:4],'ranked_candidate_pool':ranked_pool[:8],'m1_pullback':pullback_state,'pullback_quality':pullback_quality,'precision_engine_version':'V41.1_MULTI_SETUP_HYBRID','hybrid_opportunity':hybrid_opportunity,'candidate_diagnostics':diagnostics,'pullback_route_candidates':extra_routes,'pullback_intelligence':pullback_intelligence,'pullback_bridge_candidates':pullback_bridge,'compression_expansion':compression_expansion,'market_regime_v2':market_regime_v2,'tpo_profile':tpo,'initial_balance':initial_balance,'m5_structure':m5.get('structure'),'m5_momentum':m5.get('momentum'),'m5_pressure':m5.get('current_pressure'),'m15_structure':m15.get('structure'),'h1_structure':h1.get('structure'),'m1_structure':m1st,'m1_momentum':m1mom,'shock_caution':shock,'note':'V41.1 MULTI-SETUP HYBRID: V40.1 pullbacks remain intact and compete with strict Break+Retest, Sweep+Reclaim, and Consolidation-Break routes. One Best-Point Selector, confirmation layer, and structural SL/TP plan govern the final opportunity.'}
+    return {'state':state,'direction':direction,'context_direction':context_direction,'gate_score':max(bull_context,bear_context),'bull_gate':bull_context,'bear_gate':bear_context,'candidates':rows[:4],'ranked_candidate_pool':ranked_pool[:8],'m1_pullback':pullback_state,'pullback_quality':pullback_quality,'precision_engine_version':'V41.2_ADAPTIVE_ENTRY_TRACKING','hybrid_opportunity':hybrid_opportunity,'candidate_diagnostics':diagnostics,'pullback_route_candidates':extra_routes,'pullback_intelligence':pullback_intelligence,'pullback_bridge_candidates':pullback_bridge,'compression_expansion':compression_expansion,'market_regime_v2':market_regime_v2,'tpo_profile':tpo,'initial_balance':initial_balance,'m5_structure':m5.get('structure'),'m5_momentum':m5.get('momentum'),'m5_pressure':m5.get('current_pressure'),'m15_structure':m15.get('structure'),'h1_structure':h1.get('structure'),'m1_structure':m1st,'m1_momentum':m1mom,'shock_caution':shock,'note':'V41.2 ADAPTIVE ENTRY + TRACKING: V41.1 multi-setup discovery remains intact. A selected opportunity can be locked across scans, armed at the zone, triggered by fast closed-M1 evidence, and tracked through TP/SL/invalidation instead of silently disappearing.'}
 
 
 # ===== V41 HYBRID OPPORTUNITY ENGINE =====
@@ -2432,16 +2432,20 @@ def v41_entry_confirmation(candidate):
     if steps.get('follow_through'): evidence.append('follow-through')
     score=min(100, stage*16 + (14 if 'closed-M1 rejection/reclaim' in evidence else 0) + (8 if tc.get('detected') else 0))
     touched=state not in ('CANDIDATE_FOUND','APPROACHING')
-    # Strict: require the point to be tested plus displacement and micro-structure evidence.
-    confirmed=touched and stage>=3 and bool(steps.get('displacement')) and (bool(steps.get('micro_structure_break')) or str(react.get('state'))=='FAST_REJECTION_RECLAIM')
+    # V41.2 two-stage timing: location quality is decided before the test. Once a selected
+    # point is touched, use a compact trigger instead of repeatedly demanding every filter.
+    fast_reclaim=str(react.get('state'))=='FAST_REJECTION_RECLAIM'
+    directional_restart=bool(steps.get('displacement')) and (bool(steps.get('micro_structure_break')) or bool(steps.get('follow_through')))
+    trap_trigger=bool(tc.get('detected'))
+    confirmed=touched and (trap_trigger or (fast_reclaim and (bool(steps.get('displacement')) or bool(steps.get('follow_through')))) or directional_restart)
     if confirmed:
         out='ENTRY_CONFIRMED'
     elif not touched:
         out='WAITING_FOR_PRICE'
     elif stage>=1:
-        out='CONFIRMING'
+        out='ARMED_CONFIRMING'
     else:
-        out='TESTING_POINT'
+        out='ARMED_TESTING'
     missing=[]
     if not touched: missing.append('price has not tested point')
     if not steps.get('displacement'): missing.append('continuation displacement')
@@ -2595,6 +2599,82 @@ def v41_hybrid_opportunity(m1, precision):
       'selector_note':'One selector compares approved pullback and non-pullback setup candidates. Only the strongest surviving point is surfaced.',
       'warning':'Scores rank evidence; they are not probabilities. QUALIFIED opportunities can still lose.'}
 
+def v412_locked_opportunity_tracker(m1, locked, current):
+    """Track one phone-locked opportunity across scans.
+    The lock prevents a valid selected point from silently being replaced. It does not make
+    the setup safer: closed M1 prices can still trigger, invalidate, stop, or complete it.
+    """
+    if not isinstance(locked,dict) or not locked.get('active'):
+        return current
+    terminal={'STOPPED','INVALIDATED','TP2_HIT','EXPIRED','MISSED'}
+    if str(locked.get('status') or '') in terminal:
+        return current
+    side=str(locked.get('side') or '').upper()
+    try:
+        lo=float(locked.get('low')); hi=float(locked.get('high'))
+    except (TypeError,ValueError):
+        return current
+    if side not in ('BUY','SELL') or hi<lo:
+        return current
+    candles=((m1 or {}).get('latest_closed_candles') or [])[-80:]
+    atr=float((m1 or {}).get('atr14') or 0) or 1.0
+    created=str(locked.get('created_at') or '')
+    if created:
+        post=[x for x in candles if str(x.get('t') or '')>=created]
+        if post: candles=post
+    rp=float((m1 or {}).get('data_current_price') or (candles[-1].get('c') if candles else (lo+hi)/2))
+    risk=locked.get('risk_plan') or {}
+    def num(k):
+        try:return float(risk.get(k))
+        except (TypeError,ValueError):return None
+    sl,tp1,tp2=num('stop_loss'),num('tp1'),num('tp2')
+    # Hard lifecycle events use traded candle extremes, not candidate ranking.
+    if candles and sl is not None:
+        stopped=any((float(x['l'])<=sl if side=='BUY' else float(x['h'])>=sl) for x in candles)
+        if stopped:
+            return {'state':'NO_TRADE','decision':'NO TRADE','reason':'Locked opportunity hit its structural stop/invalidation.','best_point':None,
+                    'locked_lifecycle':{'id':locked.get('id'),'status':'STOPPED','side':side,'low':lo,'high':hi,'stop_loss':sl,'message':'STOPPED / INVALIDATED — do not reuse this point.'}}
+    tp1hit=bool(candles and tp1 is not None and any((float(x['h'])>=tp1 if side=='BUY' else float(x['l'])<=tp1) for x in candles))
+    tp2hit=bool(candles and tp2 is not None and any((float(x['h'])>=tp2 if side=='BUY' else float(x['l'])<=tp2) for x in candles))
+    if tp2hit:
+        status='TP2_HIT'
+    elif tp1hit:
+        status='TP1_HIT'
+    else:
+        status='LOCKED'
+    touch_i=next((i for i,x in enumerate(candles) if float(x['l'])<=hi and float(x['h'])>=lo),None) if candles else None
+    triggered=False; trigger_ev=[]
+    if touch_i is not None:
+        status='ARMED'
+        after=candles[touch_i:]
+        for i,x in enumerate(after):
+            o,c,h,l=map(float,(x['o'],x['c'],x['h'],x['l']))
+            body=abs(c-o)
+            reclaim=(c>hi if side=='BUY' else c<lo)
+            directional=(c>o if side=='BUY' else c<o)
+            follow=False
+            if i>0:
+                pc=float(after[i-1]['c']); follow=(c>pc if side=='BUY' else c<pc)
+            if reclaim and directional and (body>=0.18*atr or follow):
+                triggered=True; trigger_ev=['zone tested','closed-M1 reclaim','directional close/follow-through']; break
+        if triggered: status='TRIGGERED'
+    if tp1hit and not tp2hit: status='TP1_HIT'
+    # Preserve the original point/risk plan. Current selector may keep finding alternatives,
+    # but it cannot silently replace this active opportunity.
+    bp={'side':side,'low':round(lo,2),'high':round(hi,2),'source':locked.get('source') or 'LOCKED_OPPORTUNITY',
+        'best_point_score':locked.get('best_point_score'),'structural_score':locked.get('structural_score'),
+        'risk_plan':risk,'entry_confirmation':{'state':'ENTRY_CONFIRMED' if triggered else ('ARMED_TESTING' if touch_i is not None else 'WAITING_FOR_PRICE'),
+        'confirmed':triggered,'score':82 if triggered else (55 if touch_i is not None else 25),'evidence':trigger_ev,'missing':[] if triggered else ['fast closed-M1 trigger']}}
+    decision=(f'{side} OPPORTUNITY — TRIGGERED' if triggered else ('WAIT — ARMED' if touch_i is not None else 'WAIT — LOCKED'))
+    state='ENTRY_QUALIFIED' if triggered else ('ARMED' if touch_i is not None else 'DEVELOPING')
+    reason='Locked point produced the V41.2 fast closed-M1 trigger.' if triggered else ('Price is testing the locked point; waiting for fast trigger.' if touch_i is not None else 'Original best point remains locked; waiting for price.')
+    return {'state':state,'decision':decision,'reason':reason,'best_point':bp,'alternatives_considered':(current or {}).get('alternatives_considered',0),
+            'setup_families_checked':['PULLBACK','BREAK_RETEST','SWEEP_RECLAIM','CONSOLIDATION_BREAK'],
+            'locked_lifecycle':{'id':locked.get('id'),'status':status,'side':side,'low':round(lo,2),'high':round(hi,2),'current_price':round(rp,2),'tp1_hit':tp1hit,'tp2_hit':tp2hit,
+                                'message':'Point remains locked until TP/SL/invalidation; new scans do not silently replace it.'},
+            'selector_note':'V41.2 keeps the active point locked across scans; alternatives remain secondary until the lock ends.',
+            'warning':'Scores rank evidence; they are not probabilities. Triggered opportunities can still lose.'}
+
 def build_reaction_engine(m5):
     """V32 deterministic closed-M5 reaction state for zones currently being tracked.
     Rejection alone is not confirmation; follow-through/structure evidence is required.
@@ -2684,6 +2764,8 @@ def data_only_result(mtf,data_status,data_note,why='Gemini visual check unavaila
 def live_scan():
     """Screenshot-free live XAU/USD scan. Twelve Data + deterministic Python only; zero Gemini calls."""
     try:
+        payload=request.get_json(silent=True) or {} if request.method=='POST' else {}
+        locked_opportunity=payload.get('locked_opportunity') if isinstance(payload,dict) else None
         mtf,data_status,data_note=fetch_multitimeframe()
         if data_status not in ('LIVE_DATA','PARTIAL_DATA'):
             return jsonify({'error':'market_data_unavailable','detail':data_note}),503
@@ -2692,6 +2774,9 @@ def live_scan():
         filter_fresh_candidates(mtf)
         mtf['M5']['metrics']['reaction_engine']=build_reaction_engine(mtf['M5']['metrics'])
         mtf['M5']['metrics']['m1_precision']=build_m1_precision_engine(mtf, market_context.get('vwap_context',{}))
+        _m1p=mtf['M5']['metrics'].get('m1_precision') or {}
+        _m1p['hybrid_opportunity']=v412_locked_opportunity_tracker((mtf.get('M1') or {}).get('metrics') or {}, locked_opportunity, _m1p.get('hybrid_opportunity') or {})
+        mtf['M5']['metrics']['m1_precision']=_m1p
         apply_microstructure_context(mtf,market_context.get('vwap_context',{}),market_context.get('orderflow_context',{}))
         # V31: keep pullback state/candidate discovery separate from final display qualification.
         # This prevents a detected setup from silently disappearing between scans.
@@ -2716,7 +2801,7 @@ def live_scan():
         out=data_only_result(mtf,data_status,data_note,'NOT_USED_LIVE_DATA_MODE')
         out['mode']='LIVE_DATA_CONTEXT'
         out['gemini_status']='NOT_USED'
-        out['scanner_version']='V39.4 M1 PRECISION QUANT ENGINE'
+        out['scanner_version']='V41.2 ADAPTIVE ENTRY + TRACKING'
         out['market_context']=market_context
         out['event_risk']=market_context.get('event_risk','UNKNOWN')
         out['data_only_summary']=out['data_only_summary'].replace('V26 maps','V30 maps')
