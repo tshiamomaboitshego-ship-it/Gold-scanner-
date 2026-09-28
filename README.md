@@ -46,3 +46,13 @@ Optional Render overrides: `V414_TRIGGER_MAX_AGE_SECONDS` (default 45 seconds af
 - Strict lifecycle ordering: TP1/TP2 and STOPPED are only possible after the exact opportunity has an accepted TRIGGERED state. An untriggered setup crossing invalidation is INVALIDATED, not a losing trade.
 - New-lock discovery freshness guard rejects automatic alerts when live price shows the move has already materially progressed or traded adversely through the proposed entry before discovery.
 - Existing trigger-age, market-data freshness, structural invalidation and don't-chase guards remain active.
+
+## V41.5 Passive Observability upgrade
+
+V41.5 deliberately leaves the V41.4 signal/entry decision logic unchanged. It adds a best-effort rolling JSONL performance/diagnostic logger and a passive market-regime label so forward testing can explain why the scanner was quiet or why a candidate was rejected.
+
+Recorded fields include scan time, provider M1 time/feed age, current price, regime, precision state, candidate counts/diagnostics, hybrid state/decision, best-point summary, discovery rejection, opportunity ID and lifecycle event. DATA_WAIT and AUTO_OFF are also recorded.
+
+Diagnostics endpoint: `GET /api/diagnostics/v415?limit=100` protected by the same `MONITOR_TICK_SECRET` when configured. This is observational only: it does not change grades, candidate selection, freshness, SL/TP, or Telegram lifecycle decisions.
+
+On Render's free filesystem the JSONL file is ephemeral and can be lost on restart/redeploy. This version is for forward-test diagnostics; persistent database storage can be added later if needed.

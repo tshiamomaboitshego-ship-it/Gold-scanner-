@@ -3357,6 +3357,88 @@ def _v414_message(event, lock, opp):
     return '\n'.join(lines)
 
 
+# ================= V41.5 PASSIVE OBSERVABILITY LAYER =================
+# This layer MUST NOT change signal generation, grading, freshness, lifecycle, SL or TP decisions.
+# It only records what V41.4 saw so later changes can be based on forward-test evidence.
+V415_LOG_FILE = os.environ.get('V415_LOG_FILE', '/tmp/gold_scanner_v415_observations.jsonl')
+V415_LOG_MAX_LINES = max(200, min(10000, int(os.environ.get('V415_LOG_MAX_LINES', '2500') or 2500)))
+
+
+def _v415_precision(out):
+    return out.get('m1_precision') or ((out.get('multi_timeframe_metrics') or {}).get('M5') or {}).get('m1_precision') or {}
+
+
+def _v415_passive_regime(out):
+    """Read the already-computed deterministic regime diagnostics without influencing decisions."""
+    p=_v415_precision(out)
+    r=p.get('market_regime_v2') or {}
+    raw=str(r.get('regime') or '').upper()
+    if 'COMPRESSION' in raw: label='COMPRESSION'
+    elif 'TREND' in raw: label='TRENDING'
+    elif 'RANGE' in raw: label='RANGE'
+    elif 'SHOCK' in raw or 'EXPANSION' in raw: label='EXPANSION'
+    elif 'TRANSITION' in raw: label='TRANSITION'
+    else: label='UNKNOWN'
+    return {'label':label,'raw':raw or 'UNKNOWN','structure':r.get('structure'),
+            'momentum':r.get('momentum'),'compression_state':r.get('compression_state'),
+            'passive_only':True}
+
+
+def _v415_observation(out=None,event=None,lock=None,state=None,status='SCANNED',detail=None):
+    now=datetime.now(timezone.utc).isoformat()
+    state=state or {}
+    row={'observed_at':now,'scanner_version':'V41.5 OBSERVABILITY','status':status,'event':event,
+         'detail':detail,'opportunity_id':(lock or {}).get('opportunity_id'),
+         'locked_status':(lock or {}).get('status'),'side':(lock or {}).get('side'),
+         'zone_low':(lock or {}).get('low'),'zone_high':(lock or {}).get('high')}
+    if out:
+        p=_v415_precision(out); o=p.get('hybrid_opportunity') or {}; bp=o.get('best_point') or {}
+        diag=p.get('candidate_diagnostics') or {}
+        row.update({'current_price':out.get('current_price'),'data_status':out.get('data_status'),
+                    'provider_m1_time':(out.get('price_meta') or {}).get('latest_m1_time'),
+                    'm1_feed_age_minutes':(out.get('price_meta') or {}).get('m1_feed_age_minutes'),
+                    'market_phase':out.get('market_phase'),'volatility':out.get('volatility'),
+                    'passive_regime':_v415_passive_regime(out),
+                    'precision_state':p.get('state'),'context_direction':p.get('context_direction'),
+                    'qualified_candidates':len(p.get('candidates') or []),
+                    'ranked_candidates':len(p.get('ranked_candidate_pool') or []),
+                    'candidate_diagnostics':diag,
+                    'hybrid_state':o.get('state'),'hybrid_decision':o.get('decision'),
+                    'best_point':{'side':bp.get('side'),'low':bp.get('low'),'high':bp.get('high'),
+                                  'source':bp.get('source'),'score':bp.get('best_point_score'),
+                                  'structural_score':bp.get('structural_score'),
+                                  'grade':(bp.get('selective_grade') or {}).get('grade')} if bp else None,
+                    'last_discovery_rejection':state.get('last_discovery_rejection')})
+    return row
+
+
+def _v415_append(row):
+    """Best-effort rolling JSONL logger. Logging failure can never block a trading scan."""
+    try:
+        with open(V415_LOG_FILE,'a',encoding='utf-8') as f:
+            f.write(json.dumps(row,ensure_ascii=False,separators=(',',':'))+'\\n')
+        # Keep bounded on the free Render filesystem.
+        with open(V415_LOG_FILE,'r',encoding='utf-8') as f:
+            lines=f.readlines()
+        if len(lines)>V415_LOG_MAX_LINES:
+            tmp=V415_LOG_FILE+'.tmp'
+            with open(tmp,'w',encoding='utf-8') as f: f.writelines(lines[-V415_LOG_MAX_LINES:])
+            os.replace(tmp,V415_LOG_FILE)
+    except Exception:
+        traceback.print_exc()
+
+
+def _v415_read(limit=100):
+    try:
+        with open(V415_LOG_FILE,'r',encoding='utf-8') as f: lines=f.readlines()
+        rows=[]
+        for line in lines[-max(1,min(500,limit)):]:
+            try: rows.append(json.loads(line))
+            except Exception: pass
+        return rows
+    except Exception:
+        return []
+
 def v414_monitor_tick(send_alerts=True):
     """One automatic monitor cycle. Safe to call from a cron/scheduler endpoint or background loop."""
     with _v414_monitor_lock:
@@ -3364,7 +3446,8 @@ def v414_monitor_tick(send_alerts=True):
         if state.get('user_auto_enabled', True) is False:
             state['last_tick']=datetime.now(timezone.utc).isoformat(); state['last_error']=None
             _v414_save_state(state)
-            return {'ok':True,'event':'AUTO_OFF','telegram':None,'state':state,'scanner_version':'V41.4 AUTOMATIC OPPORTUNITY ALERTS'}
+            _v415_append(_v415_observation(event='AUTO_OFF',state=state,status='PAUSED'))
+            return {'ok':True,'event':'AUTO_OFF','telegram':None,'state':state,'scanner_version':'V41.5 OBSERVABILITY'}
         locked=state.get('locked_opportunity')
         try:
             out=_v414_scan(locked)
@@ -3378,8 +3461,9 @@ def v414_monitor_tick(send_alerts=True):
                 state['last_data_wait']=detail[:1000]
                 state['last_data_wait_at']=state['last_tick']
                 _v414_save_state(state)
+                _v415_append(_v415_observation(event='DATA_WAIT',state=state,status='DATA_WAIT',detail=detail[:500]))
                 return {'ok':True,'event':'DATA_WAIT','telegram':None,'detail':detail[:500],
-                        'state':state,'scanner_version':'V41.4 AUTOMATIC OPPORTUNITY ALERTS'}
+                        'state':state,'scanner_version':'V41.5 OBSERVABILITY'}
             raise
         event,lock,opp=_v414_event(out,state)
         event,lock=_v414_trigger_freshness(out,event,lock)
@@ -3398,7 +3482,8 @@ def v414_monitor_tick(send_alerts=True):
                     state['last_alert_event_id']=event_id; state['last_alert_status']=event
         state['last_tick']=datetime.now(timezone.utc).isoformat(); state['last_error']=None
         state['last_market_price']=out.get('current_price'); _v414_save_state(state)
-        return {'ok':True,'event':event,'telegram':sent,'state':state,'scanner_version':'V41.4 AUTOMATIC OPPORTUNITY ALERTS'}
+        _v415_append(_v415_observation(out=out,event=event,lock=lock,state=state,status='SCANNED'))
+        return {'ok':True,'event':event,'telegram':sent,'state':state,'scanner_version':'V41.5 OBSERVABILITY'}
 
 
 def _v414_loop():
@@ -3451,6 +3536,22 @@ def v414_alert_toggle():
             state['enabled_fresh_start_at']=datetime.now(timezone.utc).isoformat()
         _v414_save_state(state)
     return jsonify({'ok':True,'auto_monitor_enabled':enabled,'fresh_start':True})
+
+
+@app.get('/api/diagnostics/v415')
+def v415_diagnostics():
+    secret=(os.environ.get('MONITOR_TICK_SECRET') or '').strip()
+    supplied=(request.headers.get('X-Monitor-Secret') or request.args.get('secret') or '').strip()
+    if secret and supplied!=secret:
+        return jsonify({'ok':False,'detail':'unauthorized'}),401
+    try: limit=int(request.args.get('limit','100'))
+    except Exception: limit=100
+    rows=_v415_read(limit)
+    counts={}
+    for r in rows:
+        key=r.get('event') or 'NO_EVENT'; counts[key]=counts.get(key,0)+1
+    return jsonify({'ok':True,'scanner_version':'V41.5 OBSERVABILITY','passive_only':True,
+                    'decision_logic_changed':False,'count':len(rows),'event_counts':counts,'observations':rows})
 
 
 @app.post('/api/alerts/tick')
