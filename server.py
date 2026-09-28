@@ -3315,7 +3315,7 @@ def _v414_telegram(text):
     url=f'https://api.telegram.org/bot{token}/sendMessage'
     data=urllib.parse.urlencode({'chat_id':chat,'text':text,'disable_web_page_preview':'true'}).encode()
     try:
-        req=urllib.request.Request(url,data=data,method='POST',headers={'Content-Type':'application/x-www-form-urlencoded','User-Agent':'GoldScannerV42.2/1.0'})
+        req=urllib.request.Request(url,data=data,method='POST',headers={'Content-Type':'application/x-www-form-urlencoded','User-Agent':'GoldScannerV42.3.1/1.0'})
         with urllib.request.urlopen(req,timeout=12) as r:
             body=json.loads(r.read().decode('utf-8','replace'))
         return {'ok':bool(body.get('ok')),'detail':'sent' if body.get('ok') else str(body)[:300]}
@@ -3578,7 +3578,7 @@ def _v415_passive_regime(out):
 def _v415_observation(out=None,event=None,lock=None,state=None,status='SCANNED',detail=None):
     now=datetime.now(timezone.utc).isoformat()
     state=state or {}
-    row={'observed_at':now,'scanner_version':'V42.2 STAGE-AWARE STRICTNESS','status':status,'event':event,
+    row={'observed_at':now,'scanner_version':'V42.3.1 TELEGRAM SCAN REPORT','status':status,'event':event,
          'detail':detail,'opportunity_id':(lock or {}).get('opportunity_id'),
          'locked_status':(lock or {}).get('status'),'side':(lock or {}).get('side'),
          'zone_low':(lock or {}).get('low'),'zone_high':(lock or {}).get('high')}
@@ -3649,7 +3649,7 @@ def v414_monitor_tick(send_alerts=True):
             state['last_tick']=datetime.now(timezone.utc).isoformat(); state['last_error']=None
             _v414_save_state(state)
             _v415_append(_v415_observation(event='AUTO_OFF',state=state,status='PAUSED'))
-            return {'ok':True,'event':'AUTO_OFF','telegram':None,'state':state,'scanner_version':'V42.2 STAGE-AWARE STRICTNESS'}
+            return {'ok':True,'event':'AUTO_OFF','telegram':None,'state':state,'scanner_version':'V42.3.1 TELEGRAM SCAN REPORT'}
         locked=state.get('locked_opportunity')
         try:
             out=_v414_scan(locked)
@@ -3665,7 +3665,7 @@ def v414_monitor_tick(send_alerts=True):
                 _v414_save_state(state)
                 _v415_append(_v415_observation(event='DATA_WAIT',state=state,status='DATA_WAIT',detail=detail[:500]))
                 return {'ok':True,'event':'DATA_WAIT','telegram':None,'detail':detail[:500],
-                        'state':state,'scanner_version':'V42.2 STAGE-AWARE STRICTNESS'}
+                        'state':state,'scanner_version':'V42.3.1 TELEGRAM SCAN REPORT'}
             raise
         event,lock,opp=_v414_event(out,state)
         event,lock=_v414_trigger_freshness(out,event,lock)
@@ -3685,7 +3685,7 @@ def v414_monitor_tick(send_alerts=True):
         state['last_tick']=datetime.now(timezone.utc).isoformat(); state['last_error']=None
         state['last_market_price']=out.get('current_price'); _v414_save_state(state)
         _v415_append(_v415_observation(out=out,event=event,lock=lock,state=state,status='SCANNED'))
-        return {'ok':True,'event':event,'telegram':sent,'state':state,'scanner_version':'V42.2 STAGE-AWARE STRICTNESS'}
+        return {'ok':True,'event':event,'telegram':sent,'state':state,'scanner_version':'V42.3.1 TELEGRAM SCAN REPORT'}
 
 
 def _v414_loop():
@@ -3714,7 +3714,7 @@ def v414_test_alert():
 @app.route('/api/alerts/status',methods=['GET'])
 def v414_alert_status():
     s=_v414_load_state()
-    return jsonify({'scanner_version':'V42.2 STAGE-AWARE STRICTNESS','telegram_configured':bool((os.environ.get('TELEGRAM_BOT_TOKEN') or '').strip() and (os.environ.get('TELEGRAM_CHAT_ID') or V414_CHAT_ID).strip()),
+    return jsonify({'scanner_version':'V42.3.1 TELEGRAM SCAN REPORT','telegram_configured':bool((os.environ.get('TELEGRAM_BOT_TOKEN') or '').strip() and (os.environ.get('TELEGRAM_CHAT_ID') or V414_CHAT_ID).strip()),
                     'auto_monitor_enabled':bool(s.get('user_auto_enabled', True)),'background_thread_enabled':V414_AUTO_ENABLED,'monitor_seconds':V414_MONITOR_SECONDS,'state':s})
 
 
@@ -3753,10 +3753,66 @@ def v415_diagnostics():
     for r in rows:
         key=r.get('event') or 'NO_EVENT'; counts[key]=counts.get(key,0)+1
     latest=rows[-1] if rows else None
-    return jsonify({'ok':True,'scanner_version':'V42.2 STAGE-AWARE STRICTNESS','passive_only':False,
+    return jsonify({'ok':True,'scanner_version':'V42.3.1 TELEGRAM SCAN REPORT','passive_only':False,
                     'architecture':'MAP -> LOCK -> WAIT -> REACT -> CONFIRM -> TRIGGER',
                     'count':len(rows),'event_counts':counts,'latest':latest,'observations':rows})
 
+
+
+def _v423_scan_report_message(out):
+    """Human-readable one-shot diagnostic report. Does not mutate the opportunity lifecycle."""
+    p=_v415_precision(out)
+    o=p.get('hybrid_opportunity') or {}
+    q=p.get('candidate_diagnostics') or {}
+    em=out.get('v42_early_map') or {}
+    bp=em.get('best_location') or o.get('best_point') or {}
+    def top_rejects(d, limit=3):
+        if not isinstance(d,dict) or not d: return 'none'
+        return ' · '.join(f"{str(k).replace('_',' ')} {v}" for k,v in sorted(d.items(), key=lambda kv: kv[1], reverse=True)[:limit])
+    pm=out.get('price_meta') or {}
+    regime=_v415_passive_regime(out)
+    lines=[
+        '🧠 V42.3 SCAN REPORT — DIAGNOSTIC ONLY',
+        f"Gold: {out.get('current_price','—')}",
+        f"Data: {out.get('data_status','—')} · M1 age: {pm.get('m1_feed_age_minutes','—')} min",
+        f"Regime: {regime.get('label','—')}",
+        f"Candidates: raw {q.get('raw',0)} → fresh {q.get('fresh',0)} → ranked {q.get('ranked',0)} → WATCH {q.get('watch',0)} → qualified {q.get('qualified',0)}",
+        f"Location map: {em.get('mapped_count',0)} mapped · {em.get('active_count',0)} active · {em.get('approaching_count',0)} approaching · {em.get('background_count',0)} background",
+        f"Stage funnel: MAPPED {em.get('map_only_count',0)} → WATCH {em.get('watch_count',0)} → LOCK-ELIGIBLE {em.get('lock_eligible_count',0)}",
+        f"Hybrid: {o.get('state','—')} · {o.get('decision','—')}",
+        f"Candidate rejects: {top_rejects(q.get('rejected') or {})}",
+        f"Map rejects: {top_rejects(em.get('rejected') or {})}",
+    ]
+    if bp:
+        lines.append(f"Best nearby location: {bp.get('side','—')} {bp.get('low','—')}–{bp.get('high','—')} · {bp.get('attention_tier') or bp.get('source') or '—'}")
+    lines.append('This report is diagnostics, not a trade signal.')
+    return '\n'.join(lines)
+
+
+@app.post('/api/alerts/scan-report')
+def v423_scan_report():
+    """Run one non-mutating live scan and send its funnel/rejection report to Telegram."""
+    secret=(os.environ.get('MONITOR_TICK_SECRET') or '').strip()
+    supplied=(request.headers.get('X-Monitor-Secret') or request.args.get('secret') or '').strip()
+    if secret and supplied!=secret:
+        return jsonify({'ok':False,'detail':'unauthorized'}),401
+    try:
+        state=_v414_load_state()
+        out=_v414_scan(state.get('locked_opportunity'))
+        msg=_v423_scan_report_message(out)
+        sent=_v414_telegram(msg)
+        _v415_append(_v415_observation(out=out,event='DIAGNOSTIC_REPORT',state=state,status='SCANNED'))
+        return jsonify({'ok':bool(sent.get('ok')),'telegram':sent,'report':msg,'scanner_version':'V42.3.1 TELEGRAM SCAN REPORT'}), (200 if sent.get('ok') else 503)
+    except RuntimeError as e:
+        detail=str(e)
+        if detail.startswith('market_data_unavailable:'):
+            msg='⚠️ V42.3 SCAN REPORT — DATA WAIT\n'+detail[:700]+'\nNo trade signal was evaluated.'
+            sent=_v414_telegram(msg)
+            return jsonify({'ok':bool(sent.get('ok')),'event':'DATA_WAIT','telegram':sent,'detail':detail[:500]}), (200 if sent.get('ok') else 503)
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'ok':False,'error':'scan_report_failed','type':type(e).__name__,'detail':str(e)[:500]}),500
 
 @app.post('/api/alerts/tick')
 def v414_alert_tick():
