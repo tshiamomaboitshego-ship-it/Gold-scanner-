@@ -2309,13 +2309,17 @@ def build_m1_precision_engine(mtf, vwap_context=None):
         # transition/break-retest candidate before it can be evaluated. It is reflected
         # in scoring and WATCH/QUALIFIED state instead.
 
+        # V43.4: the generic M1 structural pool is no longer gated by an active
+        # continuation pullback. Pullback-specific bridge/route/essential candidates
+        # still require a real continuation pullback, but native structural locations
+        # remain discoverable for the wider Hybrid Opportunity Engine.
         native_pool=list(((m1.get('candidate_zones') or {}).get(side) or []))
-        bridge_pool=[z for z in pullback_bridge if str(z.get('side') or '').lower()==side]
-        route_pool=[z for z in extra_routes if str(z.get('side') or '').lower()==side]
-        # V40 pullback-only: only evaluate the side of the active continuation pullback.
-        if not m1_continuation:
-            continue
-        essential_pool=[z for z in essential_routes if z.get('side')==side]
+        if m1_continuation:
+            bridge_pool=[z for z in pullback_bridge if str(z.get('side') or '').lower()==side]
+            route_pool=[z for z in extra_routes if str(z.get('side') or '').lower()==side]
+            essential_pool=[z for z in essential_routes if z.get('side')==side]
+        else:
+            bridge_pool=[]; route_pool=[]; essential_pool=[]
         candidate_pool=native_pool+bridge_pool+route_pool+essential_pool
         diagnostics['raw'] += len(candidate_pool)
         for _z in candidate_pool:
@@ -3077,7 +3081,7 @@ def live_scan():
         out=data_only_result(mtf,data_status,data_note,'NOT_USED_LIVE_DATA_MODE')
         out['mode']='LIVE_DATA_CONTEXT'
         out['gemini_status']='NOT_USED'
-        out['scanner_version']='V43.3 AUTO CONTROL'
+        out['scanner_version']='V43.4 HYBRID WATCH FIX'
         out['v43_contract']={'setup_routes':['PULLBACK','BREAK_RETEST','SWEEP_RECLAIM','CONSOLIDATION_BREAK'],'visible_lifecycle':['WATCH','ARMED','TRIGGERED'],'internal_lock_preserved':True,'entry_rule':'TRIGGERED requires closed-M1 confirmation; WATCH/ARMED are not entries.'}
         out['market_context']=market_context
         out['event_risk']=market_context.get('event_risk','UNKNOWN')
@@ -3377,13 +3381,25 @@ def v42_early_location_map(out):
     momentum=str(m1.get('momentum') or p.get('m1_momentum') or 'UNCLEAR').upper()
     pressure=str(m1.get('current_pressure') or 'UNCLEAR').upper()
     regime_ctx=_v423_regime_context(p)
+    # V43.4: early discovery sees BOTH the M1 structural/pullback pool and the
+    # three independent non-pullback Hybrid routes. Previously the early map only
+    # consumed ranked_candidate_pool, which made saved WATCHes effectively pullback-heavy.
     pool=list(p.get('ranked_candidate_pool') or [])
+    for hc in v411_multi_setup_candidates(m1):
+        hc=dict(hc)
+        src=str(hc.get('source') or '')
+        if src.startswith('BREAK_RETEST_'): fam='BREAK_RETEST'
+        elif src.startswith('SWEEP_RECLAIM_'): fam='LIQUIDITY_SWEEP_RECLAIM'
+        elif src.startswith('CONSOLIDATION_BREAK_'): fam='COMPRESSION_BREAK'
+        else: fam='HYBRID'
+        hc['setup_family']=fam
+        pool.append(hc)
     mapped=[]; rejected={}
     def rej(k): rejected[k]=rejected.get(k,0)+1
     def attention_tier(datr):
         if datr is None: return 'BACKGROUND'
         if datr <= 0.75: return 'ACTIVE'
-        if datr <= 2.0: return 'APPROACHING'
+        if datr <= 3.0: return 'APPROACHING'
         return 'BACKGROUND'
     def path_state(side):
         # This describes current travel, not a prediction. A SELL above price is being approached by bullish travel;
@@ -3465,7 +3481,7 @@ def v42_early_location_map(out):
     best_lock=lock_eligible[0] if lock_eligible else None
     return {'version':'V42.3_CONTEXT_INTELLIGENCE_SUITE','philosophy':'MAP OPENLY -> WATCH CONTEXTUALLY -> LOCK SELECTIVELY -> ARM ON TOUCH -> TRIGGER STRICTLY',
             'current_price':cp,'m1_atr':round(atr,3) if atr else None,'m1_momentum':momentum,'m1_pressure':pressure,'market_regime_intelligence':regime_ctx,
-            'active_radius_atr':0.75,'approaching_radius_atr':2.0,'background_limit_atr':5.0,
+            'active_radius_atr':0.75,'approaching_radius_atr':3.0,'background_limit_atr':5.0,
             'mapped_count':len(mapped),'active_count':len(active),'approaching_count':len(approaching),'background_count':len(background),
             'map_only_count':len(map_only),'watch_count':len(watch),'lock_eligible_count':len(lock_eligible),
             'stage_policy':{'MAPPED':'low-moderate: remember valid areas','WATCH':'moderate: nearby/developing, no entry','LOCKED':'moderate-high: strong location/context','ARMED':'high: price has actually tested location','TRIGGERED':'very high: closed-M1 reaction confirmation required'},
@@ -3547,7 +3563,7 @@ def _v414_scan(locked=None):
     out['mode']='LIVE_DATA_CONTEXT'; out['gemini_status']='NOT_USED'; out['scanner_version']='V41.4 AUTOMATIC OPPORTUNITY ALERTS'
     out['market_context']=market_context; out['event_risk']=market_context.get('event_risk','UNKNOWN')
     out['v42_early_map']=v42_early_location_map(out)
-    out['scanner_version']='V43.3 AUTO CONTROL'
+    out['scanner_version']='V43.4 HYBRID WATCH FIX'
     out['v43_contract']={'setup_routes':['PULLBACK','BREAK_RETEST','SWEEP_RECLAIM','CONSOLIDATION_BREAK'],'visible_lifecycle':['WATCH','ARMED','TRIGGERED'],'internal_lock_preserved':True,'entry_rule':'TRIGGERED requires closed-M1 confirmation; WATCH/ARMED are not entries.'}
     return out
 
@@ -3808,12 +3824,19 @@ def _v431_discover_watches(out,state,preserve_existing=False):
             if old.get('active') and str(old.get('status') or '').upper() not in ('TP2_HIT','STOPPED','INVALIDATED','EXPIRED','MISSED','DATA_STALE'):
                 candidates.append(old)
                 if len(candidates)>=V431_MAX_WATCHES: break
+    funnel={'mapped':len(rows),'stage_reject':0,'distance_reject':0,'grade_reject':0,'failure_reject':0,'freshness_reject':0,'overlap_reject':0,'saved_new':0,'by_family':{}}
     for c in rows:
         grade=str((c.get('selective_grade') or {}).get('grade') or '').upper()
-        if c.get('lifecycle_stage') not in ('WATCH','LOCK_ELIGIBLE'): continue
-        if c.get('attention_tier') not in ('ACTIVE','APPROACHING'): continue
-        if grade not in ('B','A','A+'): continue
-        if str((c.get('failure_intelligence') or {}).get('state') or '').upper()=='FAILED': continue
+        if c.get('lifecycle_stage') not in ('WATCH','LOCK_ELIGIBLE'):
+            funnel['stage_reject']+=1; continue
+        if c.get('attention_tier') not in ('ACTIVE','APPROACHING'):
+            funnel['distance_reject']+=1; continue
+        # V43.4 WATCH means "worth monitoring", not "entry quality". A legitimate
+        # WATCH grade may therefore be saved; ARMED/TRIGGERED remain strict later.
+        if grade not in ('WATCH','B','A','A+'):
+            funnel['grade_reject']+=1; continue
+        if str((c.get('failure_intelligence') or {}).get('state') or '').upper()=='FAILED':
+            funnel['failure_reject']+=1; continue
         w={'active':True,'side':c.get('side'),'low':c.get('low'),'high':c.get('high'),
            'source':c.get('source') or 'WATCH_AREA','best_point_score':c.get('best_point_score'),
            'structural_score':c.get('structural_score'),'risk_plan':c.get('risk_plan') or {},
@@ -3822,12 +3845,17 @@ def _v431_discover_watches(out,state,preserve_existing=False):
            'last_seen':datetime.now(timezone.utc).isoformat(),'m1_atr_at_discovery':em.get('m1_atr'),
            'attention_tier':c.get('attention_tier'),'setup_family':c.get('setup_family') or c.get('setup_type') or c.get('source')}
         fresh,why=_v414_discovery_fresh(out,w)
-        if not fresh: continue
+        if not fresh:
+            funnel['freshness_reject']+=1; continue
         # Merge overlapping same-side zones: keep the higher-ranked representative.
-        if any(_v431_overlap(w,x) for x in candidates): continue
+        if any(_v431_overlap(w,x) for x in candidates):
+            funnel['overlap_reject']+=1; continue
         _v414_assign_opportunity_id(w,state); w['id']=w['opportunity_id']
         candidates.append(w)
+        funnel['saved_new']+=1
+        fam=str(w.get('setup_family') or 'UNKNOWN'); funnel['by_family'][fam]=funnel['by_family'].get(fam,0)+1
         if len(candidates)>=V431_MAX_WATCHES: break
+    state['last_watch_funnel']=funnel
     state['watched_opportunities']=candidates
     state['watch_discovered_at']=datetime.now(timezone.utc).isoformat()
     state['last_alert_event_ids']=[]
@@ -3867,7 +3895,7 @@ def v431_monitor_tick(send_alerts=True):
             return {'ok':True,'event':'SCANNER_OFF','auto_monitor_enabled':False,
                     'watch_count':len([w for w in (state.get('watched_opportunities') or []) if w.get('active')]),
                     'ohlc_requested':False,'xaus_requested':False,'telegram':None,
-                    'state':state,'scanner_version':'V43.3 AUTO CONTROL'}
+                    'state':state,'scanner_version':'V43.4 HYBRID WATCH FIX'}
         discovery=None; discovery_new=[]; discovery_notices=[]
         if _v432_discovery_due(state):
             try:
@@ -3879,20 +3907,20 @@ def v431_monitor_tick(send_alerts=True):
                 _v414_save_state(state); discovery='DATA_WAIT'
         watches=[w for w in (state.get('watched_opportunities') or []) if w.get('active')]
         if not watches:
-            return {'ok':True,'event':'AUTO_DISCOVERY_NO_TRADE' if discovery else 'NO_ACTIVE_WATCH','watch_count':0,'ohlc_requested':bool(discovery),'auto_discovery':discovery,'new_watches':len(discovery_new),'telegram':discovery_notices,'state':state,'scanner_version':'V43.3 AUTO CONTROL'}
+            return {'ok':True,'event':'AUTO_DISCOVERY_NO_TRADE' if discovery else 'NO_ACTIVE_WATCH','watch_count':0,'ohlc_requested':bool(discovery),'auto_discovery':discovery,'new_watches':len(discovery_new),'telegram':discovery_notices,'state':state,'scanner_version':'V43.4 HYBRID WATCH FIX'}
         price,pstat,pmeta=fetch_xaus_spot()
         state['last_tick']=datetime.now(timezone.utc).isoformat(); state['last_xaus_price']=price; state['last_xaus_status']=pstat
         if price is None:
             _v414_save_state(state)
-            return {'ok':True,'event':'XAUS_WAIT','watch_count':len(watches),'ohlc_requested':bool(discovery),'auto_discovery':discovery,'state':state,'scanner_version':'V43.3 AUTO CONTROL'}
+            return {'ok':True,'event':'XAUS_WAIT','watch_count':len(watches),'ohlc_requested':bool(discovery),'auto_discovery':discovery,'state':state,'scanner_version':'V43.4 HYBRID WATCH FIX'}
         near=[w for w in watches if _v431_near_watch(price,w)]
         if not near:
             _v414_save_state(state)
-            return {'ok':True,'event':'WATCHING','watch_count':len(watches),'near_count':0,'xaus_price':price,'ohlc_requested':bool(discovery),'auto_discovery':discovery,'new_watches':len(discovery_new),'telegram':discovery_notices,'state':state,'scanner_version':'V43.3 AUTO CONTROL'}
+            return {'ok':True,'event':'WATCHING','watch_count':len(watches),'near_count':0,'xaus_price':price,'ohlc_requested':bool(discovery),'auto_discovery':discovery,'new_watches':len(discovery_new),'telegram':discovery_notices,'state':state,'scanner_version':'V43.4 HYBRID WATCH FIX'}
         try: out=_v414_scan(None)
         except RuntimeError as e:
             state['last_data_wait']=str(e)[:800]; _v414_save_state(state)
-            return {'ok':True,'event':'DATA_WAIT','watch_count':len(watches),'near_count':len(near),'ohlc_requested':True,'auto_discovery':discovery,'state':state,'scanner_version':'V43.3 AUTO CONTROL'}
+            return {'ok':True,'event':'DATA_WAIT','watch_count':len(watches),'near_count':len(near),'ohlc_requested':True,'auto_discovery':discovery,'state':state,'scanner_version':'V43.4 HYBRID WATCH FIX'}
         remaining=[]; events=[]; sent=list(discovery_notices); seen=set(state.get('last_alert_event_ids') or [])
         for w in watches:
             if w not in near:
@@ -3909,7 +3937,7 @@ def v431_monitor_tick(send_alerts=True):
                     sent.append({'id':w.get('opportunity_id'),'event':event,'telegram':res}); events.append({'id':w.get('opportunity_id'),'event':event})
                     if res.get('ok'): seen.add(eid)
         state['watched_opportunities']=remaining; state['last_alert_event_ids']=list(seen)[-100:]; state['last_market_price']=out.get('current_price'); _v414_save_state(state)
-        return {'ok':True,'event':'WATCH_UPDATE' if events else 'WATCHING','events':events,'telegram':sent,'watch_count':len(remaining),'near_count':len(near),'xaus_price':price,'ohlc_requested':True,'auto_discovery':discovery,'new_watches':len(discovery_new),'state':state,'scanner_version':'V43.3 AUTO CONTROL'}
+        return {'ok':True,'event':'WATCH_UPDATE' if events else 'WATCHING','events':events,'telegram':sent,'watch_count':len(remaining),'near_count':len(near),'xaus_price':price,'ohlc_requested':True,'auto_discovery':discovery,'new_watches':len(discovery_new),'state':state,'scanner_version':'V43.4 HYBRID WATCH FIX'}
 
 # ================= V41.5 PASSIVE OBSERVABILITY LAYER =================
 # This layer MUST NOT change signal generation, grading, freshness, lifecycle, SL or TP decisions.
@@ -4103,7 +4131,7 @@ def v414_alert_toggle():
         _v414_save_state(state)
     return jsonify({'ok':True,'auto_monitor_enabled':enabled,'paused':not enabled,
                     'active_watch_count':len([w for w in (state.get('watched_opportunities') or []) if w.get('active')]),
-                    'scanner_version':'V43.3 AUTO CONTROL'})
+                    'scanner_version':'V43.4 HYBRID WATCH FIX'})
 
 
 @app.get('/api/diagnostics/v415')
