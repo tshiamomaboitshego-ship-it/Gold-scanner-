@@ -2337,9 +2337,16 @@ def build_m1_precision_engine(mtf, vwap_context=None):
             ahead=(hi < cp) if bull else (lo > cp)
             if not ahead:
                 diagnostics['rejected']['NOT_AHEAD']=diagnostics['rejected'].get('NOT_AHEAD',0)+1; continue
-            if touches>1:
-                diagnostics['rejected']['TOO_MANY_TOUCHES']=diagnostics['rejected'].get('TOO_MANY_TOUCHES',0)+1; continue
-            if cons not in ('','UNTOUCHED','LIGHT'):
+            # V43.6 engine-aware freshness: repeated interaction is evidence, not a universal death sentence.
+            # Pullback/supply-demand style locations remain freshness-sensitive; retest/reclaim/switch
+            # structures are allowed more interaction because prior interaction is part of their setup logic.
+            src_u=src.upper()
+            interaction_family = any(k in src_u for k in ('BREAK_RETEST','TRANSITION_RECLAIM','SWEEP','RECLAIM','SR_SWITCH'))
+            max_touches = 3 if interaction_family else 1
+            if touches>max_touches:
+                key='TOO_MANY_TOUCHES_INTERACTION' if interaction_family else 'TOO_MANY_TOUCHES_FRESH_ZONE'
+                diagnostics['rejected'][key]=diagnostics['rejected'].get(key,0)+1; continue
+            if cons not in ('','UNTOUCHED','LIGHT') and not (interaction_family and cons=='MODERATE' and touches<=3):
                 diagnostics['rejected']['CONSUMED']=diagnostics['rejected'].get('CONSUMED',0)+1; continue
             diagnostics['fresh'] += 1
             dist=max(0,cp-hi) if bull else max(0,lo-cp); datr=dist/atr if atr else 99
@@ -3425,7 +3432,7 @@ def v42_early_location_map(out):
         if datr is not None and datr>5.0: rej('TOO_FAR'); continue
         life=str(((c.get('setup_lifecycle') or {}).get('state')) or '').upper()
         if life in ('INVALIDATED','FAILED_TRAP_TRANSITION','RECLAIM_AFTER_INVALIDATION'):
-            rej('INVALIDATED'); continue
+            rej('INVALIDATED_'+(life or 'UNKNOWN')); continue
         if ((c.get('trap_failure') or {}).get('opposite_transition')):
             rej('OPPOSITE_TRANSITION'); continue
         if str(((c.get('pullback_intelligence') or {}).get('state')) or '')=='FAILED_PULLBACK':
@@ -3874,9 +3881,11 @@ def _v431_discover_watches(out,state,preserve_existing=False):
     funnel={'mapped':len(rows),'stage_reject':0,'distance_reject':0,'grade_reject':0,'failure_reject':0,'freshness_reject':0,'overlap_reject':0,'saved_new':0,'by_family':{}}
     for c in rows:
         grade=str((c.get('selective_grade') or {}).get('grade') or '').upper()
-        if c.get('lifecycle_stage') not in ('WATCH','LOCK_ELIGIBLE'):
+        # V43.6: WATCH is an early-warning state. Valid mapped/background locations may be
+        # saved before price is near them. Proximity matters when waking/arming, not for existence.
+        if c.get('lifecycle_stage') not in ('MAPPED','WATCH','LOCK_ELIGIBLE'):
             funnel['stage_reject']+=1; continue
-        if c.get('attention_tier') not in ('ACTIVE','APPROACHING'):
+        if c.get('attention_tier') not in ('ACTIVE','APPROACHING','BACKGROUND'):
             funnel['distance_reject']+=1; continue
         # V43.4 WATCH means "worth monitoring", not "entry quality". A legitimate
         # WATCH grade may therefore be saved; ARMED/TRIGGERED remain strict later.
@@ -3915,6 +3924,8 @@ def _v431_status_from_tracker(out,watch):
     tracked=v412_locked_opportunity_tracker(m1,watch,current)
     life=tracked.get('locked_lifecycle') or {}
     status=str(life.get('status') or watch.get('status') or 'LOCKED').upper()
+    if status=='INVALIDATED':
+        watch['last_invalidation_reason']=str(life.get('message') or life.get('reason') or life.get('freshness_status') or 'STRUCTURE_INVALIDATED')[:240]
     if life.get('trigger_time'): watch['trigger_time']=life.get('trigger_time')
     watch['status']=status; watch['visible_status']='WATCH' if status=='LOCKED' else status
     watch['last_seen']=datetime.now(timezone.utc).isoformat()
@@ -3933,6 +3944,11 @@ def v431_monitor_tick(send_alerts=True):
     """V43.2: cron does cheap XAUS monitoring every tick and a shared OHLC discovery scan every ~5 minutes."""
     with _v414_monitor_lock:
         state=_v414_load_state()
+        # V43.6 health instrumentation: every authorized cron/tick records a heartbeat,
+        # even when there are no WATCHes and no XAUS request is needed.
+        state['last_tick']=datetime.now(timezone.utc).isoformat()
+        state['last_auto_event']='TICK_RECEIVED'
+        _v414_save_state(state)
         # V43.3 master switch: OFF exits before XAUS, Twelve Data, discovery, or Telegram.
         # Saved WATCH opportunities are preserved and resume when AUTO is turned back ON.
         if state.get('user_auto_enabled', True) is False:
@@ -3942,7 +3958,7 @@ def v431_monitor_tick(send_alerts=True):
             return {'ok':True,'event':'SCANNER_OFF','auto_monitor_enabled':False,
                     'watch_count':len([w for w in (state.get('watched_opportunities') or []) if w.get('active')]),
                     'ohlc_requested':False,'xaus_requested':False,'telegram':None,
-                    'state':state,'scanner_version':'V43.5 FULL DISCOVERY DIAGNOSTICS'}
+                    'state':state,'scanner_version':'V43.6 TARGETED FUNNEL FIX'}
         discovery=None; discovery_new=[]; discovery_notices=[]
         if _v432_discovery_due(state):
             try:
@@ -3954,20 +3970,20 @@ def v431_monitor_tick(send_alerts=True):
                 _v414_save_state(state); discovery='DATA_WAIT'
         watches=[w for w in (state.get('watched_opportunities') or []) if w.get('active')]
         if not watches:
-            return {'ok':True,'event':'AUTO_DISCOVERY_NO_TRADE' if discovery else 'NO_ACTIVE_WATCH','watch_count':0,'ohlc_requested':bool(discovery),'auto_discovery':discovery,'new_watches':len(discovery_new),'telegram':discovery_notices,'state':state,'scanner_version':'V43.5 FULL DISCOVERY DIAGNOSTICS'}
+            return {'ok':True,'event':'AUTO_DISCOVERY_NO_TRADE' if discovery else 'NO_ACTIVE_WATCH','watch_count':0,'ohlc_requested':bool(discovery),'auto_discovery':discovery,'new_watches':len(discovery_new),'telegram':discovery_notices,'state':state,'scanner_version':'V43.6 TARGETED FUNNEL FIX'}
         price,pstat,pmeta=fetch_xaus_spot()
         state['last_tick']=datetime.now(timezone.utc).isoformat(); state['last_xaus_price']=price; state['last_xaus_status']=pstat
         if price is None:
             _v414_save_state(state)
-            return {'ok':True,'event':'XAUS_WAIT','watch_count':len(watches),'ohlc_requested':bool(discovery),'auto_discovery':discovery,'state':state,'scanner_version':'V43.5 FULL DISCOVERY DIAGNOSTICS'}
+            return {'ok':True,'event':'XAUS_WAIT','watch_count':len(watches),'ohlc_requested':bool(discovery),'auto_discovery':discovery,'state':state,'scanner_version':'V43.6 TARGETED FUNNEL FIX'}
         near=[w for w in watches if _v431_near_watch(price,w)]
         if not near:
             _v414_save_state(state)
-            return {'ok':True,'event':'WATCHING','watch_count':len(watches),'near_count':0,'xaus_price':price,'ohlc_requested':bool(discovery),'auto_discovery':discovery,'new_watches':len(discovery_new),'telegram':discovery_notices,'state':state,'scanner_version':'V43.5 FULL DISCOVERY DIAGNOSTICS'}
+            return {'ok':True,'event':'WATCHING','watch_count':len(watches),'near_count':0,'xaus_price':price,'ohlc_requested':bool(discovery),'auto_discovery':discovery,'new_watches':len(discovery_new),'telegram':discovery_notices,'state':state,'scanner_version':'V43.6 TARGETED FUNNEL FIX'}
         try: out=_v414_scan(None)
         except RuntimeError as e:
             state['last_data_wait']=str(e)[:800]; _v414_save_state(state)
-            return {'ok':True,'event':'DATA_WAIT','watch_count':len(watches),'near_count':len(near),'ohlc_requested':True,'auto_discovery':discovery,'state':state,'scanner_version':'V43.5 FULL DISCOVERY DIAGNOSTICS'}
+            return {'ok':True,'event':'DATA_WAIT','watch_count':len(watches),'near_count':len(near),'ohlc_requested':True,'auto_discovery':discovery,'state':state,'scanner_version':'V43.6 TARGETED FUNNEL FIX'}
         remaining=[]; events=[]; sent=list(discovery_notices); seen=set(state.get('last_alert_event_ids') or [])
         for w in watches:
             if w not in near:
@@ -3984,7 +4000,7 @@ def v431_monitor_tick(send_alerts=True):
                     sent.append({'id':w.get('opportunity_id'),'event':event,'telegram':res}); events.append({'id':w.get('opportunity_id'),'event':event})
                     if res.get('ok'): seen.add(eid)
         state['watched_opportunities']=remaining; state['last_alert_event_ids']=list(seen)[-100:]; state['last_market_price']=out.get('current_price'); _v414_save_state(state)
-        return {'ok':True,'event':'WATCH_UPDATE' if events else 'WATCHING','events':events,'telegram':sent,'watch_count':len(remaining),'near_count':len(near),'xaus_price':price,'ohlc_requested':True,'auto_discovery':discovery,'new_watches':len(discovery_new),'state':state,'scanner_version':'V43.5 FULL DISCOVERY DIAGNOSTICS'}
+        return {'ok':True,'event':'WATCH_UPDATE' if events else 'WATCHING','events':events,'telegram':sent,'watch_count':len(remaining),'near_count':len(near),'xaus_price':price,'ohlc_requested':True,'auto_discovery':discovery,'new_watches':len(discovery_new),'state':state,'scanner_version':'V43.6 TARGETED FUNNEL FIX'}
 
 # ================= V41.5 PASSIVE OBSERVABILITY LAYER =================
 # This layer MUST NOT change signal generation, grading, freshness, lifecycle, SL or TP decisions.
@@ -4152,7 +4168,7 @@ def v414_test_alert():
 @app.route('/api/alerts/status',methods=['GET'])
 def v414_alert_status():
     s=_v414_load_state()
-    return jsonify({'scanner_version':'V43.5 FULL DISCOVERY DIAGNOSTICS','telegram_configured':bool((os.environ.get('TELEGRAM_BOT_TOKEN') or '').strip() and (os.environ.get('TELEGRAM_CHAT_ID') or V414_CHAT_ID).strip()),
+    return jsonify({'scanner_version':'V43.6 TARGETED FUNNEL FIX','telegram_configured':bool((os.environ.get('TELEGRAM_BOT_TOKEN') or '').strip() and (os.environ.get('TELEGRAM_CHAT_ID') or V414_CHAT_ID).strip()),
                     'auto_monitor_enabled':bool(s.get('user_auto_enabled', True)),'background_thread_enabled':V414_AUTO_ENABLED,'monitor_seconds':V414_MONITOR_SECONDS,'active_watch_count':len(s.get('watched_opportunities') or []),
                     'last_tick':s.get('last_tick'),'last_auto_event':s.get('last_auto_event'),'last_auto_discovery_at':s.get('last_auto_discovery_at'),'last_auto_discovery_result':s.get('last_auto_discovery_result'),
                     'last_xaus_status':s.get('last_xaus_status'),'last_xaus_price':s.get('last_xaus_price'),'last_data_wait':s.get('last_data_wait'),'last_error':s.get('last_error'),'state':s})
@@ -4180,7 +4196,7 @@ def v414_alert_toggle():
         _v414_save_state(state)
     return jsonify({'ok':True,'auto_monitor_enabled':enabled,'paused':not enabled,
                     'active_watch_count':len([w for w in (state.get('watched_opportunities') or []) if w.get('active')]),
-                    'scanner_version':'V43.5 FULL DISCOVERY DIAGNOSTICS'})
+                    'scanner_version':'V43.6 TARGETED FUNNEL FIX'})
 
 
 @app.get('/api/diagnostics/v415')
@@ -4244,7 +4260,7 @@ def v435_diagnostics():
             'xaus_status':s.get('last_xaus_status'),'xaus_price':s.get('last_xaus_price'),'data_wait':s.get('last_data_wait'),
             'last_error':s.get('last_error'),'telegram_configured':bool((os.environ.get('TELEGRAM_BOT_TOKEN') or '').strip() and (os.environ.get('TELEGRAM_CHAT_ID') or V414_CHAT_ID).strip()),
             'active_watches':len([w for w in (s.get('watched_opportunities') or []) if w.get('active')])}
-    return jsonify({'ok':True,'scanner_version':'V43.5 FULL DISCOVERY DIAGNOSTICS','health':health,'last_discovery':last,'rolling_funnel':rolling,
+    return jsonify({'ok':True,'scanner_version':'V43.6 TARGETED FUNNEL FIX','health':health,'last_discovery':last,'rolling_funnel':rolling,
                     'history':list(s.get('v435_discovery_history') or [])[-24:]})
 
 @app.post('/api/alerts/scan-report')
