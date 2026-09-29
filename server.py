@@ -2281,7 +2281,7 @@ def build_m1_precision_engine(mtf, vwap_context=None):
     pullback_intelligence=v40_pullback_intelligence(m1,pullback_state,pullback_quality)
     extra_routes=v40_pullback_route_candidates(m1,m1_candles,pullback_state)
     essential_routes=v401_essential_pullback_candidates(m1,m1_candles,pullback_state)
-    diagnostics={'raw':0,'fresh':0,'distance_ok':0,'ranked':0,'qualified':0,'watch':0,'rejected':{},'by_route':{}}
+    diagnostics={'raw':0,'fresh':0,'distance_ok':0,'ranked':0,'qualified':0,'watch':0,'rejected':{},'by_route':{},'detected_points':[]}
     tpo=build_tpo_profile(m1_candles,atr)
     initial_balance=build_initial_balance(m1_candles)
     rows=[]
@@ -2325,6 +2325,14 @@ def build_m1_precision_engine(mtf, vwap_context=None):
         for _z in candidate_pool:
             _r=_z.get('v395_route') or ('PULLBACK_BRIDGE' if _z.get('pullback_bridge') else 'NATIVE')
             diagnostics['by_route'][_r]=diagnostics['by_route'].get(_r,0)+1
+            # V43.7 visibility: record what the detector actually saw BEFORE filtering.
+            # These are diagnostic potential locations, never entry signals.
+            if len(diagnostics['detected_points']) < 40:
+                diagnostics['detected_points'].append({
+                    'side':side.upper(),'low':_z.get('low'),'high':_z.get('high'),'source':_z.get('source'),
+                    'route':_r,'touch_count':int(_z.get('touch_count') or 0),
+                    'consumption':str(_z.get('consumption') or 'UNKNOWN'),'status':'RAW_DETECTED'
+                })
         for z in candidate_pool:
             src=str(z.get('source') or '')
             if src not in allowed_by_side[side]:
@@ -2342,12 +2350,15 @@ def build_m1_precision_engine(mtf, vwap_context=None):
             # structures are allowed more interaction because prior interaction is part of their setup logic.
             src_u=src.upper()
             interaction_family = any(k in src_u for k in ('BREAK_RETEST','TRANSITION_RECLAIM','SWEEP','RECLAIM','SR_SWITCH'))
-            max_touches = 3 if interaction_family else 1
-            if touches>max_touches:
-                key='TOO_MANY_TOUCHES_INTERACTION' if interaction_family else 'TOO_MANY_TOUCHES_FRESH_ZONE'
+            # V43.7: touches degrade location quality instead of deleting a still-usable point too early.
+            # Truly heavy/consumed structures are still rejected. Interaction setups tolerate more tests.
+            max_touches = 4 if interaction_family else 3
+            if touches>max_touches or cons=='HEAVY':
+                key='CONSUMED_INTERACTION' if interaction_family else 'CONSUMED_FRESH_ZONE'
                 diagnostics['rejected'][key]=diagnostics['rejected'].get(key,0)+1; continue
-            if cons not in ('','UNTOUCHED','LIGHT') and not (interaction_family and cons=='MODERATE' and touches<=3):
+            if cons not in ('','UNTOUCHED','LIGHT','MODERATE'):
                 diagnostics['rejected']['CONSUMED']=diagnostics['rejected'].get('CONSUMED',0)+1; continue
+            touch_quality_penalty=max(0,touches-1)*(3 if interaction_family else 5)
             diagnostics['fresh'] += 1
             dist=max(0,cp-hi) if bull else max(0,lo-cp); datr=dist/atr if atr else 99
             if datr>5.5:
@@ -2389,7 +2400,7 @@ def build_m1_precision_engine(mtf, vwap_context=None):
             elif pullback_intelligence.get('quality')=='FAILING': pbi_adj-=20
             if pullback_intelligence.get('speed')=='AGGRESSIVE': pbi_adj-=8
             if pullback_intelligence.get('failure_risk')=='HIGH': pbi_adj-=12
-            structural_score=max(0,min(100,base+source_bonus+micro_bonus+proximity+context_bonus+pullback_bonus+pb_quality_bonus+geometry_bonus+cluster_bonus+inducement_bonus+min(12,seq_bonus)+int(path_quality.get('score_adjustment') or 0)-int(redundancy.get('penalty') or 0)+pbi_adj+trap_bonus))
+            structural_score=max(0,min(100,base+source_bonus+micro_bonus+proximity+context_bonus+pullback_bonus+pb_quality_bonus+geometry_bonus+cluster_bonus+inducement_bonus+min(12,seq_bonus)+int(path_quality.get('score_adjustment') or 0)-int(redundancy.get('penalty') or 0)+pbi_adj+trap_bonus-touch_quality_penalty))
 
             # HTF CONFLUENCE (NON-BLOCKING): M5/M15/H1 keep all their own concepts and
             # candidate zones. Overlap/proximity can modestly improve final competition
@@ -3088,7 +3099,7 @@ def live_scan():
         out=data_only_result(mtf,data_status,data_note,'NOT_USED_LIVE_DATA_MODE')
         out['mode']='LIVE_DATA_CONTEXT'
         out['gemini_status']='NOT_USED'
-        out['scanner_version']='V43.4 HYBRID WATCH FIX'
+        out['scanner_version']='V43.7 VISIBLE POINTS + LIFECYCLE CLEANUP'
         out['v43_contract']={'setup_routes':['PULLBACK','BREAK_RETEST','SWEEP_RECLAIM','CONSOLIDATION_BREAK'],'visible_lifecycle':['WATCH','ARMED','TRIGGERED'],'internal_lock_preserved':True,'entry_rule':'TRIGGERED requires closed-M1 confirmation; WATCH/ARMED are not entries.'}
         out['market_context']=market_context
         out['event_risk']=market_context.get('event_risk','UNKNOWN')
@@ -3431,8 +3442,15 @@ def v42_early_location_map(out):
         datr=(dist/atr) if atr>0 else None
         if datr is not None and datr>5.0: rej('TOO_FAR'); continue
         life=str(((c.get('setup_lifecycle') or {}).get('state')) or '').upper()
-        if life in ('INVALIDATED','FAILED_TRAP_TRANSITION','RECLAIM_AFTER_INVALIDATION'):
+        if life in ('INVALIDATED','FAILED_TRAP_TRANSITION'):
             rej('INVALIDATED_'+(life or 'UNKNOWN')); continue
+        if life=='RECLAIM_AFTER_INVALIDATION':
+            # V43.7: the old structure remains dead, but a confirmed reclaim is a NEW setup lifecycle.
+            c['reclaim_parent_invalidated']=True
+            c['source']='RECLAIM_NEW_SETUP_'+str(c.get('source') or 'STRUCTURE')
+            c['setup_family']='LIQUIDITY_SWEEP_RECLAIM'
+            c['setup_lifecycle']=dict(c.get('setup_lifecycle') or {}, state='CANDIDATE_FOUND', original_state='NEW_RECLAIM_SETUP')
+            life='CANDIDATE_FOUND'
         if ((c.get('trap_failure') or {}).get('opposite_transition')):
             rej('OPPOSITE_TRANSITION'); continue
         if str(((c.get('pullback_intelligence') or {}).get('state')) or '')=='FAILED_PULLBACK':
@@ -3570,7 +3588,7 @@ def _v414_scan(locked=None):
     out['mode']='LIVE_DATA_CONTEXT'; out['gemini_status']='NOT_USED'; out['scanner_version']='V41.4 AUTOMATIC OPPORTUNITY ALERTS'
     out['market_context']=market_context; out['event_risk']=market_context.get('event_risk','UNKNOWN')
     out['v42_early_map']=v42_early_location_map(out)
-    out['scanner_version']='V43.4 HYBRID WATCH FIX'
+    out['scanner_version']='V43.7 VISIBLE POINTS + LIFECYCLE CLEANUP'
     out['v43_contract']={'setup_routes':['PULLBACK','BREAK_RETEST','SWEEP_RECLAIM','CONSOLIDATION_BREAK'],'visible_lifecycle':['WATCH','ARMED','TRIGGERED'],'internal_lock_preserved':True,'entry_rule':'TRIGGERED requires closed-M1 confirmation; WATCH/ARMED are not entries.'}
     return out
 
@@ -3804,6 +3822,10 @@ def _v435_discovery_snapshot(out,state):
     em=out.get('v42_early_map') or {}
     wf=state.get('last_watch_funnel') or {}
     raw_points=[]
+    # First show raw detector output so the user can always verify the scanner is seeing locations,
+    # even when none survive into a WATCH. Diagnostic only; never an entry instruction.
+    for x in (q.get('detected_points') or [])[:20]:
+        raw_points.append(dict(x))
     for x in (p.get('ranked_candidate_pool') or p.get('candidates') or [])[:20]:
         raw_points.append({'side':x.get('side'),'low':x.get('low'),'high':x.get('high'),'source':x.get('source'),
                            'setup_family':x.get('setup_family') or x.get('setup_type') or x.get('source'),
@@ -3878,21 +3900,21 @@ def _v431_discover_watches(out,state,preserve_existing=False):
             if old.get('active') and str(old.get('status') or '').upper() not in ('TP2_HIT','STOPPED','INVALIDATED','EXPIRED','MISSED','DATA_STALE'):
                 candidates.append(old)
                 if len(candidates)>=V431_MAX_WATCHES: break
-    funnel={'mapped':len(rows),'stage_reject':0,'distance_reject':0,'grade_reject':0,'failure_reject':0,'freshness_reject':0,'overlap_reject':0,'saved_new':0,'by_family':{}}
+    funnel={'mapped':len(rows),'stage_reject':0,'distance_reject':0,'grade_reject':0,'failure_reject':0,'freshness_reject':0,'overlap_reject':0,'saved_new':0,'by_family':{},'decisions':[]}
     for c in rows:
         grade=str((c.get('selective_grade') or {}).get('grade') or '').upper()
         # V43.6: WATCH is an early-warning state. Valid mapped/background locations may be
         # saved before price is near them. Proximity matters when waking/arming, not for existence.
         if c.get('lifecycle_stage') not in ('MAPPED','WATCH','LOCK_ELIGIBLE'):
-            funnel['stage_reject']+=1; continue
+            funnel['stage_reject']+=1; funnel['decisions'].append({'side':c.get('side'),'low':c.get('low'),'high':c.get('high'),'source':c.get('source'),'decision':'REJECT','reason':'STAGE'}); continue
         if c.get('attention_tier') not in ('ACTIVE','APPROACHING','BACKGROUND'):
-            funnel['distance_reject']+=1; continue
+            funnel['distance_reject']+=1; funnel['decisions'].append({'side':c.get('side'),'low':c.get('low'),'high':c.get('high'),'source':c.get('source'),'decision':'REJECT','reason':'ATTENTION_TIER'}); continue
         # V43.4 WATCH means "worth monitoring", not "entry quality". A legitimate
         # WATCH grade may therefore be saved; ARMED/TRIGGERED remain strict later.
         if grade not in ('WATCH','B','A','A+'):
-            funnel['grade_reject']+=1; continue
+            funnel['grade_reject']+=1; funnel['decisions'].append({'side':c.get('side'),'low':c.get('low'),'high':c.get('high'),'source':c.get('source'),'decision':'REJECT','reason':'GRADE'}); continue
         if str((c.get('failure_intelligence') or {}).get('state') or '').upper()=='FAILED':
-            funnel['failure_reject']+=1; continue
+            funnel['failure_reject']+=1; funnel['decisions'].append({'side':c.get('side'),'low':c.get('low'),'high':c.get('high'),'source':c.get('source'),'decision':'REJECT','reason':'STRUCTURAL_FAILURE'}); continue
         w={'active':True,'side':c.get('side'),'low':c.get('low'),'high':c.get('high'),
            'source':c.get('source') or 'WATCH_AREA','best_point_score':c.get('best_point_score'),
            'structural_score':c.get('structural_score'),'risk_plan':c.get('risk_plan') or {},
@@ -3900,15 +3922,16 @@ def _v431_discover_watches(out,state,preserve_existing=False):
            'created_at':((out.get('price_meta') or {}).get('latest_m1_time')) or datetime.now(timezone.utc).isoformat(),
            'last_seen':datetime.now(timezone.utc).isoformat(),'m1_atr_at_discovery':em.get('m1_atr'),
            'attention_tier':c.get('attention_tier'),'setup_family':c.get('setup_family') or c.get('setup_type') or c.get('source')}
-        fresh,why=_v414_discovery_fresh(out,w)
-        if not fresh:
-            funnel['freshness_reject']+=1; continue
+        # V43.7: freshness/consumption was already decided in candidate generation + mapping.
+        # Do not run a second contradictory freshness gate here. Live-data freshness and
+        # adverse movement are still enforced by lifecycle/trigger checks later.
         # Merge overlapping same-side zones: keep the higher-ranked representative.
         if any(_v431_overlap(w,x) for x in candidates):
-            funnel['overlap_reject']+=1; continue
+            funnel['overlap_reject']+=1; funnel['decisions'].append({'side':c.get('side'),'low':c.get('low'),'high':c.get('high'),'source':c.get('source'),'decision':'MERGED','reason':'OVERLAP'}); continue
         _v414_assign_opportunity_id(w,state); w['id']=w['opportunity_id']
         candidates.append(w)
         funnel['saved_new']+=1
+        funnel['decisions'].append({'side':c.get('side'),'low':c.get('low'),'high':c.get('high'),'source':c.get('source'),'decision':'WATCH','reason':'ACCEPTED'})
         fam=str(w.get('setup_family') or 'UNKNOWN'); funnel['by_family'][fam]=funnel['by_family'].get(fam,0)+1
         if len(candidates)>=V431_MAX_WATCHES: break
     state['last_watch_funnel']=funnel
