@@ -2896,6 +2896,37 @@ def data_only_result(mtf,data_status,data_note,why='Gemini visual check unavaila
     }
 
 
+
+@app.get('/api/test-gold-api')
+def test_gold_api():
+    """Connectivity-only Gold API test. Never feeds trading logic."""
+    urls = [
+        'https://api.gold-api.com/price/XAU',
+        'https://api.gold-api.com/price/XAU/USD',
+    ]
+    errors=[]
+    for url in urls:
+        try:
+            req=urllib.request.Request(url, headers={'User-Agent':'GoldScanner-V42.4/1.0','Accept':'application/json'})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                raw=resp.read().decode('utf-8','replace')
+                try: data=json.loads(raw)
+                except Exception: data={'raw':raw[:500]}
+                price=None
+                if isinstance(data,dict):
+                    for k in ('price','ask','mid','value','close'):
+                        try:
+                            if data.get(k) is not None: price=float(data[k]); break
+                        except Exception: pass
+                return jsonify({'ok':True,'provider':'Gold API','symbol':'XAU','price':price,
+                                'http_status':getattr(resp,'status',200),'endpoint':url,
+                                'response':data,'used_by_scanner':False,
+                                'note':'Connectivity test only. Compare this price with XM/MT5 before integration.'})
+        except Exception as e:
+            errors.append({'endpoint':url,'error':str(e)[:300]})
+    return jsonify({'ok':False,'provider':'Gold API','symbol':'XAU','used_by_scanner':False,
+                    'errors':errors,'note':'Gold API test failed. V42 trading/data logic was not changed.'}),502
+
 @app.route('/api/live-scan', methods=['GET','POST'])
 def live_scan():
     """Screenshot-free live XAU/USD scan. Twelve Data + deterministic Python only; zero Gemini calls."""
