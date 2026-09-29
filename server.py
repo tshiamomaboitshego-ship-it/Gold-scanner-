@@ -3077,13 +3077,22 @@ def live_scan():
         out=data_only_result(mtf,data_status,data_note,'NOT_USED_LIVE_DATA_MODE')
         out['mode']='LIVE_DATA_CONTEXT'
         out['gemini_status']='NOT_USED'
-        out['scanner_version']='V42.4 R0 MARKET DATA ENGINE'
+        out['scanner_version']='V43.1 SMART MULTI-WATCH'
+        out['v43_contract']={'setup_routes':['PULLBACK','BREAK_RETEST','SWEEP_RECLAIM','CONSOLIDATION_BREAK'],'visible_lifecycle':['WATCH','ARMED','TRIGGERED'],'internal_lock_preserved':True,'entry_rule':'TRIGGERED requires closed-M1 confirmation; WATCH/ARMED are not entries.'}
         out['market_context']=market_context
         out['event_risk']=market_context.get('event_risk','UNKNOWN')
         out['v42_early_map']=v42_early_location_map(out)
         out['data_only_summary']=out['data_only_summary'].replace('V26 maps','V30 maps')
         out['note']='V39 combines the forward-only Quant Engine with mathematical level clustering, pullback geometry, micro-zone refinement, liquidity path/obstacle analysis and evidence redundancy control. Statistics never create or move a zone. VWAP/AVWAP remain optional external context when unavailable server-side.'
         # Optional Telegram report uses the ALREADY-COMPUTED scan: no extra provider request.
+        # V43.1: a manual scan is the discovery step. Save ALL distinct high-quality nearby WATCH points.
+        state=_v414_load_state()
+        watches=_v431_discover_watches(out,state)
+        out['v431_watch_monitor']={'saved_count':len(watches),'max_watches':V431_MAX_WATCHES,
+            'watches':[{'id':w.get('opportunity_id'),'side':w.get('side'),'low':w.get('low'),'high':w.get('high'),
+                        'setup':w.get('setup_family'),'grade':(w.get('selective_grade') or {}).get('grade'),'status':'WATCH'} for w in watches],
+            'monitoring':'READY_FOR_CRON' if watches else 'OFF_NO_WATCH',
+            'rule':'Manual scan discovers; XAUS monitors all saved WATCH points; OHLC wakes only near a WATCH.'}
         if payload.get('notify_telegram'):
             secret=(os.environ.get('MONITOR_TICK_SECRET') or '').strip()
             supplied=(request.headers.get('X-Monitor-Secret') or '').strip()
@@ -3538,7 +3547,8 @@ def _v414_scan(locked=None):
     out['mode']='LIVE_DATA_CONTEXT'; out['gemini_status']='NOT_USED'; out['scanner_version']='V41.4 AUTOMATIC OPPORTUNITY ALERTS'
     out['market_context']=market_context; out['event_risk']=market_context.get('event_risk','UNKNOWN')
     out['v42_early_map']=v42_early_location_map(out)
-    out['scanner_version']='V42.4 R0 MARKET DATA ENGINE'
+    out['scanner_version']='V43.1 SMART MULTI-WATCH'
+    out['v43_contract']={'setup_routes':['PULLBACK','BREAK_RETEST','SWEEP_RECLAIM','CONSOLIDATION_BREAK'],'visible_lifecycle':['WATCH','ARMED','TRIGGERED'],'internal_lock_preserved':True,'entry_rule':'TRIGGERED requires closed-M1 confirmation; WATCH/ARMED are not entries.'}
     return out
 
 
@@ -3745,6 +3755,110 @@ def _v414_message(event, lock, opp):
     return '\n'.join(lines)
 
 
+
+# ================= V43.1 MULTI-WATCH OPPORTUNITY MONITOR =================
+V431_MAX_WATCHES=max(1,min(8,int(os.environ.get('V431_MAX_WATCHES','5') or 5)))
+V431_WAKE_ATR=max(0.5,min(3.0,float(os.environ.get('V431_WAKE_ATR','1.5') or 1.5)))
+
+def _v431_overlap(a,b):
+    if str(a.get('side')).upper()!=str(b.get('side')).upper(): return False
+    try:
+        alo,ahi=float(a.get('low')),float(a.get('high')); blo,bhi=float(b.get('low')),float(b.get('high'))
+    except (TypeError,ValueError): return False
+    return not (ahi < blo or bhi < alo)
+
+def _v431_discover_watches(out,state):
+    """Save up to V431_MAX_WATCHES distinct nearby, valid opportunities from ONE manual discovery scan."""
+    em=out.get('v42_early_map') or {}; rows=em.get('locations') or []
+    candidates=[]
+    for c in rows:
+        grade=str((c.get('selective_grade') or {}).get('grade') or '').upper()
+        if c.get('lifecycle_stage') not in ('WATCH','LOCK_ELIGIBLE'): continue
+        if c.get('attention_tier') not in ('ACTIVE','APPROACHING'): continue
+        if grade not in ('B','A','A+'): continue
+        if str((c.get('failure_intelligence') or {}).get('state') or '').upper()=='FAILED': continue
+        w={'active':True,'side':c.get('side'),'low':c.get('low'),'high':c.get('high'),
+           'source':c.get('source') or 'WATCH_AREA','best_point_score':c.get('best_point_score'),
+           'structural_score':c.get('structural_score'),'risk_plan':c.get('risk_plan') or {},
+           'selective_grade':c.get('selective_grade') or {},'status':'LOCKED','visible_status':'WATCH',
+           'created_at':((out.get('price_meta') or {}).get('latest_m1_time')) or datetime.now(timezone.utc).isoformat(),
+           'last_seen':datetime.now(timezone.utc).isoformat(),'m1_atr_at_discovery':em.get('m1_atr'),
+           'attention_tier':c.get('attention_tier'),'setup_family':c.get('setup_family') or c.get('setup_type') or c.get('source')}
+        fresh,why=_v414_discovery_fresh(out,w)
+        if not fresh: continue
+        # Merge overlapping same-side zones: keep the higher-ranked representative.
+        if any(_v431_overlap(w,x) for x in candidates): continue
+        _v414_assign_opportunity_id(w,state); w['id']=w['opportunity_id']
+        candidates.append(w)
+        if len(candidates)>=V431_MAX_WATCHES: break
+    state['watched_opportunities']=candidates
+    state['watch_discovered_at']=datetime.now(timezone.utc).isoformat()
+    state['last_alert_event_ids']=[]
+    _v414_save_state(state)
+    return candidates
+
+def _v431_status_from_tracker(out,watch):
+    m1=((out.get('multi_timeframe_metrics') or {}).get('M1') or {})
+    current=((out.get('m1_precision') or {}).get('hybrid_opportunity') or {})
+    tracked=v412_locked_opportunity_tracker(m1,watch,current)
+    life=tracked.get('locked_lifecycle') or {}
+    status=str(life.get('status') or watch.get('status') or 'LOCKED').upper()
+    if life.get('trigger_time'): watch['trigger_time']=life.get('trigger_time')
+    watch['status']=status; watch['visible_status']='WATCH' if status=='LOCKED' else status
+    watch['last_seen']=datetime.now(timezone.utc).isoformat()
+    if status=='TRIGGERED': watch['has_triggered']=True
+    return status,watch,tracked
+
+def _v431_near_watch(price,w):
+    try:
+        p=float(price); lo=float(w.get('low')); hi=float(w.get('high')); atr=float(w.get('m1_atr_at_discovery') or 1.0)
+    except (TypeError,ValueError): return True
+    if lo<=p<=hi: return True
+    dist=lo-p if p<lo else p-hi
+    return dist <= V431_WAKE_ATR*max(atr,0.1)
+
+def v431_monitor_tick(send_alerts=True):
+    """Cheap XAUS proximity tick; ONE OHLC scan only when any saved WATCH is near."""
+    with _v414_monitor_lock:
+        state=_v414_load_state(); watches=[w for w in (state.get('watched_opportunities') or []) if w.get('active')]
+        if not watches:
+            return {'ok':True,'event':'NO_ACTIVE_WATCH','watch_count':0,'ohlc_requested':False,'state':state,'scanner_version':'V43.1 SMART MULTI-WATCH'}
+        price,pstat,pmeta=fetch_xaus_spot()
+        state['last_tick']=datetime.now(timezone.utc).isoformat(); state['last_xaus_price']=price; state['last_xaus_status']=pstat
+        if price is None:
+            _v414_save_state(state)
+            return {'ok':True,'event':'XAUS_WAIT','watch_count':len(watches),'ohlc_requested':False,'state':state,'scanner_version':'V43.1 SMART MULTI-WATCH'}
+        near=[w for w in watches if _v431_near_watch(price,w)]
+        if not near:
+            _v414_save_state(state)
+            return {'ok':True,'event':'WATCHING','watch_count':len(watches),'near_count':0,'xaus_price':price,'ohlc_requested':False,'state':state,'scanner_version':'V43.1 SMART MULTI-WATCH'}
+        try: out=_v414_scan(None)
+        except RuntimeError as e:
+            state['last_data_wait']=str(e)[:800]; _v414_save_state(state)
+            return {'ok':True,'event':'DATA_WAIT','watch_count':len(watches),'near_count':len(near),'ohlc_requested':True,'state':state,'scanner_version':'V43.1 SMART MULTI-WATCH'}
+        remaining=[]; events=[]; sent=[]; seen=set(state.get('last_alert_event_ids') or [])
+        for w in watches:
+            if w not in near:
+                remaining.append(w); continue
+            status,w,tracked=_v431_status_from_tracker(out,w)
+            event=status if status in ('ARMED','TRIGGERED','TP1_HIT','TP2_HIT','STOPPED','INVALIDATED','EXPIRED','MISSED') else None
+            if event=='TRIGGERED':
+                event,w=_v414_trigger_freshness(out,event,w)
+            terminal=event in ('TP2_HIT','STOPPED','INVALIDATED','EXPIRED','MISSED','DATA_STALE')
+            if not terminal: remaining.append(w)
+            if event:
+                eid=f"{w.get('opportunity_id')}::{event}"
+                if eid not in seen:
+                    msg=_v414_message(event,w,tracked)
+                    res=_v414_telegram(msg) if send_alerts else {'ok':False,'detail':'alerts disabled'}
+                    sent.append({'id':w.get('opportunity_id'),'event':event,'telegram':res}); events.append({'id':w.get('opportunity_id'),'event':event})
+                    if res.get('ok'): seen.add(eid)
+        state['watched_opportunities']=remaining; state['last_alert_event_ids']=list(seen)[-100:]
+        state['last_market_price']=out.get('current_price'); _v414_save_state(state)
+        return {'ok':True,'event':'WATCH_UPDATE' if events else 'WATCHING','events':events,'telegram':sent,
+                'watch_count':len(remaining),'near_count':len(near),'xaus_price':price,'ohlc_requested':True,
+                'state':state,'scanner_version':'V43.1 SMART MULTI-WATCH'}
+
 # ================= V41.5 PASSIVE OBSERVABILITY LAYER =================
 # This layer MUST NOT change signal generation, grading, freshness, lifecycle, SL or TP decisions.
 # It only records what V41.4 saw so later changes can be based on forward-test evidence.
@@ -3912,7 +4026,7 @@ def v414_test_alert():
 def v414_alert_status():
     s=_v414_load_state()
     return jsonify({'scanner_version':'V42.4 R0 MARKET DATA ENGINE','telegram_configured':bool((os.environ.get('TELEGRAM_BOT_TOKEN') or '').strip() and (os.environ.get('TELEGRAM_CHAT_ID') or V414_CHAT_ID).strip()),
-                    'auto_monitor_enabled':bool(s.get('user_auto_enabled', True)),'background_thread_enabled':V414_AUTO_ENABLED,'monitor_seconds':V414_MONITOR_SECONDS,'state':s})
+                    'auto_monitor_enabled':bool(s.get('user_auto_enabled', True)),'background_thread_enabled':V414_AUTO_ENABLED,'monitor_seconds':V414_MONITOR_SECONDS,'active_watch_count':len(s.get('watched_opportunities') or []),'state':s})
 
 
 @app.post('/api/alerts/toggle')
@@ -3929,7 +4043,7 @@ def v414_alert_toggle():
         state['auto_changed_at']=datetime.now(timezone.utc).isoformat()
         if not enabled:
             # OFF means OFF: discard active lifecycle so ON always starts with a fresh opportunity.
-            state['locked_opportunity']=None; state['last_alert_status']=None; state['last_alert_event_id']=None
+            state['locked_opportunity']=None; state['watched_opportunities']=[]; state['last_alert_status']=None; state['last_alert_event_id']=None
         else:
             state['locked_opportunity']=None; state['last_alert_status']=None; state['last_alert_event_id']=None
             state['enabled_fresh_start_at']=datetime.now(timezone.utc).isoformat()
@@ -4013,14 +4127,14 @@ def v423_scan_report():
 
 @app.post('/api/alerts/tick')
 def v414_alert_tick():
-    return jsonify({'ok':False,'event':'MANUAL_ONLY','detail':'Automatic tick disabled. Use SCAN MARKET.'}),410
+    # V43.1 smart monitor: cron checks XAUS cheaply; OHLC is requested only when a saved WATCH is near.
     # Optional shared secret protects externally scheduled ticks when configured.
     secret=(os.environ.get('MONITOR_TICK_SECRET') or '').strip()
     supplied=(request.headers.get('X-Monitor-Secret') or request.args.get('secret') or '').strip()
     if secret and supplied!=secret:
         return jsonify({'ok':False,'detail':'unauthorized'}),401
     try:
-        result=v414_monitor_tick(send_alerts=True)
+        result=v431_monitor_tick(send_alerts=True)
         return jsonify(result),200
     except Exception as e:
         # Unexpected programming/runtime failures must be visible in Render logs.
