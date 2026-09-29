@@ -2950,6 +2950,52 @@ def test_xaus():
         return jsonify({'ok':False,'provider':'XAUS','symbol':'XAUUSD','used_by_scanner':False,
                         'error':str(e)[:500],'note':'XAUS test failed. V42 trading/data logic was not changed.'}),502
 
+
+@app.get('/api/test-xaus-intraday')
+def test_xaus_intraday():
+    """Diagnostic-only XAUS intraday test. Price samples are never converted into fake OHLC candles."""
+    url = 'https://xaus.com/api/v1/intraday?symbol=xau&hours=1'
+    try:
+        req=urllib.request.Request(url, headers={'User-Agent':'GoldScanner-V42.4/1.0','Accept':'application/json'})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            raw=resp.read().decode('utf-8','replace')
+            data=json.loads(raw)
+            points=(data.get('points') or []) if isinstance(data,dict) else []
+            clean=[]
+            for pt in points:
+                if not isinstance(pt,dict):
+                    continue
+                try:
+                    price=float(pt.get('p'))
+                except Exception:
+                    continue
+                clean.append({'t':pt.get('t'),'p':price})
+            prices=[x['p'] for x in clean]
+            latest=clean[-1] if clean else None
+            first=clean[0] if clean else None
+            direction='FLAT'
+            change=None
+            if len(prices)>=2:
+                change=prices[-1]-prices[0]
+                threshold=max(0.10, abs(prices[0])*0.00002)
+                direction='UP' if change>threshold else ('DOWN' if change < -threshold else 'FLAT')
+            state=data.get('data_state') or {} if isinstance(data,dict) else {}
+            return jsonify({
+                'ok':True,'provider':'XAUS','symbol':'XAUUSD','series':'intraday_2m_samples',
+                'http_status':getattr(resp,'status',200),'endpoint':url,
+                'points_received':len(clean),'first_point':first,'latest_point':latest,
+                'first_price':prices[0] if prices else None,'latest_price':prices[-1] if prices else None,
+                'min_price':min(prices) if prices else None,'max_price':max(prices) if prices else None,
+                'change_over_sample':round(change,4) if change is not None else None,
+                'direction_over_sample':direction,'coverage_seconds':data.get('coverage_seconds') if isinstance(data,dict) else None,
+                'data_state':state,'updated_at':data.get('updated_at') if isinstance(data,dict) else None,
+                'used_by_scanner':False,'is_ohlc':False,
+                'note':'Diagnostic only. XAUS intraday points are sampled prices, not OHLC candles, and are not used by V42 trading logic.'
+            })
+    except Exception as e:
+        return jsonify({'ok':False,'provider':'XAUS','symbol':'XAUUSD','used_by_scanner':False,
+                        'error':str(e)[:500],'note':'XAUS intraday test failed. V42 trading/data logic was not changed.'}),502
+
 @app.route('/api/live-scan', methods=['GET','POST'])
 def live_scan():
     """Screenshot-free live XAU/USD scan. Twelve Data + deterministic Python only; zero Gemini calls."""
