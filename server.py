@@ -3791,7 +3791,7 @@ def _v414_message(event, lock, opp):
     side=str((lock or {}).get('side') or '').upper(); lo=(lock or {}).get('low'); hi=(lock or {}).get('high')
     source=str((lock or {}).get('source') or 'OPPORTUNITY').replace('_',' ')
     icons={'LOCKED':'🏆','ARMED':'🟠','TRIGGERED':'🟢','TP1_HIT':'🎯','TP2_HIT':'🎯','STOPPED':'❌','INVALIDATED':'❌','EXPIRED':'⌛','MISSED':'⚫','DATA_STALE':'⚠️'}
-    lines=[f"{icons.get(event,'📡')} GOLD SCANNER V42.2 — {event.replace('_',' ')}",f"Opportunity: {(lock or {}).get('opportunity_id') or (lock or {}).get('id','—')}",f"{side} · {source} · Grade {g.get('grade','—')}",f"Zone: {lo}–{hi}"]
+    lines=[f"{icons.get(event,'📡')} GOLD SCANNER V44.1 — {event.replace('_',' ')}",f"Opportunity: {(lock or {}).get('opportunity_id') or (lock or {}).get('id','—')}",f"{side} · {source} · Grade {g.get('grade','—')}",f"Zone: {lo}–{hi}"]
     if r.get('stop_loss') is not None: lines.append(f"SL: {r.get('stop_loss')}")
     if r.get('tp1') is not None: lines.append(f"TP1: {r.get('tp1')}")
     if r.get('tp2') is not None: lines.append(f"TP2: {r.get('tp2')}")
@@ -3800,7 +3800,7 @@ def _v414_message(event, lock, opp):
     if (lock or {}).get('alert_checked_at'): lines.append(f"Freshness checked: {(lock or {}).get('alert_checked_at')} UTC")
     if (lock or {}).get('trigger_age_seconds') is not None: lines.append(f"Trigger age after M1 close: {(lock or {}).get('trigger_age_seconds')}s")
     if event=='LOCKED': lines.append('Location mapped early. NO ENTRY — waiting for price to reach the area, react, and confirm.')
-    elif event=='ARMED': lines.append('Price is testing the locked area. Waiting for closed-M1 trigger.')
+    elif event=='ARMED': lines.append('🎯 PRICE AT EARLY POINT — Gold is testing the detected area. This is not an automatic entry; watch the reaction/closed-M1 confirmation.')
     elif event=='TRIGGERED': lines.append('ENTRY AVAILABLE — trigger is still near the qualified entry area. Do not chase if your broker price has already moved materially away.')
     elif event=='MISSED': lines.append("ENTRY MISSED — DON'T CHASE. The trigger is stale or price has already left the actionable entry area. Waiting for a genuinely fresh opportunity.")
     elif event=='DATA_STALE': lines.append("DATA STALE — NO SIGNAL. Market data was not fresh enough to validate this trigger. Waiting for fresh M1 data.")
@@ -3814,7 +3814,7 @@ def _v414_message(event, lock, opp):
 # ================= V43.1 MULTI-WATCH OPPORTUNITY MONITOR =================
 V431_MAX_WATCHES=max(1,min(8,int(os.environ.get('V431_MAX_WATCHES','5') or 5)))
 V431_WAKE_ATR=max(0.5,min(3.0,float(os.environ.get('V431_WAKE_ATR','1.5') or 1.5)))
-V432_DISCOVERY_SECONDS=max(180,min(1800,int(os.environ.get('V432_DISCOVERY_SECONDS','300') or 300)))
+V432_DISCOVERY_SECONDS=max(120,min(1800,int(os.environ.get('V432_DISCOVERY_SECONDS','180') or 180)))
 
 def _v432_discovery_due(state):
     raw=state.get('last_auto_discovery_at')
@@ -3888,25 +3888,82 @@ def _v435_record_discovery(out,state):
     state['v435_rolling_funnel']=totals
     return snap
 
+def _v441_point_key(c):
+    """Stable-ish key for deduplicating early location alerts across discovery cycles."""
+    try:
+        lo=round(float(c.get('low')),2); hi=round(float(c.get('high')),2)
+    except (TypeError,ValueError):
+        lo=str(c.get('low')); hi=str(c.get('high'))
+    return f"{str(c.get('side') or '').upper()}|{lo}|{hi}|{str(c.get('setup_family') or c.get('setup_type') or c.get('source') or 'HYBRID').upper()}"
+
+def _v441_early_points(out,state):
+    """Return newly discovered, still-ahead/at-price locations before WATCH/entry filtering."""
+    em=out.get('v42_early_map') or {}; rows=em.get('locations') or []
+    cp=out.get('current_price')
+    try: cp=float(cp)
+    except (TypeError,ValueError): cp=None
+    seen=list(state.get('v441_early_point_ids') or [])[-300:]
+    seen_set=set(seen); new=[]; all_points=[]
+    now=datetime.now(timezone.utc).isoformat()
+    for c in rows:
+        if c.get('monitor_eligible') is False: continue
+        if str((c.get('failure_intelligence') or {}).get('state') or '').upper()=='FAILED': continue
+        try: lo=float(c.get('low')); hi=float(c.get('high'))
+        except (TypeError,ValueError): continue
+        side=str(c.get('side') or '').upper()
+        if side not in ('BUY','SELL'): continue
+        # Timing classification is based on where price is when the point is first seen.
+        if cp is None: timing='UNKNOWN'
+        elif lo <= cp <= hi: timing='ON_TIME_AT_AREA'
+        elif (side=='BUY' and cp>hi) or (side=='SELL' and cp<lo): timing='EARLY_AHEAD'
+        else: timing='LATE_OR_PASSED'
+        point={'point_id':_v441_point_key(c),'side':side,'low':lo,'high':hi,
+               'setup_family':c.get('setup_family') or c.get('setup_type') or c.get('source') or 'Hybrid',
+               'source':c.get('source'),'detected_at':now,'detected_price':cp,'timing':timing,
+               'attention_tier':c.get('attention_tier'),'distance_m1_atr':c.get('distance_m1_atr_ahead')}
+        all_points.append(point)
+        # Do not send a misleading fresh alert for a point price has already passed.
+        if timing=='LATE_OR_PASSED': continue
+        if point['point_id'] not in seen_set:
+            new.append(point); seen.append(point['point_id']); seen_set.add(point['point_id'])
+    state['v441_early_point_ids']=seen[-300:]
+    state['v441_last_detected_points']=all_points[:30]
+    return new,all_points
+
+def _v441_point_message(p):
+    side=p.get('side'); lo=p.get('low'); hi=p.get('high'); cp=p.get('detected_price')
+    timing=p.get('timing'); fam=p.get('setup_family') or 'Hybrid'
+    label='EARLY' if timing=='EARLY_AHEAD' else 'AT AREA'
+    lines=[f"📍 {label} {side} POINT — XAUUSD", f"Area: {lo}–{hi}", f"Setup: {fam}"]
+    if cp is not None: lines.append(f"Gold when detected: {cp}")
+    lines.append(f"Timing: {timing}")
+    lines.append('UNCONFIRMED LOCATION — not an entry. Check your broker chart and wait for price reaction/confirmation.')
+    return '\n'.join(lines)
+
 def _v432_auto_discover(state,send_alerts=True):
-    """Run one shared OHLC discovery scan, merge new WATCHes, and notify only genuinely new IDs."""
+    """V44.1: detect/show/alert locations first; WATCH and confirmation happen afterwards."""
     before={w.get('opportunity_id') for w in (state.get('watched_opportunities') or []) if w.get('active')}
     out=_v414_scan(None)
+    # EARLY POINTS are intentionally evaluated before WATCH admission.
+    early_new,early_all=_v441_early_points(out,state)
     watches=_v431_discover_watches(out,state,preserve_existing=True)
     state=_v414_load_state()
+    # _v431_discover_watches reload/save can overwrite our in-memory early-point state; restore it.
+    early_ids=list(state.get('v441_early_point_ids') or [])
+    for p in early_new:
+        if p.get('point_id') not in early_ids: early_ids.append(p.get('point_id'))
+    state['v441_early_point_ids']=early_ids[-300:]
+    state['v441_last_detected_points']=early_all[:30]
     state['last_auto_discovery_at']=datetime.now(timezone.utc).isoformat()
-    state['last_auto_discovery_result']='WATCH_FOUND' if watches else 'NO_TRADE'
+    state['last_auto_discovery_result']='EARLY_POINT_FOUND' if early_new else ('WATCH_FOUND' if watches else 'NO_TRADE')
     _v435_record_discovery(out,state)
     new=[w for w in watches if w.get('opportunity_id') not in before]
     notices=[]
-    for w in new:
-        msg=(f"👀 NEW WATCH — {str(w.get('side') or '').upper()}\n"
-             f"Setup: {w.get('setup_family') or w.get('source') or 'Hybrid'}\n"
-             f"Area: {w.get('low')}–{w.get('high')}\n"
-             f"Status: WATCH — monitoring automatically\n"
-             f"Not an entry. Waiting for ARMED/confirmation.")
-        res=_v414_telegram(msg) if send_alerts else {'ok':False,'detail':'alerts disabled'}
-        notices.append({'id':w.get('opportunity_id'),'telegram':res})
+    # Primary notification: tell the user about the location as soon as it is discovered.
+    for p in early_new:
+        res=_v414_telegram(_v441_point_message(p)) if send_alerts else {'ok':False,'detail':'alerts disabled'}
+        notices.append({'point_id':p.get('point_id'),'event':'EARLY_POINT','telegram':res})
+    # WATCH remains internal monitoring state; avoid sending a second redundant WATCH message.
     _v414_save_state(state)
     return out,watches,new,notices
 
@@ -4009,7 +4066,7 @@ def v431_monitor_tick(send_alerts=True):
             return {'ok':True,'event':'SCANNER_OFF','auto_monitor_enabled':False,
                     'watch_count':len([w for w in (state.get('watched_opportunities') or []) if w.get('active')]),
                     'ohlc_requested':False,'xaus_requested':False,'telegram':None,
-                    'state':state,'scanner_version':'V44.0 SIMPLE CORE'}
+                    'state':state,'scanner_version':'V44.1 EARLY POINT ALERTS'}
         discovery=None; discovery_new=[]; discovery_notices=[]
         if _v432_discovery_due(state):
             try:
@@ -4021,20 +4078,20 @@ def v431_monitor_tick(send_alerts=True):
                 _v414_save_state(state); discovery='DATA_WAIT'
         watches=[w for w in (state.get('watched_opportunities') or []) if w.get('active')]
         if not watches:
-            return {'ok':True,'event':'AUTO_DISCOVERY_NO_TRADE' if discovery else 'NO_ACTIVE_WATCH','watch_count':0,'ohlc_requested':bool(discovery),'auto_discovery':discovery,'new_watches':len(discovery_new),'telegram':discovery_notices,'state':state,'scanner_version':'V44.0 SIMPLE CORE'}
+            return {'ok':True,'event':'AUTO_DISCOVERY_NO_TRADE' if discovery else 'NO_ACTIVE_WATCH','watch_count':0,'ohlc_requested':bool(discovery),'auto_discovery':discovery,'new_watches':len(discovery_new),'telegram':discovery_notices,'state':state,'scanner_version':'V44.1 EARLY POINT ALERTS'}
         price,pstat,pmeta=fetch_xaus_spot()
         state['last_tick']=datetime.now(timezone.utc).isoformat(); state['last_xaus_price']=price; state['last_xaus_status']=pstat
         if price is None:
             _v414_save_state(state)
-            return {'ok':True,'event':'XAUS_WAIT','watch_count':len(watches),'ohlc_requested':bool(discovery),'auto_discovery':discovery,'state':state,'scanner_version':'V44.0 SIMPLE CORE'}
+            return {'ok':True,'event':'XAUS_WAIT','watch_count':len(watches),'ohlc_requested':bool(discovery),'auto_discovery':discovery,'state':state,'scanner_version':'V44.1 EARLY POINT ALERTS'}
         near=[w for w in watches if _v431_near_watch(price,w)]
         if not near:
             _v414_save_state(state)
-            return {'ok':True,'event':'WATCHING','watch_count':len(watches),'near_count':0,'xaus_price':price,'ohlc_requested':bool(discovery),'auto_discovery':discovery,'new_watches':len(discovery_new),'telegram':discovery_notices,'state':state,'scanner_version':'V44.0 SIMPLE CORE'}
+            return {'ok':True,'event':'WATCHING','watch_count':len(watches),'near_count':0,'xaus_price':price,'ohlc_requested':bool(discovery),'auto_discovery':discovery,'new_watches':len(discovery_new),'telegram':discovery_notices,'state':state,'scanner_version':'V44.1 EARLY POINT ALERTS'}
         try: out=_v414_scan(None)
         except RuntimeError as e:
             state['last_data_wait']=str(e)[:800]; _v414_save_state(state)
-            return {'ok':True,'event':'DATA_WAIT','watch_count':len(watches),'near_count':len(near),'ohlc_requested':True,'auto_discovery':discovery,'state':state,'scanner_version':'V44.0 SIMPLE CORE'}
+            return {'ok':True,'event':'DATA_WAIT','watch_count':len(watches),'near_count':len(near),'ohlc_requested':True,'auto_discovery':discovery,'state':state,'scanner_version':'V44.1 EARLY POINT ALERTS'}
         remaining=[]; events=[]; sent=list(discovery_notices); seen=set(state.get('last_alert_event_ids') or [])
         for w in watches:
             if w not in near:
@@ -4051,7 +4108,7 @@ def v431_monitor_tick(send_alerts=True):
                     sent.append({'id':w.get('opportunity_id'),'event':event,'telegram':res}); events.append({'id':w.get('opportunity_id'),'event':event})
                     if res.get('ok'): seen.add(eid)
         state['watched_opportunities']=remaining; state['last_alert_event_ids']=list(seen)[-100:]; state['last_market_price']=out.get('current_price'); _v414_save_state(state)
-        return {'ok':True,'event':'WATCH_UPDATE' if events else 'WATCHING','events':events,'telegram':sent,'watch_count':len(remaining),'near_count':len(near),'xaus_price':price,'ohlc_requested':True,'auto_discovery':discovery,'new_watches':len(discovery_new),'state':state,'scanner_version':'V44.0 SIMPLE CORE'}
+        return {'ok':True,'event':'WATCH_UPDATE' if events else 'WATCHING','events':events,'telegram':sent,'watch_count':len(remaining),'near_count':len(near),'xaus_price':price,'ohlc_requested':True,'auto_discovery':discovery,'new_watches':len(discovery_new),'state':state,'scanner_version':'V44.1 EARLY POINT ALERTS'}
 
 # ================= V41.5 PASSIVE OBSERVABILITY LAYER =================
 # This layer MUST NOT change signal generation, grading, freshness, lifecycle, SL or TP decisions.
@@ -4219,7 +4276,7 @@ def v414_test_alert():
 @app.route('/api/alerts/status',methods=['GET'])
 def v414_alert_status():
     s=_v414_load_state()
-    return jsonify({'scanner_version':'V44.0 SIMPLE CORE','telegram_configured':bool((os.environ.get('TELEGRAM_BOT_TOKEN') or '').strip() and (os.environ.get('TELEGRAM_CHAT_ID') or V414_CHAT_ID).strip()),
+    return jsonify({'scanner_version':'V44.1 EARLY POINT ALERTS','telegram_configured':bool((os.environ.get('TELEGRAM_BOT_TOKEN') or '').strip() and (os.environ.get('TELEGRAM_CHAT_ID') or V414_CHAT_ID).strip()),
                     'auto_monitor_enabled':bool(s.get('user_auto_enabled', True)),'background_thread_enabled':V414_AUTO_ENABLED,'monitor_seconds':V414_MONITOR_SECONDS,'active_watch_count':len(s.get('watched_opportunities') or []),
                     'last_tick':s.get('last_tick'),'last_auto_event':s.get('last_auto_event'),'last_auto_discovery_at':s.get('last_auto_discovery_at'),'last_auto_discovery_result':s.get('last_auto_discovery_result'),
                     'last_xaus_status':s.get('last_xaus_status'),'last_xaus_price':s.get('last_xaus_price'),'last_data_wait':s.get('last_data_wait'),'last_error':s.get('last_error'),'state':s})
@@ -4247,7 +4304,7 @@ def v414_alert_toggle():
         _v414_save_state(state)
     return jsonify({'ok':True,'auto_monitor_enabled':enabled,'paused':not enabled,
                     'active_watch_count':len([w for w in (state.get('watched_opportunities') or []) if w.get('active')]),
-                    'scanner_version':'V44.0 SIMPLE CORE'})
+                    'scanner_version':'V44.1 EARLY POINT ALERTS'})
 
 
 @app.get('/api/diagnostics/v415')
@@ -4311,7 +4368,7 @@ def v435_diagnostics():
             'xaus_status':s.get('last_xaus_status'),'xaus_price':s.get('last_xaus_price'),'data_wait':s.get('last_data_wait'),
             'last_error':s.get('last_error'),'telegram_configured':bool((os.environ.get('TELEGRAM_BOT_TOKEN') or '').strip() and (os.environ.get('TELEGRAM_CHAT_ID') or V414_CHAT_ID).strip()),
             'active_watches':len([w for w in (s.get('watched_opportunities') or []) if w.get('active')])}
-    return jsonify({'ok':True,'scanner_version':'V44.0 SIMPLE CORE','health':health,'last_discovery':last,'rolling_funnel':rolling,
+    return jsonify({'ok':True,'scanner_version':'V44.1 EARLY POINT ALERTS','health':health,'last_discovery':last,'rolling_funnel':rolling,
                     'history':list(s.get('v435_discovery_history') or [])[-24:]})
 
 @app.post('/api/alerts/scan-report')
