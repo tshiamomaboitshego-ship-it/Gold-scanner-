@@ -19,7 +19,7 @@ CRITICAL CONFIRMATION RULE (fixes V14 weakness):
 
 READING ORDER
 1) Newest/right-edge candles first; older candles are context only.
-2) PRICE SOURCES: deterministic structure uses exact OHLC. For current-price proximity, use SERVER CONTEXT reference_price when fresh. Also read the newest visible MT5 right-edge price label from the screenshot into current_price when clearly readable. If screenshot and provider reference differ materially, set data_ai_conflict and explain the mismatch; do not silently pretend they are identical.
+2) PRICE SOURCES: deterministic structure uses exact OHLC. For current-price proximity, use SERVER CONTEXT reference_price when fresh (normally XAUS spot; OHLC remains Twelve Data). Also read the newest visible MT5 right-edge price label from the screenshot into current_price when clearly readable. If screenshot and provider reference differ materially, set data_ai_conflict and explain the mismatch; do not silently pretend they are identical.
 3) Use mathematical structure metrics (swings, BOS/CHoCH, ATR, momentum) when supplied; do not contradict them without clearly stating a screenshot/data mismatch.
 4) Find fresh nearby pullback zones. Penalize broken, heavily retested, consumed, distant or already-used zones.
 5) Detect break-and-retest: broken support can become resistance; broken resistance can become support, but require a fresh retest.
@@ -301,16 +301,53 @@ def _get_primary_m1():
         _cache_put('xau:price',float(c[-1]['c']),_CACHE_TTLS['price'])
     return c,st,note
 
+
+
+def fetch_xaus_spot():
+    """Keyless XAUS spot reference. Never substitutes for OHLC candles."""
+    try:
+        req=urllib.request.Request('https://xaus.com/api/v1/spot?compact=1', headers={'User-Agent':'GoldScannerV42/1.0'})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            d=json.loads(resp.read().decode())
+        price=float(d.get('spot_usd_oz'))
+        return price,'LIVE_XAUS',{'provider':'XAUS','data_state':d.get('data_state'),'updated_at':d.get('updated_at'),'price_as_of':d.get('price_as_of'),'stale':bool(d.get('stale',False))}
+    except Exception as e:
+        return None,'XAUS_UNAVAILABLE',{'provider':'XAUS','error':str(e)[:180]}
+
+def fetch_xaus_intraday(hours=1):
+    """Keyless sampled price path. Diagnostic/context only; points are NOT OHLC."""
+    try:
+        url='https://xaus.com/api/v1/intraday?'+urllib.parse.urlencode({'symbol':'xau','hours':hours})
+        req=urllib.request.Request(url, headers={'User-Agent':'GoldScannerV42/1.0'})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            d=json.loads(resp.read().decode())
+        raw=d.get('points') or d.get('data') or d.get('series') or []
+        pts=[]
+        for x in raw:
+            if not isinstance(x,dict): continue
+            t=x.get('t',x.get('timestamp')); v=x.get('p',x.get('price'))
+            try: pts.append({'t':t,'p':float(v)})
+            except Exception: pass
+        change=round(pts[-1]['p']-pts[0]['p'],4) if len(pts)>=2 else None
+        path='UP' if change is not None and change>0 else 'DOWN' if change is not None and change<0 else 'FLAT'
+        return {'provider':'XAUS','points':len(pts),'latest':pts[-1]['p'] if pts else None,'change':change,'path':path,'data_state':d.get('data_state'),'coverage_seconds':d.get('coverage_seconds'),'sampled_prices_not_ohlc':True},'LIVE_XAUS_PATH'
+    except Exception as e:
+        return {'provider':'XAUS','points':0,'error':str(e)[:180],'sampled_prices_not_ohlc':True},'XAUS_PATH_UNAVAILABLE'
+
 def fetch_reference_price():
-    """Reference price from the shared M1 store first; /price is fallback only."""
+    """XAUS is the primary proximity/reference feed; M1 close is fallback."""
+    xp,xst,xmeta=fetch_xaus_spot()
+    if xp is not None and not xmeta.get('stale'):
+        _cache_put('xau:price',xp,_CACHE_TTLS['price'])
+        return xp,'XAUS_REFERENCE',f"XAUS spot reference · {xmeta.get('data_state') or 'state unknown'}"
     m1,m1_age=_cache_get(_M1_PRIMARY_KEY,allow_stale=True)
     if m1 and m1_age is not None and m1_age<=120:
         price=float(m1[-1]['c']); _cache_put('xau:price',price,_CACHE_TTLS['price'])
-        return price,'M1_REFERENCE',f'Shared M1 close reference · cache age {m1_age}s'
+        return price,'M1_FALLBACK_REFERENCE',f'Shared M1 close fallback · cache age {m1_age}s'
     cached,age=_cache_get('xau:price',allow_stale=True)
     if cached is not None and age is not None and age<=120:
         return cached,'CACHED_REFERENCE',f'Cached reference · age {age}s'
-    return None,'UNAVAILABLE','No sufficiently fresh shared M1 reference available'
+    return None,'UNAVAILABLE','No sufficiently fresh XAUS or shared M1 reference available'
 
 def candle_age_minutes(candles):
     if not candles:return None
@@ -367,6 +404,7 @@ def fetch_multitimeframe():
         notes.append(tf+': '+n)
     if any(frames.values()): enrich_mtf_candidates(out)
     ref,ref_status,ref_note=fetch_reference_price()
+    xaus_path,xaus_path_status=fetch_xaus_intraday(1)
     if ref is not None: reanchor_candidates(out,ref)
     m5c=frames['M5']; m1c=frames['M1']
     age=candle_age_minutes(m5c); m1_age=candle_age_minutes(m1c)
@@ -379,7 +417,9 @@ def fetch_multitimeframe():
         'phase1_test_eligible':test_eligible,'market_data_inactive':bool(m1_age is None or m1_age>5),
         'market_data_note':'Fresh shared M1 data available; M5/M15/H1 derived locally.' if test_eligible else 'Shared data available but execution feed is stale; no fresh trigger should be issued.',
         'data_engine':'V42.4_R0_M1_SHARED','provider_requests_this_scan':0 if st in ('CACHED_DATA','STALE_CACHE') else 1,
-        'derived_timeframes':['M5','M15','H1'],'primary_store_bars':len(m1)}
+        'derived_timeframes':['M5','M15','H1'],'primary_store_bars':len(m1),
+        'data_sources':{'live_price':'XAUS','recent_price_path':'XAUS_INTRADAY_2M_SAMPLES','ohlc_m1':'TWELVE_DATA','derived_ohlc':['M5','M15','H1']},
+        'xaus_intraday':xaus_path,'xaus_intraday_status':xaus_path_status}
     return out,overall,' | '.join(notes)+' | PRICE: '+ref_note
 
 def analytics(c):
@@ -3070,7 +3110,7 @@ def scan():
         price_meta=mtf.get('_price_meta',{}); context={'data_status':data_status,'data_note':data_note,'reference_price':price_meta.get('reference_price'),'price_meta':price_meta,'deterministic_metrics':metrics,'multi_timeframe_metrics':mtf_metrics,'event_risk':event_risk,'risk_budget':d.get('risk_budget'),'spread_cost':d.get('spread_cost'),'broker_specs':d.get('broker_specs'),'setup_memory':d.get('setup_memory'),'automatic_event_status':'UNKNOWN_NO_CALENDAR_FEED','input_guidance':'H1/M15/M5 are fetched automatically from OHLC. The user supplies only one fresh M5 screenshot. Evaluate BUY and SELL cases independently; H1/M15 are context, M5 is execution.'}
         try:
             result=run_model([PROMPT,'SERVER CONTEXT JSON:\n'+json.dumps(context,separators=(',',':')),image_part(d['m5'])])
-            m5_live=(mtf.get('M5',{}).get('status')=='LIVE_DATA' and bool(mtf.get('M5',{}).get('candles'))); out=norm(result,metrics,data_status,event_risk,m5_live=m5_live); out['multi_timeframe_metrics']=mtf_metrics; out['mode']='HYBRID_OHLC_VISUAL'; out['gemini_status']='AVAILABLE'; out['m5_ohlc_live']=m5_live; out['timeframe_data_status']={tf:v.get('status') for tf,v in mtf.items() if not tf.startswith('_')}; out['price_meta']=price_meta; vp=out.get('screenshot_price'); rp=price_meta.get('reference_price'); atr=float(metrics.get('atr14') or 1);
+            m5_live=(bool(mtf.get('M5',{}).get('candles')) and bool(price_meta.get('phase1_test_eligible')) and not bool(price_meta.get('m5_feed_stale'))); out=norm(result,metrics,data_status,event_risk,m5_live=m5_live); out['multi_timeframe_metrics']=mtf_metrics; out['mode']='HYBRID_OHLC_VISUAL'; out['gemini_status']='AVAILABLE'; out['m5_ohlc_live']=m5_live; out['timeframe_data_status']={tf:v.get('status') for tf,v in mtf.items() if not tf.startswith('_')}; out['price_meta']=price_meta; vp=out.get('screenshot_price'); rp=price_meta.get('reference_price'); atr=float(metrics.get('atr14') or 1);
             if vp is not None and rp is not None and abs(float(vp)-float(rp))>max(1.0,0.5*atr): out['data_ai_conflict']='MINOR' if abs(float(vp)-float(rp))<=max(3.0,1.5*atr) else 'MAJOR'; out['data_ai_conflict_reason']=f'MT5 screenshot price {vp:.3f} differs from Twelve Data reference {rp:.3f} by {abs(float(vp)-float(rp)):.3f}.'
             return jsonify(out)
         except Exception as ge:
