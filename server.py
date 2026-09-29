@@ -2325,7 +2325,7 @@ def build_m1_precision_engine(mtf, vwap_context=None):
         for _z in candidate_pool:
             _r=_z.get('v395_route') or ('PULLBACK_BRIDGE' if _z.get('pullback_bridge') else 'NATIVE')
             diagnostics['by_route'][_r]=diagnostics['by_route'].get(_r,0)+1
-            # V43.7 visibility: record what the detector actually saw BEFORE filtering.
+            # V44.0 visibility: record what the detector actually saw BEFORE filtering.
             # These are diagnostic potential locations, never entry signals.
             if len(diagnostics['detected_points']) < 40:
                 diagnostics['detected_points'].append({
@@ -2350,7 +2350,7 @@ def build_m1_precision_engine(mtf, vwap_context=None):
             # structures are allowed more interaction because prior interaction is part of their setup logic.
             src_u=src.upper()
             interaction_family = any(k in src_u for k in ('BREAK_RETEST','TRANSITION_RECLAIM','SWEEP','RECLAIM','SR_SWITCH'))
-            # V43.7: touches degrade location quality instead of deleting a still-usable point too early.
+            # V44.0: touches degrade location quality instead of deleting a still-usable point too early.
             # Truly heavy/consumed structures are still rejected. Interaction setups tolerate more tests.
             max_touches = 4 if interaction_family else 3
             if touches>max_touches or cons=='HEAVY':
@@ -3099,7 +3099,7 @@ def live_scan():
         out=data_only_result(mtf,data_status,data_note,'NOT_USED_LIVE_DATA_MODE')
         out['mode']='LIVE_DATA_CONTEXT'
         out['gemini_status']='NOT_USED'
-        out['scanner_version']='V43.7 VISIBLE POINTS + LIFECYCLE CLEANUP'
+        out['scanner_version']='V44.0 VISIBLE POINTS + LIFECYCLE CLEANUP'
         out['v43_contract']={'setup_routes':['PULLBACK','BREAK_RETEST','SWEEP_RECLAIM','CONSOLIDATION_BREAK'],'visible_lifecycle':['WATCH','ARMED','TRIGGERED'],'internal_lock_preserved':True,'entry_rule':'TRIGGERED requires closed-M1 confirmation; WATCH/ARMED are not entries.'}
         out['market_context']=market_context
         out['event_risk']=market_context.get('event_risk','UNKNOWN')
@@ -3418,7 +3418,8 @@ def v42_early_location_map(out):
         if datr is None: return 'BACKGROUND'
         if datr <= 0.75: return 'ACTIVE'
         if datr <= 3.0: return 'APPROACHING'
-        return 'BACKGROUND'
+        if datr <= 8.0: return 'BACKGROUND'
+        return 'FAR_VISIBLE'
     def path_state(side):
         # This describes current travel, not a prediction. A SELL above price is being approached by bullish travel;
         # a BUY below price is being approached by bearish travel.
@@ -3436,16 +3437,27 @@ def v42_early_location_map(out):
         if hi < lo: lo,hi=hi,lo
         side=str(c.get('side') or '').upper()
         if cp is None or side not in ('BUY','SELL'): rej('NO_LIVE_REFERENCE'); continue
-        if side=='BUY' and hi >= cp: rej('NOT_AHEAD_OF_PRICE'); continue
-        if side=='SELL' and lo <= cp: rej('NOT_AHEAD_OF_PRICE'); continue
-        dist=(cp-hi if side=='BUY' else lo-cp)
+        # V44 SIMPLE CORE: DETECT -> SHOW -> MONITOR -> FILTER -> CONFIRM.
+        # A structurally detected location is no longer hidden merely because it is on the
+        # other side of price or far away. Those facts affect MONITOR eligibility/attention,
+        # not whether the user can see what the detector found.
+        inside = lo <= cp <= hi
+        ahead = (hi < cp) if side=='BUY' else (lo > cp)
+        if inside:
+            relation='PRICE_IN_ZONE'; dist=0.0
+        elif ahead:
+            relation='AHEAD'; dist=(cp-hi if side=='BUY' else lo-cp)
+        else:
+            relation='PASSED_OR_BEHIND'; dist=(lo-cp if cp<lo else cp-hi)
+            dist=abs(dist)
         datr=(dist/atr) if atr>0 else None
-        if datr is not None and datr>5.0: rej('TOO_FAR'); continue
+        c['price_relation']=relation
+        c['monitor_eligible']=bool(ahead or inside)
         life=str(((c.get('setup_lifecycle') or {}).get('state')) or '').upper()
         if life in ('INVALIDATED','FAILED_TRAP_TRANSITION'):
             rej('INVALIDATED_'+(life or 'UNKNOWN')); continue
         if life=='RECLAIM_AFTER_INVALIDATION':
-            # V43.7: the old structure remains dead, but a confirmed reclaim is a NEW setup lifecycle.
+            # V44.0: the old structure remains dead, but a confirmed reclaim is a NEW setup lifecycle.
             c['reclaim_parent_invalidated']=True
             c['source']='RECLAIM_NEW_SETUP_'+str(c.get('source') or 'STRUCTURE')
             c['setup_family']='LIQUIDITY_SWEEP_RECLAIM'
@@ -3477,15 +3489,17 @@ def v42_early_location_map(out):
         c['liquidity_obstacle_intelligence']=obstacle_intel
         c['failure_intelligence']=failure_intel
         c['attention_score']=round(quality+proximity_bonus+path_bonus+regime_fit+obstacle_adj+failure_adj,1)
-        c['map_status']='MAPPED_AHEAD'
+        c['map_status']='DETECTED_VISIBLE'
         c['distance_price']=round(dist,3)
         c['distance_m1_atr_ahead']=round(datr,2) if datr is not None else None
-        c['map_reason']='Mapped before arrival. Attention follows live price; reaction and confirmation still decide whether it becomes actionable.'
+        c['map_reason']='Detected and shown first. Price relation/proximity decide monitoring; reaction and closed-M1 confirmation decide actionability.'
         # V42.2 stage-aware strictness: early discovery is intentionally broader than final entry.
         # WATCH/B locations can be observed; only sufficiently strong nearby/contextual locations may LOCK.
         grade=str((c.get('selective_grade') or {}).get('grade') or 'WATCH')
         qscore=float((c.get('selective_grade') or {}).get('score') or 0)
-        if grade in ('A','A+'):
+        if not c.get('monitor_eligible'):
+            stage='MAPPED'
+        elif grade in ('A','A+'):
             stage='LOCK_ELIGIBLE' if tier in ('ACTIVE','APPROACHING') and failure_intel.get('state')!='FAILED' else 'WATCH'
         elif grade=='B':
             stage='LOCK_ELIGIBLE' if tier in ('ACTIVE','APPROACHING') and path!='PRICE_TRAVELLING_AWAY' and failure_intel.get('state')!='FAILED' and float(c.get('attention_score') or 0)>=76 else 'WATCH'
@@ -3506,7 +3520,7 @@ def v42_early_location_map(out):
     best_lock=lock_eligible[0] if lock_eligible else None
     return {'version':'V42.3_CONTEXT_INTELLIGENCE_SUITE','philosophy':'MAP OPENLY -> WATCH CONTEXTUALLY -> LOCK SELECTIVELY -> ARM ON TOUCH -> TRIGGER STRICTLY',
             'current_price':cp,'m1_atr':round(atr,3) if atr else None,'m1_momentum':momentum,'m1_pressure':pressure,'market_regime_intelligence':regime_ctx,
-            'active_radius_atr':0.75,'approaching_radius_atr':3.0,'background_limit_atr':5.0,
+            'active_radius_atr':0.75,'approaching_radius_atr':3.0,'background_limit_atr':8.0,
             'mapped_count':len(mapped),'active_count':len(active),'approaching_count':len(approaching),'background_count':len(background),
             'map_only_count':len(map_only),'watch_count':len(watch),'lock_eligible_count':len(lock_eligible),
             'stage_policy':{'MAPPED':'low-moderate: remember valid areas','WATCH':'moderate: nearby/developing, no entry','LOCKED':'moderate-high: strong location/context','ARMED':'high: price has actually tested location','TRIGGERED':'very high: closed-M1 reaction confirmation required'},
@@ -3588,7 +3602,7 @@ def _v414_scan(locked=None):
     out['mode']='LIVE_DATA_CONTEXT'; out['gemini_status']='NOT_USED'; out['scanner_version']='V41.4 AUTOMATIC OPPORTUNITY ALERTS'
     out['market_context']=market_context; out['event_risk']=market_context.get('event_risk','UNKNOWN')
     out['v42_early_map']=v42_early_location_map(out)
-    out['scanner_version']='V43.7 VISIBLE POINTS + LIFECYCLE CLEANUP'
+    out['scanner_version']='V44.0 VISIBLE POINTS + LIFECYCLE CLEANUP'
     out['v43_contract']={'setup_routes':['PULLBACK','BREAK_RETEST','SWEEP_RECLAIM','CONSOLIDATION_BREAK'],'visible_lifecycle':['WATCH','ARMED','TRIGGERED'],'internal_lock_preserved':True,'entry_rule':'TRIGGERED requires closed-M1 confirmation; WATCH/ARMED are not entries.'}
     return out
 
@@ -3831,6 +3845,18 @@ def _v435_discovery_snapshot(out,state):
                            'setup_family':x.get('setup_family') or x.get('setup_type') or x.get('source'),
                            'status':x.get('status'),'score':x.get('score'),'structural_score':x.get('structural_score'),
                            'distance_m1_atr':x.get('distance_m1_atr')})
+    # V44: include the SHOW-FIRST map as well, which contains the independent
+    # Break+Retest / Sweep+Reclaim / Compression routes, not only pullback precision rows.
+    seen={(str(x.get('side')),x.get('low'),x.get('high'),str(x.get('source'))) for x in raw_points}
+    for x in (em.get('locations') or [])[:30]:
+        k=(str(x.get('side')),x.get('low'),x.get('high'),str(x.get('source')))
+        if k in seen: continue
+        seen.add(k)
+        raw_points.append({'side':x.get('side'),'low':x.get('low'),'high':x.get('high'),'source':x.get('source'),
+                           'setup_family':x.get('setup_family') or x.get('setup_type') or x.get('source'),
+                           'status':'DETECTED_VISIBLE','score':x.get('score'),'structural_score':x.get('structural_score'),
+                           'distance_m1_atr':x.get('distance_m1_atr_ahead'),'price_relation':x.get('price_relation'),
+                           'attention_tier':x.get('attention_tier')})
     return {
       'at':datetime.now(timezone.utc).isoformat(),'current_price':out.get('current_price'),'data_status':out.get('data_status'),
       'raw_candidates':q.get('raw',0),'fresh_candidates':q.get('fresh',0),'ranked_candidates':q.get('ranked',0),
@@ -3903,6 +3929,8 @@ def _v431_discover_watches(out,state,preserve_existing=False):
     funnel={'mapped':len(rows),'stage_reject':0,'distance_reject':0,'grade_reject':0,'failure_reject':0,'freshness_reject':0,'overlap_reject':0,'saved_new':0,'by_family':{},'decisions':[]}
     for c in rows:
         grade=str((c.get('selective_grade') or {}).get('grade') or '').upper()
+        if c.get('monitor_eligible') is False:
+            funnel['stage_reject']+=1; funnel['decisions'].append({'side':c.get('side'),'low':c.get('low'),'high':c.get('high'),'source':c.get('source'),'decision':'VISIBLE_ONLY','reason':'PASSED_OR_BEHIND_PRICE'}); continue
         # V43.6: WATCH is an early-warning state. Valid mapped/background locations may be
         # saved before price is near them. Proximity matters when waking/arming, not for existence.
         if c.get('lifecycle_stage') not in ('MAPPED','WATCH','LOCK_ELIGIBLE'):
@@ -3981,7 +4009,7 @@ def v431_monitor_tick(send_alerts=True):
             return {'ok':True,'event':'SCANNER_OFF','auto_monitor_enabled':False,
                     'watch_count':len([w for w in (state.get('watched_opportunities') or []) if w.get('active')]),
                     'ohlc_requested':False,'xaus_requested':False,'telegram':None,
-                    'state':state,'scanner_version':'V43.6 TARGETED FUNNEL FIX'}
+                    'state':state,'scanner_version':'V44.0 SIMPLE CORE'}
         discovery=None; discovery_new=[]; discovery_notices=[]
         if _v432_discovery_due(state):
             try:
@@ -3993,20 +4021,20 @@ def v431_monitor_tick(send_alerts=True):
                 _v414_save_state(state); discovery='DATA_WAIT'
         watches=[w for w in (state.get('watched_opportunities') or []) if w.get('active')]
         if not watches:
-            return {'ok':True,'event':'AUTO_DISCOVERY_NO_TRADE' if discovery else 'NO_ACTIVE_WATCH','watch_count':0,'ohlc_requested':bool(discovery),'auto_discovery':discovery,'new_watches':len(discovery_new),'telegram':discovery_notices,'state':state,'scanner_version':'V43.6 TARGETED FUNNEL FIX'}
+            return {'ok':True,'event':'AUTO_DISCOVERY_NO_TRADE' if discovery else 'NO_ACTIVE_WATCH','watch_count':0,'ohlc_requested':bool(discovery),'auto_discovery':discovery,'new_watches':len(discovery_new),'telegram':discovery_notices,'state':state,'scanner_version':'V44.0 SIMPLE CORE'}
         price,pstat,pmeta=fetch_xaus_spot()
         state['last_tick']=datetime.now(timezone.utc).isoformat(); state['last_xaus_price']=price; state['last_xaus_status']=pstat
         if price is None:
             _v414_save_state(state)
-            return {'ok':True,'event':'XAUS_WAIT','watch_count':len(watches),'ohlc_requested':bool(discovery),'auto_discovery':discovery,'state':state,'scanner_version':'V43.6 TARGETED FUNNEL FIX'}
+            return {'ok':True,'event':'XAUS_WAIT','watch_count':len(watches),'ohlc_requested':bool(discovery),'auto_discovery':discovery,'state':state,'scanner_version':'V44.0 SIMPLE CORE'}
         near=[w for w in watches if _v431_near_watch(price,w)]
         if not near:
             _v414_save_state(state)
-            return {'ok':True,'event':'WATCHING','watch_count':len(watches),'near_count':0,'xaus_price':price,'ohlc_requested':bool(discovery),'auto_discovery':discovery,'new_watches':len(discovery_new),'telegram':discovery_notices,'state':state,'scanner_version':'V43.6 TARGETED FUNNEL FIX'}
+            return {'ok':True,'event':'WATCHING','watch_count':len(watches),'near_count':0,'xaus_price':price,'ohlc_requested':bool(discovery),'auto_discovery':discovery,'new_watches':len(discovery_new),'telegram':discovery_notices,'state':state,'scanner_version':'V44.0 SIMPLE CORE'}
         try: out=_v414_scan(None)
         except RuntimeError as e:
             state['last_data_wait']=str(e)[:800]; _v414_save_state(state)
-            return {'ok':True,'event':'DATA_WAIT','watch_count':len(watches),'near_count':len(near),'ohlc_requested':True,'auto_discovery':discovery,'state':state,'scanner_version':'V43.6 TARGETED FUNNEL FIX'}
+            return {'ok':True,'event':'DATA_WAIT','watch_count':len(watches),'near_count':len(near),'ohlc_requested':True,'auto_discovery':discovery,'state':state,'scanner_version':'V44.0 SIMPLE CORE'}
         remaining=[]; events=[]; sent=list(discovery_notices); seen=set(state.get('last_alert_event_ids') or [])
         for w in watches:
             if w not in near:
@@ -4023,7 +4051,7 @@ def v431_monitor_tick(send_alerts=True):
                     sent.append({'id':w.get('opportunity_id'),'event':event,'telegram':res}); events.append({'id':w.get('opportunity_id'),'event':event})
                     if res.get('ok'): seen.add(eid)
         state['watched_opportunities']=remaining; state['last_alert_event_ids']=list(seen)[-100:]; state['last_market_price']=out.get('current_price'); _v414_save_state(state)
-        return {'ok':True,'event':'WATCH_UPDATE' if events else 'WATCHING','events':events,'telegram':sent,'watch_count':len(remaining),'near_count':len(near),'xaus_price':price,'ohlc_requested':True,'auto_discovery':discovery,'new_watches':len(discovery_new),'state':state,'scanner_version':'V43.6 TARGETED FUNNEL FIX'}
+        return {'ok':True,'event':'WATCH_UPDATE' if events else 'WATCHING','events':events,'telegram':sent,'watch_count':len(remaining),'near_count':len(near),'xaus_price':price,'ohlc_requested':True,'auto_discovery':discovery,'new_watches':len(discovery_new),'state':state,'scanner_version':'V44.0 SIMPLE CORE'}
 
 # ================= V41.5 PASSIVE OBSERVABILITY LAYER =================
 # This layer MUST NOT change signal generation, grading, freshness, lifecycle, SL or TP decisions.
@@ -4191,7 +4219,7 @@ def v414_test_alert():
 @app.route('/api/alerts/status',methods=['GET'])
 def v414_alert_status():
     s=_v414_load_state()
-    return jsonify({'scanner_version':'V43.6 TARGETED FUNNEL FIX','telegram_configured':bool((os.environ.get('TELEGRAM_BOT_TOKEN') or '').strip() and (os.environ.get('TELEGRAM_CHAT_ID') or V414_CHAT_ID).strip()),
+    return jsonify({'scanner_version':'V44.0 SIMPLE CORE','telegram_configured':bool((os.environ.get('TELEGRAM_BOT_TOKEN') or '').strip() and (os.environ.get('TELEGRAM_CHAT_ID') or V414_CHAT_ID).strip()),
                     'auto_monitor_enabled':bool(s.get('user_auto_enabled', True)),'background_thread_enabled':V414_AUTO_ENABLED,'monitor_seconds':V414_MONITOR_SECONDS,'active_watch_count':len(s.get('watched_opportunities') or []),
                     'last_tick':s.get('last_tick'),'last_auto_event':s.get('last_auto_event'),'last_auto_discovery_at':s.get('last_auto_discovery_at'),'last_auto_discovery_result':s.get('last_auto_discovery_result'),
                     'last_xaus_status':s.get('last_xaus_status'),'last_xaus_price':s.get('last_xaus_price'),'last_data_wait':s.get('last_data_wait'),'last_error':s.get('last_error'),'state':s})
@@ -4219,7 +4247,7 @@ def v414_alert_toggle():
         _v414_save_state(state)
     return jsonify({'ok':True,'auto_monitor_enabled':enabled,'paused':not enabled,
                     'active_watch_count':len([w for w in (state.get('watched_opportunities') or []) if w.get('active')]),
-                    'scanner_version':'V43.6 TARGETED FUNNEL FIX'})
+                    'scanner_version':'V44.0 SIMPLE CORE'})
 
 
 @app.get('/api/diagnostics/v415')
@@ -4283,7 +4311,7 @@ def v435_diagnostics():
             'xaus_status':s.get('last_xaus_status'),'xaus_price':s.get('last_xaus_price'),'data_wait':s.get('last_data_wait'),
             'last_error':s.get('last_error'),'telegram_configured':bool((os.environ.get('TELEGRAM_BOT_TOKEN') or '').strip() and (os.environ.get('TELEGRAM_CHAT_ID') or V414_CHAT_ID).strip()),
             'active_watches':len([w for w in (s.get('watched_opportunities') or []) if w.get('active')])}
-    return jsonify({'ok':True,'scanner_version':'V43.6 TARGETED FUNNEL FIX','health':health,'last_discovery':last,'rolling_funnel':rolling,
+    return jsonify({'ok':True,'scanner_version':'V44.0 SIMPLE CORE','health':health,'last_discovery':last,'rolling_funnel':rolling,
                     'history':list(s.get('v435_discovery_history') or [])[-24:]})
 
 @app.post('/api/alerts/scan-report')
