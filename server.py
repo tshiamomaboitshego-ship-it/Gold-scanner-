@@ -3787,6 +3787,52 @@ def _v432_discovery_due(state):
     except Exception:
         return True
 
+def _v435_top_rejections(d):
+    if not isinstance(d,dict): return []
+    return [{'reason':str(k),'count':int(v or 0)} for k,v in sorted(d.items(), key=lambda kv: kv[1] or 0, reverse=True)]
+
+def _v435_discovery_snapshot(out,state):
+    p=_v415_precision(out)
+    q=p.get('candidate_diagnostics') or {}
+    em=out.get('v42_early_map') or {}
+    wf=state.get('last_watch_funnel') or {}
+    raw_points=[]
+    for x in (p.get('ranked_candidate_pool') or p.get('candidates') or [])[:20]:
+        raw_points.append({'side':x.get('side'),'low':x.get('low'),'high':x.get('high'),'source':x.get('source'),
+                           'setup_family':x.get('setup_family') or x.get('setup_type') or x.get('source'),
+                           'status':x.get('status'),'score':x.get('score'),'structural_score':x.get('structural_score'),
+                           'distance_m1_atr':x.get('distance_m1_atr')})
+    return {
+      'at':datetime.now(timezone.utc).isoformat(),'current_price':out.get('current_price'),'data_status':out.get('data_status'),
+      'raw_candidates':q.get('raw',0),'fresh_candidates':q.get('fresh',0),'ranked_candidates':q.get('ranked',0),
+      'candidate_watch':q.get('watch',0),'qualified_candidates':q.get('qualified',0),'candidate_routes':q.get('by_route') or {},
+      'candidate_rejections':q.get('rejected') or {},'mapped':em.get('mapped_count',len(em.get('locations') or [])),
+      'map_active':em.get('active_count',0),'map_approaching':em.get('approaching_count',0),'map_background':em.get('background_count',0),
+      'map_rejections':em.get('rejected') or {},'watch_funnel':wf,'raw_points':raw_points,
+      'saved_watch_count':len([w for w in (state.get('watched_opportunities') or []) if w.get('active')])}
+
+def _v435_record_discovery(out,state):
+    snap=_v435_discovery_snapshot(out,state)
+    hist=list(state.get('v435_discovery_history') or [])
+    hist.append(snap); state['v435_discovery_history']=hist[-288:]
+    state['v435_last_discovery']=snap
+    # rolling totals are descriptive diagnostics only; never trading probabilities.
+    totals={'cycles':len(state['v435_discovery_history']),'raw':0,'fresh':0,'ranked':0,'candidate_watch':0,'qualified':0,'saved_new':0,'rejections':{}}
+    for h in state['v435_discovery_history']:
+        totals['raw']+=int(h.get('raw_candidates',0) or 0)
+        totals['fresh']+=int(h.get('fresh_candidates',0) or 0)
+        totals['ranked']+=int(h.get('ranked_candidates',0) or 0)
+        totals['candidate_watch']+=int(h.get('candidate_watch',0) or 0)
+        totals['qualified']+=int(h.get('qualified_candidates',0) or 0)
+        totals['saved_new']+=int((h.get('watch_funnel') or {}).get('saved_new',0) or 0)
+        for group in ('candidate_rejections','map_rejections'):
+            for k,v in (h.get(group) or {}).items(): totals['rejections'][k]=totals['rejections'].get(k,0)+int(v or 0)
+        for k in ('stage_reject','distance_reject','grade_reject','failure_reject','freshness_reject','overlap_reject'):
+            v=int((h.get('watch_funnel') or {}).get(k,0) or 0)
+            if v: totals['rejections']['watch_'+k]=totals['rejections'].get('watch_'+k,0)+v
+    state['v435_rolling_funnel']=totals
+    return snap
+
 def _v432_auto_discover(state,send_alerts=True):
     """Run one shared OHLC discovery scan, merge new WATCHes, and notify only genuinely new IDs."""
     before={w.get('opportunity_id') for w in (state.get('watched_opportunities') or []) if w.get('active')}
@@ -3795,6 +3841,7 @@ def _v432_auto_discover(state,send_alerts=True):
     state=_v414_load_state()
     state['last_auto_discovery_at']=datetime.now(timezone.utc).isoformat()
     state['last_auto_discovery_result']='WATCH_FOUND' if watches else 'NO_TRADE'
+    _v435_record_discovery(out,state)
     new=[w for w in watches if w.get('opportunity_id') not in before]
     notices=[]
     for w in new:
@@ -3895,7 +3942,7 @@ def v431_monitor_tick(send_alerts=True):
             return {'ok':True,'event':'SCANNER_OFF','auto_monitor_enabled':False,
                     'watch_count':len([w for w in (state.get('watched_opportunities') or []) if w.get('active')]),
                     'ohlc_requested':False,'xaus_requested':False,'telegram':None,
-                    'state':state,'scanner_version':'V43.4 HYBRID WATCH FIX'}
+                    'state':state,'scanner_version':'V43.5 FULL DISCOVERY DIAGNOSTICS'}
         discovery=None; discovery_new=[]; discovery_notices=[]
         if _v432_discovery_due(state):
             try:
@@ -3907,20 +3954,20 @@ def v431_monitor_tick(send_alerts=True):
                 _v414_save_state(state); discovery='DATA_WAIT'
         watches=[w for w in (state.get('watched_opportunities') or []) if w.get('active')]
         if not watches:
-            return {'ok':True,'event':'AUTO_DISCOVERY_NO_TRADE' if discovery else 'NO_ACTIVE_WATCH','watch_count':0,'ohlc_requested':bool(discovery),'auto_discovery':discovery,'new_watches':len(discovery_new),'telegram':discovery_notices,'state':state,'scanner_version':'V43.4 HYBRID WATCH FIX'}
+            return {'ok':True,'event':'AUTO_DISCOVERY_NO_TRADE' if discovery else 'NO_ACTIVE_WATCH','watch_count':0,'ohlc_requested':bool(discovery),'auto_discovery':discovery,'new_watches':len(discovery_new),'telegram':discovery_notices,'state':state,'scanner_version':'V43.5 FULL DISCOVERY DIAGNOSTICS'}
         price,pstat,pmeta=fetch_xaus_spot()
         state['last_tick']=datetime.now(timezone.utc).isoformat(); state['last_xaus_price']=price; state['last_xaus_status']=pstat
         if price is None:
             _v414_save_state(state)
-            return {'ok':True,'event':'XAUS_WAIT','watch_count':len(watches),'ohlc_requested':bool(discovery),'auto_discovery':discovery,'state':state,'scanner_version':'V43.4 HYBRID WATCH FIX'}
+            return {'ok':True,'event':'XAUS_WAIT','watch_count':len(watches),'ohlc_requested':bool(discovery),'auto_discovery':discovery,'state':state,'scanner_version':'V43.5 FULL DISCOVERY DIAGNOSTICS'}
         near=[w for w in watches if _v431_near_watch(price,w)]
         if not near:
             _v414_save_state(state)
-            return {'ok':True,'event':'WATCHING','watch_count':len(watches),'near_count':0,'xaus_price':price,'ohlc_requested':bool(discovery),'auto_discovery':discovery,'new_watches':len(discovery_new),'telegram':discovery_notices,'state':state,'scanner_version':'V43.4 HYBRID WATCH FIX'}
+            return {'ok':True,'event':'WATCHING','watch_count':len(watches),'near_count':0,'xaus_price':price,'ohlc_requested':bool(discovery),'auto_discovery':discovery,'new_watches':len(discovery_new),'telegram':discovery_notices,'state':state,'scanner_version':'V43.5 FULL DISCOVERY DIAGNOSTICS'}
         try: out=_v414_scan(None)
         except RuntimeError as e:
             state['last_data_wait']=str(e)[:800]; _v414_save_state(state)
-            return {'ok':True,'event':'DATA_WAIT','watch_count':len(watches),'near_count':len(near),'ohlc_requested':True,'auto_discovery':discovery,'state':state,'scanner_version':'V43.4 HYBRID WATCH FIX'}
+            return {'ok':True,'event':'DATA_WAIT','watch_count':len(watches),'near_count':len(near),'ohlc_requested':True,'auto_discovery':discovery,'state':state,'scanner_version':'V43.5 FULL DISCOVERY DIAGNOSTICS'}
         remaining=[]; events=[]; sent=list(discovery_notices); seen=set(state.get('last_alert_event_ids') or [])
         for w in watches:
             if w not in near:
@@ -3937,7 +3984,7 @@ def v431_monitor_tick(send_alerts=True):
                     sent.append({'id':w.get('opportunity_id'),'event':event,'telegram':res}); events.append({'id':w.get('opportunity_id'),'event':event})
                     if res.get('ok'): seen.add(eid)
         state['watched_opportunities']=remaining; state['last_alert_event_ids']=list(seen)[-100:]; state['last_market_price']=out.get('current_price'); _v414_save_state(state)
-        return {'ok':True,'event':'WATCH_UPDATE' if events else 'WATCHING','events':events,'telegram':sent,'watch_count':len(remaining),'near_count':len(near),'xaus_price':price,'ohlc_requested':True,'auto_discovery':discovery,'new_watches':len(discovery_new),'state':state,'scanner_version':'V43.4 HYBRID WATCH FIX'}
+        return {'ok':True,'event':'WATCH_UPDATE' if events else 'WATCHING','events':events,'telegram':sent,'watch_count':len(remaining),'near_count':len(near),'xaus_price':price,'ohlc_requested':True,'auto_discovery':discovery,'new_watches':len(discovery_new),'state':state,'scanner_version':'V43.5 FULL DISCOVERY DIAGNOSTICS'}
 
 # ================= V41.5 PASSIVE OBSERVABILITY LAYER =================
 # This layer MUST NOT change signal generation, grading, freshness, lifecycle, SL or TP decisions.
@@ -4105,8 +4152,10 @@ def v414_test_alert():
 @app.route('/api/alerts/status',methods=['GET'])
 def v414_alert_status():
     s=_v414_load_state()
-    return jsonify({'scanner_version':'V42.4 R0 MARKET DATA ENGINE','telegram_configured':bool((os.environ.get('TELEGRAM_BOT_TOKEN') or '').strip() and (os.environ.get('TELEGRAM_CHAT_ID') or V414_CHAT_ID).strip()),
-                    'auto_monitor_enabled':bool(s.get('user_auto_enabled', True)),'background_thread_enabled':V414_AUTO_ENABLED,'monitor_seconds':V414_MONITOR_SECONDS,'active_watch_count':len(s.get('watched_opportunities') or []),'state':s})
+    return jsonify({'scanner_version':'V43.5 FULL DISCOVERY DIAGNOSTICS','telegram_configured':bool((os.environ.get('TELEGRAM_BOT_TOKEN') or '').strip() and (os.environ.get('TELEGRAM_CHAT_ID') or V414_CHAT_ID).strip()),
+                    'auto_monitor_enabled':bool(s.get('user_auto_enabled', True)),'background_thread_enabled':V414_AUTO_ENABLED,'monitor_seconds':V414_MONITOR_SECONDS,'active_watch_count':len(s.get('watched_opportunities') or []),
+                    'last_tick':s.get('last_tick'),'last_auto_event':s.get('last_auto_event'),'last_auto_discovery_at':s.get('last_auto_discovery_at'),'last_auto_discovery_result':s.get('last_auto_discovery_result'),
+                    'last_xaus_status':s.get('last_xaus_status'),'last_xaus_price':s.get('last_xaus_price'),'last_data_wait':s.get('last_data_wait'),'last_error':s.get('last_error'),'state':s})
 
 
 @app.post('/api/alerts/toggle')
@@ -4131,7 +4180,7 @@ def v414_alert_toggle():
         _v414_save_state(state)
     return jsonify({'ok':True,'auto_monitor_enabled':enabled,'paused':not enabled,
                     'active_watch_count':len([w for w in (state.get('watched_opportunities') or []) if w.get('active')]),
-                    'scanner_version':'V43.4 HYBRID WATCH FIX'})
+                    'scanner_version':'V43.5 FULL DISCOVERY DIAGNOSTICS'})
 
 
 @app.get('/api/diagnostics/v415')
@@ -4182,6 +4231,21 @@ def _v423_scan_report_message(out):
     lines.append('This report is diagnostics, not a trade signal.')
     return '\n'.join(lines)
 
+
+@app.get('/api/diagnostics/v435')
+def v435_diagnostics():
+    secret=(os.environ.get('MONITOR_TICK_SECRET') or '').strip()
+    supplied=(request.headers.get('X-Monitor-Secret') or request.args.get('secret') or '').strip()
+    if secret and supplied!=secret:
+        return jsonify({'ok':False,'detail':'unauthorized'}),401
+    s=_v414_load_state(); last=s.get('v435_last_discovery') or {}; rolling=s.get('v435_rolling_funnel') or {}
+    health={'auto_enabled':bool(s.get('user_auto_enabled',True)),'last_tick':s.get('last_tick'),'last_auto_event':s.get('last_auto_event'),
+            'last_discovery':s.get('last_auto_discovery_at'),'last_discovery_result':s.get('last_auto_discovery_result'),
+            'xaus_status':s.get('last_xaus_status'),'xaus_price':s.get('last_xaus_price'),'data_wait':s.get('last_data_wait'),
+            'last_error':s.get('last_error'),'telegram_configured':bool((os.environ.get('TELEGRAM_BOT_TOKEN') or '').strip() and (os.environ.get('TELEGRAM_CHAT_ID') or V414_CHAT_ID).strip()),
+            'active_watches':len([w for w in (s.get('watched_opportunities') or []) if w.get('active')])}
+    return jsonify({'ok':True,'scanner_version':'V43.5 FULL DISCOVERY DIAGNOSTICS','health':health,'last_discovery':last,'rolling_funnel':rolling,
+                    'history':list(s.get('v435_discovery_history') or [])[-24:]})
 
 @app.post('/api/alerts/scan-report')
 def v423_scan_report():
