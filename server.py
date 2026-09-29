@@ -3889,22 +3889,48 @@ def _v435_record_discovery(out,state):
     return snap
 
 def _v441_point_key(c):
-    """Stable-ish key for deduplicating early location alerts across discovery cycles."""
+    """Canonical key for an early point. Exact key is secondary to fuzzy zone matching."""
     try:
-        lo=round(float(c.get('low')),2); hi=round(float(c.get('high')),2)
+        lo=round(float(c.get('low')),1); hi=round(float(c.get('high')),1)
     except (TypeError,ValueError):
         lo=str(c.get('low')); hi=str(c.get('high'))
-    return f"{str(c.get('side') or '').upper()}|{lo}|{hi}|{str(c.get('setup_family') or c.get('setup_type') or c.get('source') or 'HYBRID').upper()}"
+    fam=str(c.get('setup_family') or c.get('setup_type') or c.get('source') or 'HYBRID').upper()
+    return f"{str(c.get('side') or '').upper()}|{lo}|{hi}|{fam}"
+
+def _v442_same_point(a,b):
+    """Treat overlapping/near-identical rediscoveries as the same point, despite tiny zone drift."""
+    if str(a.get('side') or '').upper()!=str(b.get('side') or '').upper(): return False
+    af=str(a.get('setup_family') or a.get('setup_type') or a.get('source') or 'HYBRID').upper()
+    bf=str(b.get('setup_family') or b.get('setup_type') or b.get('source') or 'HYBRID').upper()
+    if af!=bf: return False
+    try:
+        alo,ahi=float(a.get('low')),float(a.get('high')); blo,bhi=float(b.get('low')),float(b.get('high'))
+    except (TypeError,ValueError): return False
+    # Overlap is the same point. Also absorb small boundary drift up to 25% of the wider zone (min $0.35).
+    if not (ahi < blo or bhi < alo): return True
+    gap=max(blo-ahi, alo-bhi, 0.0); tol=max(0.35, 0.25*max(ahi-alo,bhi-blo,0.1))
+    return gap <= tol
+
+def _v442_prune_point_history(state):
+    """Keep sent-point fingerprints for 24h so completed/failed zones cannot immediately spam again."""
+    now=datetime.now(timezone.utc); kept=[]
+    for x in (state.get('v442_sent_point_history') or []):
+        try:
+            t=datetime.fromisoformat(str(x.get('sent_at')).replace('Z','+00:00'))
+            if (now-t).total_seconds() <= 86400: kept.append(x)
+        except Exception:
+            continue
+    state['v442_sent_point_history']=kept[-500:]
+    return kept
 
 def _v441_early_points(out,state):
-    """Return newly discovered, still-ahead/at-price locations before WATCH/entry filtering."""
+    """Return only genuinely NEW early locations; rediscovered overlapping zones stay silent."""
     em=out.get('v42_early_map') or {}; rows=em.get('locations') or []
     cp=out.get('current_price')
     try: cp=float(cp)
     except (TypeError,ValueError): cp=None
-    seen=list(state.get('v441_early_point_ids') or [])[-300:]
-    seen_set=set(seen); new=[]; all_points=[]
-    now=datetime.now(timezone.utc).isoformat()
+    history=_v442_prune_point_history(state)
+    new=[]; all_points=[]; now=datetime.now(timezone.utc).isoformat()
     for c in rows:
         if c.get('monitor_eligible') is False: continue
         if str((c.get('failure_intelligence') or {}).get('state') or '').upper()=='FAILED': continue
@@ -3912,7 +3938,6 @@ def _v441_early_points(out,state):
         except (TypeError,ValueError): continue
         side=str(c.get('side') or '').upper()
         if side not in ('BUY','SELL'): continue
-        # Timing classification is based on where price is when the point is first seen.
         if cp is None: timing='UNKNOWN'
         elif lo <= cp <= hi: timing='ON_TIME_AT_AREA'
         elif (side=='BUY' and cp>hi) or (side=='SELL' and cp<lo): timing='EARLY_AHEAD'
@@ -3921,12 +3946,16 @@ def _v441_early_points(out,state):
                'setup_family':c.get('setup_family') or c.get('setup_type') or c.get('source') or 'Hybrid',
                'source':c.get('source'),'detected_at':now,'detected_price':cp,'timing':timing,
                'attention_tier':c.get('attention_tier'),'distance_m1_atr':c.get('distance_m1_atr_ahead')}
+        duplicate=next((h for h in history if _v442_same_point(point,h)),None)
+        point['notification_status']='SUPPRESSED_DUPLICATE' if duplicate else ('LATE_NO_ALERT' if timing=='LATE_OR_PASSED' else 'NEW')
         all_points.append(point)
-        # Do not send a misleading fresh alert for a point price has already passed.
-        if timing=='LATE_OR_PASSED': continue
-        if point['point_id'] not in seen_set:
-            new.append(point); seen.append(point['point_id']); seen_set.add(point['point_id'])
-    state['v441_early_point_ids']=seen[-300:]
+        if timing=='LATE_OR_PASSED' or duplicate: continue
+        new.append(point)
+        # Reserve immediately so multiple candidates in the same scan cannot duplicate one another.
+        history.append({'point_id':point['point_id'],'side':side,'low':lo,'high':hi,
+                        'setup_family':point['setup_family'],'source':point.get('source'),'sent_at':now})
+    state['v442_sent_point_history']=history[-500:]
+    state['v441_early_point_ids']=[x.get('point_id') for x in history[-300:] if x.get('point_id')]
     state['v441_last_detected_points']=all_points[:30]
     return new,all_points
 
@@ -3950,9 +3979,13 @@ def _v432_auto_discover(state,send_alerts=True):
     state=_v414_load_state()
     # _v431_discover_watches reload/save can overwrite our in-memory early-point state; restore it.
     early_ids=list(state.get('v441_early_point_ids') or [])
+    hist=list(state.get('v442_sent_point_history') or [])
     for p in early_new:
         if p.get('point_id') not in early_ids: early_ids.append(p.get('point_id'))
+        if not any(_v442_same_point(p,h) for h in hist):
+            hist.append({'point_id':p.get('point_id'),'side':p.get('side'),'low':p.get('low'),'high':p.get('high'),'setup_family':p.get('setup_family'),'source':p.get('source'),'sent_at':p.get('detected_at')})
     state['v441_early_point_ids']=early_ids[-300:]
+    state['v442_sent_point_history']=hist[-500:]
     state['v441_last_detected_points']=early_all[:30]
     state['last_auto_discovery_at']=datetime.now(timezone.utc).isoformat()
     state['last_auto_discovery_result']='EARLY_POINT_FOUND' if early_new else ('WATCH_FOUND' if watches else 'NO_TRADE')
@@ -4066,7 +4099,7 @@ def v431_monitor_tick(send_alerts=True):
             return {'ok':True,'event':'SCANNER_OFF','auto_monitor_enabled':False,
                     'watch_count':len([w for w in (state.get('watched_opportunities') or []) if w.get('active')]),
                     'ohlc_requested':False,'xaus_requested':False,'telegram':None,
-                    'state':state,'scanner_version':'V44.1 EARLY POINT ALERTS'}
+                    'state':state,'scanner_version':'V44.2 DEDUPED EARLY ALERTS'}
         discovery=None; discovery_new=[]; discovery_notices=[]
         if _v432_discovery_due(state):
             try:
@@ -4078,20 +4111,20 @@ def v431_monitor_tick(send_alerts=True):
                 _v414_save_state(state); discovery='DATA_WAIT'
         watches=[w for w in (state.get('watched_opportunities') or []) if w.get('active')]
         if not watches:
-            return {'ok':True,'event':'AUTO_DISCOVERY_NO_TRADE' if discovery else 'NO_ACTIVE_WATCH','watch_count':0,'ohlc_requested':bool(discovery),'auto_discovery':discovery,'new_watches':len(discovery_new),'telegram':discovery_notices,'state':state,'scanner_version':'V44.1 EARLY POINT ALERTS'}
+            return {'ok':True,'event':'AUTO_DISCOVERY_NO_TRADE' if discovery else 'NO_ACTIVE_WATCH','watch_count':0,'ohlc_requested':bool(discovery),'auto_discovery':discovery,'new_watches':len(discovery_new),'telegram':discovery_notices,'state':state,'scanner_version':'V44.2 DEDUPED EARLY ALERTS'}
         price,pstat,pmeta=fetch_xaus_spot()
         state['last_tick']=datetime.now(timezone.utc).isoformat(); state['last_xaus_price']=price; state['last_xaus_status']=pstat
         if price is None:
             _v414_save_state(state)
-            return {'ok':True,'event':'XAUS_WAIT','watch_count':len(watches),'ohlc_requested':bool(discovery),'auto_discovery':discovery,'state':state,'scanner_version':'V44.1 EARLY POINT ALERTS'}
+            return {'ok':True,'event':'XAUS_WAIT','watch_count':len(watches),'ohlc_requested':bool(discovery),'auto_discovery':discovery,'state':state,'scanner_version':'V44.2 DEDUPED EARLY ALERTS'}
         near=[w for w in watches if _v431_near_watch(price,w)]
         if not near:
             _v414_save_state(state)
-            return {'ok':True,'event':'WATCHING','watch_count':len(watches),'near_count':0,'xaus_price':price,'ohlc_requested':bool(discovery),'auto_discovery':discovery,'new_watches':len(discovery_new),'telegram':discovery_notices,'state':state,'scanner_version':'V44.1 EARLY POINT ALERTS'}
+            return {'ok':True,'event':'WATCHING','watch_count':len(watches),'near_count':0,'xaus_price':price,'ohlc_requested':bool(discovery),'auto_discovery':discovery,'new_watches':len(discovery_new),'telegram':discovery_notices,'state':state,'scanner_version':'V44.2 DEDUPED EARLY ALERTS'}
         try: out=_v414_scan(None)
         except RuntimeError as e:
             state['last_data_wait']=str(e)[:800]; _v414_save_state(state)
-            return {'ok':True,'event':'DATA_WAIT','watch_count':len(watches),'near_count':len(near),'ohlc_requested':True,'auto_discovery':discovery,'state':state,'scanner_version':'V44.1 EARLY POINT ALERTS'}
+            return {'ok':True,'event':'DATA_WAIT','watch_count':len(watches),'near_count':len(near),'ohlc_requested':True,'auto_discovery':discovery,'state':state,'scanner_version':'V44.2 DEDUPED EARLY ALERTS'}
         remaining=[]; events=[]; sent=list(discovery_notices); seen=set(state.get('last_alert_event_ids') or [])
         for w in watches:
             if w not in near:
@@ -4108,7 +4141,7 @@ def v431_monitor_tick(send_alerts=True):
                     sent.append({'id':w.get('opportunity_id'),'event':event,'telegram':res}); events.append({'id':w.get('opportunity_id'),'event':event})
                     if res.get('ok'): seen.add(eid)
         state['watched_opportunities']=remaining; state['last_alert_event_ids']=list(seen)[-100:]; state['last_market_price']=out.get('current_price'); _v414_save_state(state)
-        return {'ok':True,'event':'WATCH_UPDATE' if events else 'WATCHING','events':events,'telegram':sent,'watch_count':len(remaining),'near_count':len(near),'xaus_price':price,'ohlc_requested':True,'auto_discovery':discovery,'new_watches':len(discovery_new),'state':state,'scanner_version':'V44.1 EARLY POINT ALERTS'}
+        return {'ok':True,'event':'WATCH_UPDATE' if events else 'WATCHING','events':events,'telegram':sent,'watch_count':len(remaining),'near_count':len(near),'xaus_price':price,'ohlc_requested':True,'auto_discovery':discovery,'new_watches':len(discovery_new),'state':state,'scanner_version':'V44.2 DEDUPED EARLY ALERTS'}
 
 # ================= V41.5 PASSIVE OBSERVABILITY LAYER =================
 # This layer MUST NOT change signal generation, grading, freshness, lifecycle, SL or TP decisions.
@@ -4276,7 +4309,7 @@ def v414_test_alert():
 @app.route('/api/alerts/status',methods=['GET'])
 def v414_alert_status():
     s=_v414_load_state()
-    return jsonify({'scanner_version':'V44.1 EARLY POINT ALERTS','telegram_configured':bool((os.environ.get('TELEGRAM_BOT_TOKEN') or '').strip() and (os.environ.get('TELEGRAM_CHAT_ID') or V414_CHAT_ID).strip()),
+    return jsonify({'scanner_version':'V44.2 DEDUPED EARLY ALERTS','telegram_configured':bool((os.environ.get('TELEGRAM_BOT_TOKEN') or '').strip() and (os.environ.get('TELEGRAM_CHAT_ID') or V414_CHAT_ID).strip()),
                     'auto_monitor_enabled':bool(s.get('user_auto_enabled', True)),'background_thread_enabled':V414_AUTO_ENABLED,'monitor_seconds':V414_MONITOR_SECONDS,'active_watch_count':len(s.get('watched_opportunities') or []),
                     'last_tick':s.get('last_tick'),'last_auto_event':s.get('last_auto_event'),'last_auto_discovery_at':s.get('last_auto_discovery_at'),'last_auto_discovery_result':s.get('last_auto_discovery_result'),
                     'last_xaus_status':s.get('last_xaus_status'),'last_xaus_price':s.get('last_xaus_price'),'last_data_wait':s.get('last_data_wait'),'last_error':s.get('last_error'),'state':s})
@@ -4304,7 +4337,7 @@ def v414_alert_toggle():
         _v414_save_state(state)
     return jsonify({'ok':True,'auto_monitor_enabled':enabled,'paused':not enabled,
                     'active_watch_count':len([w for w in (state.get('watched_opportunities') or []) if w.get('active')]),
-                    'scanner_version':'V44.1 EARLY POINT ALERTS'})
+                    'scanner_version':'V44.2 DEDUPED EARLY ALERTS'})
 
 
 @app.get('/api/diagnostics/v415')
@@ -4368,7 +4401,7 @@ def v435_diagnostics():
             'xaus_status':s.get('last_xaus_status'),'xaus_price':s.get('last_xaus_price'),'data_wait':s.get('last_data_wait'),
             'last_error':s.get('last_error'),'telegram_configured':bool((os.environ.get('TELEGRAM_BOT_TOKEN') or '').strip() and (os.environ.get('TELEGRAM_CHAT_ID') or V414_CHAT_ID).strip()),
             'active_watches':len([w for w in (s.get('watched_opportunities') or []) if w.get('active')])}
-    return jsonify({'ok':True,'scanner_version':'V44.1 EARLY POINT ALERTS','health':health,'last_discovery':last,'rolling_funnel':rolling,
+    return jsonify({'ok':True,'scanner_version':'V44.2 DEDUPED EARLY ALERTS','health':health,'last_discovery':last,'rolling_funnel':rolling,
                     'history':list(s.get('v435_discovery_history') or [])[-24:]})
 
 @app.post('/api/alerts/scan-report')
