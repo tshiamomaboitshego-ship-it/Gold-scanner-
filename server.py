@@ -3077,7 +3077,7 @@ def live_scan():
         out=data_only_result(mtf,data_status,data_note,'NOT_USED_LIVE_DATA_MODE')
         out['mode']='LIVE_DATA_CONTEXT'
         out['gemini_status']='NOT_USED'
-        out['scanner_version']='V43.1 SMART MULTI-WATCH'
+        out['scanner_version']='V43.3 AUTO CONTROL'
         out['v43_contract']={'setup_routes':['PULLBACK','BREAK_RETEST','SWEEP_RECLAIM','CONSOLIDATION_BREAK'],'visible_lifecycle':['WATCH','ARMED','TRIGGERED'],'internal_lock_preserved':True,'entry_rule':'TRIGGERED requires closed-M1 confirmation; WATCH/ARMED are not entries.'}
         out['market_context']=market_context
         out['event_risk']=market_context.get('event_risk','UNKNOWN')
@@ -3547,7 +3547,7 @@ def _v414_scan(locked=None):
     out['mode']='LIVE_DATA_CONTEXT'; out['gemini_status']='NOT_USED'; out['scanner_version']='V41.4 AUTOMATIC OPPORTUNITY ALERTS'
     out['market_context']=market_context; out['event_risk']=market_context.get('event_risk','UNKNOWN')
     out['v42_early_map']=v42_early_location_map(out)
-    out['scanner_version']='V43.1 SMART MULTI-WATCH'
+    out['scanner_version']='V43.3 AUTO CONTROL'
     out['v43_contract']={'setup_routes':['PULLBACK','BREAK_RETEST','SWEEP_RECLAIM','CONSOLIDATION_BREAK'],'visible_lifecycle':['WATCH','ARMED','TRIGGERED'],'internal_lock_preserved':True,'entry_rule':'TRIGGERED requires closed-M1 confirmation; WATCH/ARMED are not entries.'}
     return out
 
@@ -3759,6 +3759,38 @@ def _v414_message(event, lock, opp):
 # ================= V43.1 MULTI-WATCH OPPORTUNITY MONITOR =================
 V431_MAX_WATCHES=max(1,min(8,int(os.environ.get('V431_MAX_WATCHES','5') or 5)))
 V431_WAKE_ATR=max(0.5,min(3.0,float(os.environ.get('V431_WAKE_ATR','1.5') or 1.5)))
+V432_DISCOVERY_SECONDS=max(180,min(1800,int(os.environ.get('V432_DISCOVERY_SECONDS','300') or 300)))
+
+def _v432_discovery_due(state):
+    raw=state.get('last_auto_discovery_at')
+    if not raw: return True
+    try:
+        dt=datetime.fromisoformat(str(raw).replace('Z','+00:00'))
+        if dt.tzinfo is None: dt=dt.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc)-dt).total_seconds() >= V432_DISCOVERY_SECONDS
+    except Exception:
+        return True
+
+def _v432_auto_discover(state,send_alerts=True):
+    """Run one shared OHLC discovery scan, merge new WATCHes, and notify only genuinely new IDs."""
+    before={w.get('opportunity_id') for w in (state.get('watched_opportunities') or []) if w.get('active')}
+    out=_v414_scan(None)
+    watches=_v431_discover_watches(out,state,preserve_existing=True)
+    state=_v414_load_state()
+    state['last_auto_discovery_at']=datetime.now(timezone.utc).isoformat()
+    state['last_auto_discovery_result']='WATCH_FOUND' if watches else 'NO_TRADE'
+    new=[w for w in watches if w.get('opportunity_id') not in before]
+    notices=[]
+    for w in new:
+        msg=(f"👀 NEW WATCH — {str(w.get('side') or '').upper()}\n"
+             f"Setup: {w.get('setup_family') or w.get('source') or 'Hybrid'}\n"
+             f"Area: {w.get('low')}–{w.get('high')}\n"
+             f"Status: WATCH — monitoring automatically\n"
+             f"Not an entry. Waiting for ARMED/confirmation.")
+        res=_v414_telegram(msg) if send_alerts else {'ok':False,'detail':'alerts disabled'}
+        notices.append({'id':w.get('opportunity_id'),'telegram':res})
+    _v414_save_state(state)
+    return out,watches,new,notices
 
 def _v431_overlap(a,b):
     if str(a.get('side')).upper()!=str(b.get('side')).upper(): return False
@@ -3767,10 +3799,15 @@ def _v431_overlap(a,b):
     except (TypeError,ValueError): return False
     return not (ahi < blo or bhi < alo)
 
-def _v431_discover_watches(out,state):
-    """Save up to V431_MAX_WATCHES distinct nearby, valid opportunities from ONE manual discovery scan."""
+def _v431_discover_watches(out,state,preserve_existing=False):
+    """Save distinct nearby valid opportunities. Auto discovery can merge without replacing active WATCHes."""
     em=out.get('v42_early_map') or {}; rows=em.get('locations') or []
     candidates=[]
+    if preserve_existing:
+        for old in (state.get('watched_opportunities') or []):
+            if old.get('active') and str(old.get('status') or '').upper() not in ('TP2_HIT','STOPPED','INVALIDATED','EXPIRED','MISSED','DATA_STALE'):
+                candidates.append(old)
+                if len(candidates)>=V431_MAX_WATCHES: break
     for c in rows:
         grade=str((c.get('selective_grade') or {}).get('grade') or '').upper()
         if c.get('lifecycle_stage') not in ('WATCH','LOCK_ELIGIBLE'): continue
@@ -3818,46 +3855,61 @@ def _v431_near_watch(price,w):
     return dist <= V431_WAKE_ATR*max(atr,0.1)
 
 def v431_monitor_tick(send_alerts=True):
-    """Cheap XAUS proximity tick; ONE OHLC scan only when any saved WATCH is near."""
+    """V43.2: cron does cheap XAUS monitoring every tick and a shared OHLC discovery scan every ~5 minutes."""
     with _v414_monitor_lock:
-        state=_v414_load_state(); watches=[w for w in (state.get('watched_opportunities') or []) if w.get('active')]
+        state=_v414_load_state()
+        # V43.3 master switch: OFF exits before XAUS, Twelve Data, discovery, or Telegram.
+        # Saved WATCH opportunities are preserved and resume when AUTO is turned back ON.
+        if state.get('user_auto_enabled', True) is False:
+            state['last_tick']=datetime.now(timezone.utc).isoformat()
+            state['last_auto_event']='SCANNER_OFF'
+            _v414_save_state(state)
+            return {'ok':True,'event':'SCANNER_OFF','auto_monitor_enabled':False,
+                    'watch_count':len([w for w in (state.get('watched_opportunities') or []) if w.get('active')]),
+                    'ohlc_requested':False,'xaus_requested':False,'telegram':None,
+                    'state':state,'scanner_version':'V43.3 AUTO CONTROL'}
+        discovery=None; discovery_new=[]; discovery_notices=[]
+        if _v432_discovery_due(state):
+            try:
+                _,_,discovery_new,discovery_notices=_v432_auto_discover(state,send_alerts=send_alerts)
+                state=_v414_load_state(); discovery='WATCH_FOUND' if discovery_new else 'SCANNED'
+            except RuntimeError as e:
+                state['last_auto_discovery_at']=datetime.now(timezone.utc).isoformat()
+                state['last_auto_discovery_result']='DATA_WAIT'; state['last_data_wait']=str(e)[:800]
+                _v414_save_state(state); discovery='DATA_WAIT'
+        watches=[w for w in (state.get('watched_opportunities') or []) if w.get('active')]
         if not watches:
-            return {'ok':True,'event':'NO_ACTIVE_WATCH','watch_count':0,'ohlc_requested':False,'state':state,'scanner_version':'V43.1 SMART MULTI-WATCH'}
+            return {'ok':True,'event':'AUTO_DISCOVERY_NO_TRADE' if discovery else 'NO_ACTIVE_WATCH','watch_count':0,'ohlc_requested':bool(discovery),'auto_discovery':discovery,'new_watches':len(discovery_new),'telegram':discovery_notices,'state':state,'scanner_version':'V43.3 AUTO CONTROL'}
         price,pstat,pmeta=fetch_xaus_spot()
         state['last_tick']=datetime.now(timezone.utc).isoformat(); state['last_xaus_price']=price; state['last_xaus_status']=pstat
         if price is None:
             _v414_save_state(state)
-            return {'ok':True,'event':'XAUS_WAIT','watch_count':len(watches),'ohlc_requested':False,'state':state,'scanner_version':'V43.1 SMART MULTI-WATCH'}
+            return {'ok':True,'event':'XAUS_WAIT','watch_count':len(watches),'ohlc_requested':bool(discovery),'auto_discovery':discovery,'state':state,'scanner_version':'V43.3 AUTO CONTROL'}
         near=[w for w in watches if _v431_near_watch(price,w)]
         if not near:
             _v414_save_state(state)
-            return {'ok':True,'event':'WATCHING','watch_count':len(watches),'near_count':0,'xaus_price':price,'ohlc_requested':False,'state':state,'scanner_version':'V43.1 SMART MULTI-WATCH'}
+            return {'ok':True,'event':'WATCHING','watch_count':len(watches),'near_count':0,'xaus_price':price,'ohlc_requested':bool(discovery),'auto_discovery':discovery,'new_watches':len(discovery_new),'telegram':discovery_notices,'state':state,'scanner_version':'V43.3 AUTO CONTROL'}
         try: out=_v414_scan(None)
         except RuntimeError as e:
             state['last_data_wait']=str(e)[:800]; _v414_save_state(state)
-            return {'ok':True,'event':'DATA_WAIT','watch_count':len(watches),'near_count':len(near),'ohlc_requested':True,'state':state,'scanner_version':'V43.1 SMART MULTI-WATCH'}
-        remaining=[]; events=[]; sent=[]; seen=set(state.get('last_alert_event_ids') or [])
+            return {'ok':True,'event':'DATA_WAIT','watch_count':len(watches),'near_count':len(near),'ohlc_requested':True,'auto_discovery':discovery,'state':state,'scanner_version':'V43.3 AUTO CONTROL'}
+        remaining=[]; events=[]; sent=list(discovery_notices); seen=set(state.get('last_alert_event_ids') or [])
         for w in watches:
             if w not in near:
                 remaining.append(w); continue
             status,w,tracked=_v431_status_from_tracker(out,w)
             event=status if status in ('ARMED','TRIGGERED','TP1_HIT','TP2_HIT','STOPPED','INVALIDATED','EXPIRED','MISSED') else None
-            if event=='TRIGGERED':
-                event,w=_v414_trigger_freshness(out,event,w)
+            if event=='TRIGGERED': event,w=_v414_trigger_freshness(out,event,w)
             terminal=event in ('TP2_HIT','STOPPED','INVALIDATED','EXPIRED','MISSED','DATA_STALE')
             if not terminal: remaining.append(w)
             if event:
                 eid=f"{w.get('opportunity_id')}::{event}"
                 if eid not in seen:
-                    msg=_v414_message(event,w,tracked)
-                    res=_v414_telegram(msg) if send_alerts else {'ok':False,'detail':'alerts disabled'}
+                    msg=_v414_message(event,w,tracked); res=_v414_telegram(msg) if send_alerts else {'ok':False,'detail':'alerts disabled'}
                     sent.append({'id':w.get('opportunity_id'),'event':event,'telegram':res}); events.append({'id':w.get('opportunity_id'),'event':event})
                     if res.get('ok'): seen.add(eid)
-        state['watched_opportunities']=remaining; state['last_alert_event_ids']=list(seen)[-100:]
-        state['last_market_price']=out.get('current_price'); _v414_save_state(state)
-        return {'ok':True,'event':'WATCH_UPDATE' if events else 'WATCHING','events':events,'telegram':sent,
-                'watch_count':len(remaining),'near_count':len(near),'xaus_price':price,'ohlc_requested':True,
-                'state':state,'scanner_version':'V43.1 SMART MULTI-WATCH'}
+        state['watched_opportunities']=remaining; state['last_alert_event_ids']=list(seen)[-100:]; state['last_market_price']=out.get('current_price'); _v414_save_state(state)
+        return {'ok':True,'event':'WATCH_UPDATE' if events else 'WATCHING','events':events,'telegram':sent,'watch_count':len(remaining),'near_count':len(near),'xaus_price':price,'ohlc_requested':True,'auto_discovery':discovery,'new_watches':len(discovery_new),'state':state,'scanner_version':'V43.3 AUTO CONTROL'}
 
 # ================= V41.5 PASSIVE OBSERVABILITY LAYER =================
 # This layer MUST NOT change signal generation, grading, freshness, lifecycle, SL or TP decisions.
@@ -4042,13 +4094,16 @@ def v414_alert_toggle():
         state=_v414_load_state(); state['user_auto_enabled']=enabled
         state['auto_changed_at']=datetime.now(timezone.utc).isoformat()
         if not enabled:
-            # OFF means OFF: discard active lifecycle so ON always starts with a fresh opportunity.
-            state['locked_opportunity']=None; state['watched_opportunities']=[]; state['last_alert_status']=None; state['last_alert_event_id']=None
+            # Pause only. Preserve active WATCH opportunities so AUTO ON can resume them.
+            state['paused_watch_count']=len([w for w in (state.get('watched_opportunities') or []) if w.get('active')])
+            state['last_auto_event']='SCANNER_OFF'
         else:
-            state['locked_opportunity']=None; state['last_alert_status']=None; state['last_alert_event_id']=None
-            state['enabled_fresh_start_at']=datetime.now(timezone.utc).isoformat()
+            state['enabled_resume_at']=datetime.now(timezone.utc).isoformat()
+            state['last_auto_event']='SCANNER_ON'
         _v414_save_state(state)
-    return jsonify({'ok':True,'auto_monitor_enabled':enabled,'fresh_start':True})
+    return jsonify({'ok':True,'auto_monitor_enabled':enabled,'paused':not enabled,
+                    'active_watch_count':len([w for w in (state.get('watched_opportunities') or []) if w.get('active')]),
+                    'scanner_version':'V43.3 AUTO CONTROL'})
 
 
 @app.get('/api/diagnostics/v415')
@@ -4127,7 +4182,7 @@ def v423_scan_report():
 
 @app.post('/api/alerts/tick')
 def v414_alert_tick():
-    # V43.1 smart monitor: cron checks XAUS cheaply; OHLC is requested only when a saved WATCH is near.
+    # V43.2 automatic hybrid: cron checks XAUS each tick, auto-discovers about every 5m, and manages WATCH lifecycle.
     # Optional shared secret protects externally scheduled ticks when configured.
     secret=(os.environ.get('MONITOR_TICK_SECRET') or '').strip()
     supplied=(request.headers.get('X-Monitor-Secret') or request.args.get('secret') or '').strip()
