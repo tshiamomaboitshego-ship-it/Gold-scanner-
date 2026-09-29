@@ -2927,6 +2927,29 @@ def test_gold_api():
     return jsonify({'ok':False,'provider':'Gold API','symbol':'XAU','used_by_scanner':False,
                     'errors':errors,'note':'Gold API test failed. V42 trading/data logic was not changed.'}),502
 
+
+@app.get('/api/test-xaus')
+def test_xaus():
+    """Connectivity-only XAUS test. Never feeds trading logic."""
+    url = 'https://xaus.com/api/v1/spot?compact=1'
+    try:
+        req=urllib.request.Request(url, headers={'User-Agent':'GoldScanner-V42.4/1.0','Accept':'application/json'})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            raw=resp.read().decode('utf-8','replace')
+            data=json.loads(raw)
+            price=data.get('spot_usd_oz') if isinstance(data,dict) else None
+            state=data.get('data_state') or {} if isinstance(data,dict) else {}
+            return jsonify({'ok':True,'provider':'XAUS','symbol':'XAUUSD','price':price,
+                            'http_status':getattr(resp,'status',200),'endpoint':url,
+                            'data_state':state,'updated_at':data.get('updated_at') if isinstance(data,dict) else None,
+                            'price_as_of':data.get('price_as_of') if isinstance(data,dict) else None,
+                            'stale':data.get('stale') if isinstance(data,dict) else None,
+                            'used_by_scanner':False,
+                            'note':'Connectivity test only. Compare this indicative spot price with XM/MT5 before integration.'})
+    except Exception as e:
+        return jsonify({'ok':False,'provider':'XAUS','symbol':'XAUUSD','used_by_scanner':False,
+                        'error':str(e)[:500],'note':'XAUS test failed. V42 trading/data logic was not changed.'}),502
+
 @app.route('/api/live-scan', methods=['GET','POST'])
 def live_scan():
     """Screenshot-free live XAU/USD scan. Twelve Data + deterministic Python only; zero Gemini calls."""
