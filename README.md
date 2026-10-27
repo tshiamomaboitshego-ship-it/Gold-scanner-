@@ -1,24 +1,24 @@
-# Gold Scanner V42 — Early Location Intelligence
+# Gold Lunar & Astrology Research Lab
 
-V42 changes the scanner architecture from late discovery toward **MAP → LOCK → WAIT → REACT → CONFIRM → TRIGGER**.
+A separate, phone-friendly research dashboard for XAUUSD. It does not generate BUY/SELL signals or place trades and does not modify the existing Gold Scanner / Telegram bot.
 
-## What changed
-- Maps ranked M1 structural locations while they are still ahead of live price.
-- A mapped location is **not an entry**. A/A+ location evidence may be locked early, then the existing lifecycle waits for price interaction and closed-M1 reaction/confirmation.
-- Existing V41.5 lifecycle, structural SL/TP, stale-trigger guard, Telegram, automatic ON/OFF control, caching/rate-limit protections and observability are retained.
-- Adds a visible V42 Early Location Map to the phone UI.
-- Adds a visible Live Scanner Diagnostics panel with a refresh button. It shows feed age, regime, candidate funnel, rejection reasons, mapped-ahead count and current lifecycle state.
-- Manual live scans also show the V42 early map.
+## Features
+- Swiss Ephemeris Moshier calculations for current tropical geocentric planetary positions.
+- Calculated new moon, first quarter, full moon and last quarter dates.
+- Planetary aspects within a 3-degree orb.
+- Exploratory historical daily XAUUSD return comparisons following lunar phase events, with cautious historical-bias labels when a minimum sample and simple consistency thresholds are met.
+- Optional historical daily close chart.
+- SAST (Africa/Johannesburg) display in the browser; astronomy events are calculated in UTC.
 
-## Important
-Evidence grades rank rule-based evidence; they are not probabilities or guarantees. LOCKED means a location is being watched, not that a trade should be entered. TRIGGERED remains the scanner's entry-qualified lifecycle event.
+## Deploy as a separate Render web service
+1. Upload this folder to a **new GitHub repository**. Do not replace the current gold-scanner repository.
+2. In Render, create a new Web Service from the new repository.
+3. Render should detect `render.yaml`, or configure build command `pip install -r requirements.txt` and start command `gunicorn app:app --workers 1 --threads 4 --timeout 120`.
+4. Open the service URL on the phone. Use browser menu → Add to Home screen if desired.
 
-## Deploy
-Use the same Render service and environment variables as V41.5. Keep `TELEGRAM_BOT_TOKEN` private. Keep the same `MONITOR_TICK_SECRET` and cron POST endpoint `/api/alerts/tick`. No new paid API is required.
-
-## Diagnostics
-On the scanner page tap **REFRESH LIVE DIAGNOSTICS**. The browser asks for the existing Monitor Secret if it is not already stored locally. Do not share that secret.
-
-
-## V42.3 Context Intelligence Suite
-Adds seven coordinated intelligence layers: proximity, passive market regime, price path, location strength, reaction, liquidity/obstacle, and failure intelligence. These layers rank/map/monitor opportunities; they do not turn weak locations into trades. Final TRIGGERED confirmation remains strict and closed-M1 based.
+## Data and limitations
+- Astronomy: `pyswisseph` with the built-in Moshier ephemeris, so a separate ephemeris file is not needed.
+- Historical gold: Yahoo Finance ticker `XAUUSD=X` via `yfinance`; availability, coverage, timestamps and prices are controlled by the provider and may be delayed or fail. The first history request can take a while.
+- Phase-event return tests match the event to the next available daily close. This approximation can shift timing around weekends/holidays. The comparison is exploratory and is not a causal test or evidence of a tradable edge.
+- No API keys, broker credentials, Telegram token, order placement, or automated trade execution are required.
+- The dashboard is a standalone research tool; the existing V44.4 scanner/Telegram code is left unchanged.
