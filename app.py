@@ -2,7 +2,7 @@ from flask import Flask, jsonify, render_template, request
 from datetime import datetime, timedelta, timezone, date
 import math, threading, time
 
-app = Flask(__name__)
+app = Flask(__name__, template_folder=".")
 UTC = timezone.utc
 DATA_LOCK = threading.Lock()
 GOLD_CACHE = {"at": 0, "frame": None, "error": None}
